@@ -740,6 +740,81 @@ describe('graph-tools', () => {
       const payload = JSON.parse(result.content[0].text);
       expect(payload.error).toMatch(/relative Microsoft Graph path/);
     });
+
+    it('refuses oversized inline content and points to get-download-url (broker enabled)', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const prev = process.env.MS365_MCP_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      try {
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  contentType: 'application/pdf',
+                  encoding: 'base64',
+                  contentLength: 5 * 1024 * 1024,
+                  contentBytes: 'eA==',
+                }),
+              },
+            ],
+          }),
+        };
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const tool = server.tools.get('download-bytes');
+        const result = await tool!.handler({ target: '/drives/d1/items/i1/content' });
+
+        expect(result.isError).toBe(true);
+        const payload = JSON.parse(result.content[0].text);
+        expect(payload.error).toMatch(/get-download-url/);
+        expect(payload.contentLength).toBe(5 * 1024 * 1024);
+      } finally {
+        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = prev;
+      }
+    });
+
+    it('passes oversized content through when the broker is disabled (no dead-end)', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const prev = process.env.MS365_MCP_PUBLIC_URL;
+      delete process.env.MS365_MCP_PUBLIC_URL;
+      try {
+        const big = {
+          contentType: 'application/pdf',
+          encoding: 'base64',
+          contentLength: 5 * 1024 * 1024,
+          contentBytes: 'eA==',
+        };
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [{ type: 'text', text: JSON.stringify(big) }],
+          }),
+        };
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const tool = server.tools.get('download-bytes');
+        const result = await tool!.handler({ target: '/drives/d1/items/i1/content' });
+
+        expect(result.isError).toBeFalsy();
+        const payload = JSON.parse(result.content[0].text);
+        expect(payload.contentBytes).toBe('eA==');
+      } finally {
+        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = prev;
+      }
+    });
   });
 
   // ---- 9b. get-download-url utility tool ----
@@ -805,7 +880,7 @@ describe('graph-tools', () => {
       expect(result.isError).toBe(true);
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.error).toMatch(/do not expose a pre-authenticated download URL/);
+      expect(payload.error).toMatch(/pre-authenticated download URL/);
     });
 
     it('errors when the resource exposes no downloadUrl', async () => {
@@ -888,6 +963,52 @@ describe('graph-tools', () => {
       expect(result.isError).toBeFalsy();
       const payload = JSON.parse(result.content[0].text);
       expect(payload.downloadUrl).toBe(downloadUrl);
+    });
+
+    it('brokers a mail attachment to a tokenless URL when the broker is enabled', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const prev = process.env.MS365_MCP_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      try {
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  contentType: 'application/pdf',
+                  encoding: 'base64',
+                  contentLength: 3,
+                  contentBytes: Buffer.from('PDF').toString('base64'),
+                }),
+              },
+            ],
+          }),
+        };
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const tool = server.tools.get('get-download-url');
+        const result = await tool!.handler({
+          target: '/me/messages/m1/attachments/a1/$value',
+        });
+
+        // It fetches the raw /$value bytes server-side ...
+        const [fetchPath] = graphClient.graphRequest.mock.calls[0];
+        expect(fetchPath).toBe('/me/messages/m1/attachments/a1/$value');
+        // ... and returns a tokenless broker URL on the configured public origin.
+        const payload = JSON.parse(result.content[0].text);
+        expect(payload.brokered).toBe(true);
+        expect(payload.contentType).toBe('application/pdf');
+        expect(payload.downloadUrl).toMatch(/^https:\/\/mcp\.example\.com\/download\/[A-Za-z0-9_-]+$/);
+      } finally {
+        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = prev;
+      }
     });
   });
 
