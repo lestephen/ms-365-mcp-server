@@ -15,6 +15,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import { getRequestTokens } from './request-context.js';
+import { isBrokerEnabled, mintDownloadUrl } from './attachment-broker.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 export interface DiscoverySearchIndex {
@@ -184,6 +185,16 @@ function formatDisabledToolsForLog(disabledTools: DisabledToolScope[]): string {
   return `${shown.join('; ')}${suffix}`;
 }
 
+const DEFAULT_DOWNLOAD_BYTES_MAX_INLINE = 256 * 1024;
+
+/** Inline-size backstop for download-bytes, in bytes. 0 disables the guard. */
+function downloadBytesMaxInline(): number {
+  const raw = process.env.MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE;
+  if (raw === undefined || raw === '') return DEFAULT_DOWNLOAD_BYTES_MAX_INLINE;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_DOWNLOAD_BYTES_MAX_INLINE;
+}
+
 /**
  * In OAuth/HTTP bearer mode the `account` parameter cannot switch identities —
  * every Graph call uses the connecting client's bearer token. Previously a
@@ -316,7 +327,51 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         if (authManager && !authManager.isOAuthModeEnabled() && !getRequestTokens()) {
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
-        return await graphClient.graphRequest(target, { accessToken: accountAccessToken });
+        const response = await graphClient.graphRequest(target, {
+          accessToken: accountAccessToken,
+        });
+        if (response?.isError) {
+          return response;
+        }
+        // Size backstop: above the inline limit, refuse to return a huge base64 blob (which
+        // blows up / gets truncated in the agent context) and point to get-download-url for an
+        // out-of-band fetch instead. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to disable.
+        // Only enforced when the broker is configured — otherwise get-download-url has no
+        // out-of-band path for /$value resources and redirecting would be a dead end, so we
+        // fall through and return the bytes as before.
+        const maxInline = isBrokerEnabled() ? downloadBytesMaxInline() : 0;
+        if (maxInline > 0) {
+          const text = response?.content?.[0]?.text;
+          if (typeof text === 'string') {
+            try {
+              const payload = JSON.parse(text) as Record<string, unknown>;
+              const len =
+                typeof payload.contentLength === 'number'
+                  ? payload.contentLength
+                  : typeof payload.contentBytes === 'string'
+                    ? Math.floor((payload.contentBytes.length * 3) / 4)
+                    : undefined;
+              if (typeof len === 'number' && len > maxInline) {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify({
+                        error: `Content is ${len} bytes, above the inline limit of ${maxInline} (MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE). Use get-download-url to fetch it out-of-band instead of base64 through the agent context.`,
+                        contentLength: len,
+                        contentType: payload.contentType,
+                      }),
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+            } catch {
+              // Not the JSON binary shape — pass the response through unchanged.
+            }
+          }
+        }
+        return response;
       } catch (error) {
         return {
           content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
@@ -330,7 +385,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     method: 'GET',
     path: 'tool:get-download-url',
     description:
-      'Resolve a short-lived, pre-authenticated download URL for Microsoft Graph binary content that exposes one (drive/SharePoint file content, meeting recordings). The returned URL streams the bytes with NO Authorization header, so the client can fetch it straight to disk (e.g. curl) without round-tripping base64 through the agent context. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType? }. NOTE: mail file attachments (/messages/{id}/attachments/{id}/$value) do NOT expose a pre-authenticated URL — Graph offers no such link for them; use download-bytes for small ones.',
+      'Resolve a short-lived, pre-authenticated download URL for Microsoft Graph binary content that exposes one (drive/SharePoint file content, meeting recordings). The returned URL streams the bytes with NO Authorization header, so the client can fetch it straight to disk (e.g. curl) without round-tripping base64 through the agent context. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType? }. Mail file attachments and other /$value byte endpoints do NOT expose a native pre-authenticated URL in Graph; when the out-of-band broker is configured the bytes are fetched server-side and served via a short-lived tokenless broker URL instead (otherwise use download-bytes).',
     readOnlyHint: true,
     openWorldHint: true,
     buildSchema: (ctx) => {
@@ -388,47 +443,89 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       const queryIdx = target.indexOf('?');
       const query = queryIdx >= 0 ? target.slice(queryIdx) : '';
       const pathPart = (queryIdx >= 0 ? target.slice(0, queryIdx) : target).replace(/\/+$/, '');
-      // Mail/event attachments expose no pre-authenticated download URL in Graph; bytes come
-      // only from base64 contentBytes or the authenticated /$value endpoint (use download-bytes).
       // Match the specific mail/event attachment shape so drive folders literally named
-      // "attachments" are not falsely rejected.
-      if (/\/(messages|events)\/[^/]+\/attachments\//.test(pathPart)) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'Mail file attachments do not expose a pre-authenticated download URL. Use download-bytes for small attachments.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
-      // Other /$value byte endpoints (profile photo, Teams hosted content) likewise have no URL.
-      if (pathPart.endsWith('/$value')) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  '$value byte endpoints do not expose a pre-authenticated download URL. Use download-bytes to read these bytes.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
-      // The downloadUrl lives on the driveItem metadata, not the /content sub-path.
-      const itemPath =
-        (pathPart.endsWith('/content') ? pathPart.slice(0, -'/content'.length) : pathPart) + query;
+      // "attachments" are not falsely treated as mail attachments.
+      const isMailAttachment = /\/(messages|events)\/[^/]+\/attachments\//.test(pathPart);
+      const isValueEndpoint = pathPart.endsWith('/$value');
       try {
         let accountAccessToken: string | undefined;
         if (authManager && !authManager.isOAuthModeEnabled() && !getRequestTokens()) {
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
+
+        // Mail attachments and other /$value byte endpoints expose NO native pre-authenticated
+        // URL in Graph (bytes come only from base64 contentBytes or the authenticated /$value
+        // endpoint). If the out-of-band broker is configured (HTTP mode with a public base URL),
+        // fetch the bytes server-side and hand back a short-lived tokenless URL; otherwise there
+        // is no out-of-band path, so point the caller at download-bytes.
+        if (isMailAttachment || isValueEndpoint) {
+          if (!isBrokerEnabled()) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error:
+                      'This resource does not expose a pre-authenticated download URL and the out-of-band broker is not configured. Use download-bytes to read these bytes.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const fetchPath = (isValueEndpoint ? pathPart : `${pathPart}/$value`) + query;
+          const byteResponse = await graphClient.graphRequest(fetchPath, {
+            accessToken: accountAccessToken,
+          });
+          if (byteResponse?.isError) {
+            return byteResponse;
+          }
+          const byteText = byteResponse?.content?.[0]?.text;
+          let bytePayload: Record<string, unknown> | undefined;
+          if (typeof byteText === 'string') {
+            try {
+              bytePayload = JSON.parse(byteText);
+            } catch {
+              bytePayload = undefined;
+            }
+          }
+          const contentBytes = bytePayload?.contentBytes;
+          if (typeof contentBytes !== 'string') {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'Expected base64 byte content from Microsoft Graph but received none.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const bytes = Buffer.from(contentBytes, 'base64');
+          const contentType =
+            (bytePayload?.contentType as string | undefined) ?? 'application/octet-stream';
+          const downloadUrl = mintDownloadUrl({
+            bytes,
+            contentType,
+            userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
+            resourcePath: fetchPath,
+          });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({ downloadUrl, size: bytes.length, contentType, brokered: true }),
+              },
+            ],
+          };
+        }
+
+        // Native pre-authenticated URL (drive/SharePoint items, recordings). The downloadUrl
+        // lives on the driveItem metadata, not the /content sub-path.
+        const itemPath =
+          (pathPart.endsWith('/content') ? pathPart.slice(0, -'/content'.length) : pathPart) + query;
         const response = await graphClient.graphRequest(itemPath, {
           accessToken: accountAccessToken,
         });

@@ -90,6 +90,10 @@ export interface AuditEvent {
   target_resource?: { type: string; id?: string };
   error_type?: string;
   error_code?: string | number;
+  // Best-effort network attribution for tokenless redemption paths (the redeemer's
+  // identity is unknown; user_principal_name records the minting/request context).
+  source_ip?: string;
+  user_agent?: string;
 }
 
 export function isAuditLogEnabled(): boolean {

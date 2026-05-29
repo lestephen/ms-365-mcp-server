@@ -31,6 +31,7 @@ import { requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
 import crypto from 'node:crypto';
 import OboClient from './obo-client.js';
+import { downloadRouteHandler, isBrokerEnabled } from './attachment-broker.js';
 
 /**
  * Parse HTTP option into host and port components.
@@ -776,6 +777,14 @@ class MicrosoftGraphServer {
           }
         }
       );
+
+      // Out-of-band binary broker (ms365-mcp#5, Tier 2): tokenless pull of bytes
+      // that get-download-url fetched and held under a short-lived capability handle.
+      // Intentionally NOT behind mcpAuth — the unguessable handle IS the capability.
+      if (isBrokerEnabled()) {
+        app.get('/download/:handle', downloadRouteHandler);
+        logger.info('Attachment broker enabled: GET /download/:handle');
+      }
 
       // Health check endpoint
       app.get('/', (req, res) => {
