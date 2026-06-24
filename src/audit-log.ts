@@ -90,6 +90,8 @@ export interface AuditEvent {
   target_resource?: { type: string; id?: string };
   error_type?: string;
   error_code?: string | number;
+  source_ip?: string;
+  user_agent?: string;
 }
 
 export function isAuditLogEnabled(): boolean {
