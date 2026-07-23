@@ -48,6 +48,12 @@ export interface CapabilityBuildInput {
   };
   /** Delegated scopes from the session `scp` claim. */
   delegatedScopes: string[];
+  /**
+   * Whether Exchange resolved the shared recipient to a real directory object
+   * id. A false here forces a negative proof: readiness is never true for an
+   * unresolved recipient (whose recipientId would be a placeholder).
+   */
+  recipientResolved: boolean;
   /** Whether Exchange currently grants SendAs to the signed-in user. */
   sendAsGranted: boolean;
   /** Structural registration facts for the draft operations. */
@@ -151,7 +157,11 @@ export function buildSharedDraftCapabilityProof(
     input.operations.getDownloadUrl;
 
   const ready =
-    input.sendAsGranted && hasDraftScope && operationsComplete && !input.sendOperationExposed;
+    input.recipientResolved &&
+    input.sendAsGranted &&
+    hasDraftScope &&
+    operationsComplete &&
+    !input.sendOperationExposed;
 
   const trusteeObjectId = lowerSafe(input.signedInUser.objectId);
 

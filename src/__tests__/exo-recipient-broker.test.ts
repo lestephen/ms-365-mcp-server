@@ -37,7 +37,9 @@ const sendAsAllow: ExoAnnotatedPermission = {
   accessRights: ['SendAs'],
 };
 
+// Freshness clock read AFTER the transport returns; 30s after the observation.
 const now = new Date('2026-07-23T04:00:30.000Z');
+const clock = () => now;
 
 describe('mapRecipientType', () => {
   it('maps group forms to "group"', () => {
@@ -57,7 +59,7 @@ describe('readSendAsGrant', () => {
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [sendAsAllow] })), {
       signedInUserObjectId: USER_OID,
       sharedPrimaryAddress: SHARED,
-      now,
+      clock,
     });
     expect(grant.granted).toBe(true);
     expect(grant.accessRight).toBe('SendAs');
@@ -77,7 +79,7 @@ describe('readSendAsGrant', () => {
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [otherTrustee] })), {
       signedInUserObjectId: USER_OID,
       sharedPrimaryAddress: SHARED,
-      now,
+      clock,
     });
     expect(grant.granted).toBe(false);
   });
@@ -86,7 +88,7 @@ describe('readSendAsGrant', () => {
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [sendAsAllow] })), {
       signedInUserObjectId: 'ffffffff-0000-4000-8000-000000000000',
       sharedPrimaryAddress: SHARED,
-      now,
+      clock,
     });
     expect(grant.granted).toBe(false);
   });
@@ -95,7 +97,7 @@ describe('readSendAsGrant', () => {
     const deny: ExoAnnotatedPermission = { ...sendAsAllow, accessControlType: 'Deny' };
     const grant = await readSendAsGrant(
       transportOf(snapshot({ permissions: [sendAsAllow, deny] })),
-      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, now }
+      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
     );
     expect(grant.granted).toBe(false);
   });
@@ -105,7 +107,7 @@ describe('readSendAsGrant', () => {
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [fullAccess] })), {
       signedInUserObjectId: USER_OID,
       sharedPrimaryAddress: SHARED,
-      now,
+      clock,
     });
     expect(grant.granted).toBe(false);
   });
@@ -115,11 +117,38 @@ describe('readSendAsGrant', () => {
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [sendAsAllow] })), {
       signedInUserObjectId: USER_OID,
       sharedPrimaryAddress: SHARED,
-      now: staleNow,
+      clock: () => staleNow,
       freshnessWindowMs: 120_000,
     });
     expect(grant.granted).toBe(false);
     expect(grant.stale).toBe(true);
+  });
+
+  it('denies and flags stale when the observation is future-dated beyond the skew (f3)', async () => {
+    // observedAt is 30s ahead of the post-read clock, past the 5s skew tolerance.
+    const readClock = new Date('2026-07-23T03:59:30.000Z');
+    const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [sendAsAllow] })), {
+      signedInUserObjectId: USER_OID,
+      sharedPrimaryAddress: SHARED,
+      clock: () => readClock,
+    });
+    expect(grant.granted).toBe(false);
+    expect(grant.stale).toBe(true);
+  });
+
+  it('denies when the recipient has no resolved directory object id (f4)', async () => {
+    const grant = await readSendAsGrant(
+      transportOf(
+        snapshot({
+          recipient: { primaryAddress: SHARED, recipientType: 'SharedMailbox' },
+          permissions: [sendAsAllow],
+        })
+      ),
+      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+    );
+    expect(grant.granted).toBe(false);
+    expect(grant.recipientResolved).toBe(false);
+    expect(grant.recipientId).toBeUndefined();
   });
 
   it('denies when the shared recipient does not resolve to the requested address', async () => {
@@ -130,7 +159,7 @@ describe('readSendAsGrant', () => {
           permissions: [sendAsAllow],
         })
       ),
-      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, now }
+      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
     );
     expect(grant.granted).toBe(false);
     expect(grant.recipientResolved).toBe(false);
@@ -139,7 +168,7 @@ describe('readSendAsGrant', () => {
   it('denies when the shared recipient is unresolved entirely', async () => {
     const grant = await readSendAsGrant(
       transportOf(snapshot({ recipient: undefined, permissions: [sendAsAllow] })),
-      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, now }
+      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
     );
     expect(grant.granted).toBe(false);
     expect(grant.recipientResolved).toBe(false);
@@ -153,7 +182,7 @@ describe('readSendAsGrant', () => {
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [upper] })), {
       signedInUserObjectId: USER_OID,
       sharedPrimaryAddress: SHARED,
-      now,
+      clock,
     });
     expect(grant.granted).toBe(true);
   });
