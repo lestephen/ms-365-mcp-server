@@ -249,6 +249,21 @@ describe('readSendAsGrant', () => {
     expect(grant.recipientResolved).toBe(false);
   });
 
+  it('treats a blank / whitespace-only recipient object id as unresolved (negative)', async () => {
+    const grant = await readSendAsGrant(
+      transportOf(
+        snapshot({
+          recipient: { objectId: '   ', primaryAddress: SHARED, recipientType: 'SharedMailbox' },
+          permissions: [sendAsAllow],
+        })
+      ),
+      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+    );
+    expect(grant.granted).toBe(false);
+    expect(grant.recipientResolved).toBe(false);
+    expect(grant.recipientId).toBeUndefined();
+  });
+
   it('denies when the shared recipient does not resolve to the requested address', async () => {
     const grant = await readSendAsGrant(
       transportOf(
