@@ -242,8 +242,18 @@ const SEND_MAIL_TOOL_NAMES: ReadonlySet<string> = new Set([
   'forward-shared-mailbox-mail',
 ]);
 
-/** Delegated scopes that permit sending mail (directly or via graph-batch). */
-const SEND_MAIL_SCOPES: ReadonlySet<string> = new Set(['Mail.Send', 'Mail.Send.Shared']);
+/**
+ * Delegated scopes that permit sending mail as the user (directly or via the
+ * graph-batch passthrough). Lowercased for case-insensitive membership tests.
+ * Covers the Graph send scopes, the EWS full-access scope, and the SMTP
+ * submission scope, all of which are send-capable.
+ */
+const SEND_MAIL_SCOPES: ReadonlySet<string> = new Set([
+  'mail.send',
+  'mail.send.shared',
+  'full_access_as_user',
+  'smtp.send',
+]);
 
 /** The approved shared identity for Document Control (issue #17). */
 const APPROVED_SHARED_IDENTITY = 'doccontrol@envirokinetics.com';
@@ -357,7 +367,9 @@ function deriveSendOperationExposed(
   for (const name of registered) {
     if (SEND_MAIL_TOOL_NAMES.has(name)) return true;
   }
-  return sessionScopes.some((scope) => SEND_MAIL_SCOPES.has(scope));
+  // Scopes are compared case-insensitively (SEND_MAIL_SCOPES is lowercased) so a
+  // differently-cased scope string cannot slip a send capability past this check.
+  return sessionScopes.some((scope) => SEND_MAIL_SCOPES.has(scope.toLowerCase()));
 }
 
 /**
@@ -389,6 +401,33 @@ function capabilityError(message: string): CallToolResult {
     content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
     isError: true,
   };
+}
+
+/**
+ * Resolve the signed-in identity through an AUTHENTICATED read-only Graph call
+ * (`GET /me`), so the proof's identity root is validated by Microsoft rather
+ * than decoded from an unverified bearer JWT. A forged or `alg=none` token
+ * cannot pass this call, so it can never mint a proof (the caller fails closed
+ * on the thrown error). The connecting client's bearer is a Graph-audience token
+ * used directly by graphClient, so `GET /me` authenticates it end to end.
+ * Returns the object id and primary address from the RESPONSE body (the
+ * strongest source); tenant and delegated scopes are read from the same token
+ * only AFTER this call succeeds, i.e. once Microsoft has validated it.
+ */
+async function resolveSignedInIdentity(
+  graphClient: GraphClient
+): Promise<{ objectId: string; primaryAddress: string }> {
+  const me = (await graphClient.makeRequest('/me')) as Record<string, unknown> | null;
+  const objectId = typeof me?.id === 'string' ? me.id : undefined;
+  const upn = typeof me?.userPrincipalName === 'string' ? me.userPrincipalName : undefined;
+  const mail = typeof me?.mail === 'string' ? me.mail : undefined;
+  const primaryAddress = upn ?? mail;
+  if (!objectId || !primaryAddress) {
+    throw new Error(
+      'The authenticated /me response did not include an object id and primary address.'
+    );
+  }
+  return { objectId, primaryAddress };
 }
 
 export const UTILITY_TOOLS: readonly UtilityTool[] = [
@@ -1036,12 +1075,11 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         .describe('Proof validity in seconds from observation (default 600, max 600).'),
     }),
     execute: async (params, ctx) => {
-      // 1. Resolve the delegated session from the connecting client's bearer.
+      // 1. A connecting client bearer must be present (HTTP/OAuth mode).
       const token = getRequestTokens()?.accessToken;
-      const claims = getSessionClaims(token);
-      if (!claims || !claims.objectId || !claims.tenantId || !claims.primaryAddress) {
+      if (!token) {
         return capabilityError(
-          'No authenticated delegated session: the bearer token is missing required claims (oid, tid, upn/preferred_username). This probe requires HTTP/OAuth mode.'
+          'No authenticated delegated session: this probe requires HTTP/OAuth mode with a bearer token.'
         );
       }
 
@@ -1067,35 +1105,59 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
 
       try {
-        // 4. Read the live Send As ACL (read-only) for the exact trustee.
-        const observedAt = new Date();
+        // 4. Resolve the signed-in identity through an AUTHENTICATED read-only
+        //    Graph GET /me. This is the security root: a forged or alg=none token
+        //    cannot pass, so it can never mint a proof (we fail closed below).
+        const identity = await resolveSignedInIdentity(ctx.graphClient);
+
+        // 5. The GET /me above proves this token is Microsoft-validated, so its
+        //    tid/scp/sid/jti claims are now authoritative. Object id and address
+        //    come from the /me response body (the strongest source); only the
+        //    non-identity fields are read from the validated token.
+        const claims = getSessionClaims(token);
+        if (!claims || !claims.tenantId) {
+          return capabilityError(
+            'The authenticated session token is missing a tenant claim (tid).'
+          );
+        }
+        const scopes = claims.scopes;
+
+        // 6. Read the live Send As ACL (read-only) for the exact trustee. The
+        //    broker captures its freshness clock AFTER the Exchange read returns.
         const grant = await readSendAsGrant(transport, {
-          signedInUserObjectId: claims.objectId,
-          signedInUserPrimaryAddress: claims.primaryAddress,
+          signedInUserObjectId: identity.objectId,
+          signedInUserPrimaryAddress: identity.primaryAddress,
           sharedPrimaryAddress: APPROVED_SHARED_IDENTITY,
-          now: observedAt,
         });
 
-        // 5. Derive the operation surface and send exposure structurally.
+        // 7. Derive the operation surface and send exposure structurally.
         const registered = ctx.registeredToolNames ?? new Set<string>();
         const operations = deriveOperationCapabilities(registered);
-        const sendOperationExposed = deriveSendOperationExposed(registered, claims.scopes);
+        const sendOperationExposed = deriveSendOperationExposed(registered, scopes);
 
-        // 6. Build the closed proof (readiness derived inside the builder).
+        // 8. Build the closed proof (readiness derived inside the builder). The
+        //    observation time is the Exchange read time reported by the broker.
         const lifetimeSeconds =
           typeof params.proofLifetimeSeconds === 'number' ? params.proofLifetimeSeconds : 600;
+        const observedAt = new Date(grant.sourceObservedAt);
         const validUntil = new Date(observedAt.getTime() + lifetimeSeconds * 1000);
         const proof = buildSharedDraftCapabilityProof({
           proofId: `sdc-${randomUUID()}`,
           tenantId: claims.tenantId,
-          sessionBindingSha256: computeSessionBindingSha256(claims),
-          signedInUser: { objectId: claims.objectId, primaryAddress: claims.primaryAddress },
+          sessionBindingSha256: computeSessionBindingSha256({
+            tenantId: claims.tenantId,
+            objectId: identity.objectId,
+            sessionId: claims.sessionId,
+            tokenId: claims.tokenId,
+          }),
+          signedInUser: { objectId: identity.objectId, primaryAddress: identity.primaryAddress },
           sharedIdentity: {
             recipientId: grant.recipientId ?? 'unresolved',
             primaryAddress: grant.recipientPrimaryAddress ?? APPROVED_SHARED_IDENTITY,
             recipientType: grant.recipientType,
           },
-          delegatedScopes: claims.scopes,
+          recipientResolved: grant.recipientResolved,
+          delegatedScopes: scopes,
           sendAsGranted: grant.granted,
           operations,
           sendOperationExposed,
@@ -1106,7 +1168,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         auditLog({
           event: 'capability.shared-draft.probe',
           request_id: randomUUID(),
-          user_principal_name: claims.primaryAddress,
+          user_principal_name: identity.primaryAddress,
           tool: 'get-shared-draft-capability',
           http_method: 'GET',
           status: proof.ready ? 'success' : 'denied',

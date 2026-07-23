@@ -53,18 +53,36 @@ function positiveSnapshot(): ExoRecipientPermissionSnapshot {
   };
 }
 
-/** A graph client that fails loudly if the tool ever tries to call Graph. */
-function noGraphClient(): { makeRequest: ReturnType<typeof vi.fn> } {
+const DEFAULT_ME = { id: USER_OID, userPrincipalName: 'engineer@envirokinetics.com' };
+
+/**
+ * A graph client that serves an authenticated read-only GET /me and refuses any
+ * other endpoint. This is how the probe resolves the signed-in identity; a
+ * write verb or a second endpoint would throw and be caught as a failure.
+ */
+function meGraphClient(me: Record<string, unknown> = DEFAULT_ME): {
+  makeRequest: ReturnType<typeof vi.fn>;
+} {
   return {
-    makeRequest: vi.fn(() => {
-      throw new Error('get-shared-draft-capability must not call Microsoft Graph');
+    makeRequest: vi.fn(async (endpoint: string) => {
+      if (endpoint === '/me') return me;
+      throw new Error(`unexpected Graph call: ${endpoint}`);
+    }),
+  };
+}
+
+/** A graph client whose GET /me rejects, as Microsoft would for a forged token. */
+function rejectingGraphClient(): { makeRequest: ReturnType<typeof vi.fn> } {
+  return {
+    makeRequest: vi.fn(async () => {
+      throw new Error('Microsoft Graph API error: 401 Unauthorized');
     }),
   };
 }
 
 function ctxWith(
   registered: string[],
-  graphClient: { makeRequest: ReturnType<typeof vi.fn> } = noGraphClient()
+  graphClient: { makeRequest: ReturnType<typeof vi.fn> } = meGraphClient()
 ) {
   return {
     graphClient: graphClient as never,
@@ -109,8 +127,8 @@ afterEach(() => {
 });
 
 describe('get-shared-draft-capability tool', () => {
-  it('emits a ready proof for the positive case and never calls Graph (read-only by construction)', async () => {
-    const graph = noGraphClient();
+  it('emits a ready proof for the positive case using only a read-only GET /me (read-only by construction)', async () => {
+    const graph = meGraphClient();
     const { result, json } = await invoke(
       scopedToken('Mail.ReadWrite User.Read'),
       {},
@@ -120,15 +138,28 @@ describe('get-shared-draft-capability tool', () => {
     expect(json.ready).toBe(true);
     expect(json.operations.sendOperationExposed).toBe(false);
     expect(json.permissions.granted).toBe(true);
+    // Identity is bound from the authenticated /me response, not raw claims.
     expect(json.signedInUser.objectId).toBe(USER_OID);
+    expect(json.signedInUser.primaryAddress).toBe('engineer@envirokinetics.com');
     expect(json.sharedIdentity.primaryAddress).toBe(SHARED);
-    // read-only: no Graph call, and the transport was only read.
-    expect(graph.makeRequest).not.toHaveBeenCalled();
+    // read-only: the only Graph call is GET /me (single arg => no method override),
+    // and the transport was only read.
+    expect(graph.makeRequest).toHaveBeenCalledTimes(1);
+    expect(graph.makeRequest).toHaveBeenCalledWith('/me');
+    expect(graph.makeRequest.mock.calls[0][1]).toBeUndefined();
     expect(transport.readSendAsAcl).toHaveBeenCalledTimes(1);
     expect(transport.readSendAsAcl).toHaveBeenCalledWith(SHARED);
     // digest self-consistency
     const { proofSha256, ...unsigned } = json;
     expect(canonicalSha256(unsigned)).toBe(proofSha256);
+  });
+
+  it('fails closed when the signed-in identity cannot be authenticated (forged/invalid token)', async () => {
+    const graph = rejectingGraphClient();
+    const { result } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS, graph));
+    expect(result.isError).toBe(true);
+    // No proof is minted and the ACL is never read when identity is unproven.
+    expect(transport.readSendAsAcl).not.toHaveBeenCalled();
   });
 
   it('binds the session without leaking the bearer token', async () => {
@@ -178,6 +209,52 @@ describe('get-shared-draft-capability tool', () => {
     );
     expect(json.operations.sendOperationExposed).toBe(true);
     expect(json.ready).toBe(false);
+  });
+
+  it('detects a send scope case-insensitively and across the broadened send set', async () => {
+    for (const scope of ['MAIL.SEND', 'SMTP.Send', 'full_access_as_user']) {
+      transport.readSendAsAcl = vi.fn(async () => positiveSnapshot());
+      const { json } = await invoke(
+        scopedToken(`Mail.ReadWrite ${scope}`),
+        {},
+        ctxWith(DRAFT_TOOLS)
+      );
+      expect(json.operations.sendOperationExposed).toBe(true);
+      expect(json.ready).toBe(false);
+    }
+  });
+
+  it('is not ready for an explicit Deny SendAs ACL (through the full tool path)', async () => {
+    transport.readSendAsAcl = vi.fn(async () => ({
+      ...positiveSnapshot(),
+      permissions: [
+        { trusteeObjectId: USER_OID, accessControlType: 'Allow', accessRights: ['SendAs'] },
+        { trusteeObjectId: USER_OID, accessControlType: 'Deny', accessRights: ['SendAs'] },
+      ],
+    }));
+    const { json } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+    expect(json.permissions.granted).toBe(false);
+    expect(json.ready).toBe(false);
+  });
+
+  it('is not ready for a stale ACL read (through the full tool path)', async () => {
+    transport.readSendAsAcl = vi.fn(async () => ({
+      ...positiveSnapshot(),
+      observedAt: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes old
+    }));
+    const { json } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+    expect(json.permissions.granted).toBe(false);
+    expect(json.ready).toBe(false);
+  });
+
+  it('is not ready when Exchange cannot resolve the recipient object id (through the full tool path)', async () => {
+    transport.readSendAsAcl = vi.fn(async () => ({
+      ...positiveSnapshot(),
+      recipient: { primaryAddress: SHARED, recipientType: 'SharedMailbox' }, // no objectId
+    }));
+    const { json } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+    expect(json.ready).toBe(false);
+    expect(json.permissions.granted).toBe(false);
   });
 
   it('is not ready when a required draft operation is not registered', async () => {
