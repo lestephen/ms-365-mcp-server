@@ -230,7 +230,7 @@ interface UtilityToolContext {
  * exposes a send operation. Draft-creation tools are deliberately excluded:
  * creating a draft is not sending.
  */
-const SEND_MAIL_TOOL_NAMES: ReadonlySet<string> = new Set([
+export const SEND_MAIL_TOOL_NAMES: ReadonlySet<string> = new Set([
   'send-mail',
   'send-draft-message',
   'send-shared-mailbox-mail',
