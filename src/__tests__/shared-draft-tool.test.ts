@@ -12,14 +12,16 @@ vi.mock('../audit-log.js', async (importOriginal) => {
 
 import { UTILITY_TOOLS } from '../graph-tools.js';
 import { requestContext } from '../request-context.js';
+import { auditLog } from '../audit-log.js';
 import {
-  configureExoTransport,
+  configureExoBroker,
   __testing as brokerTesting,
   type ExoTransport,
   type ExoRecipientPermissionSnapshot,
 } from '../exo-recipient-broker.js';
 import { canonicalSha256 } from '../shared-draft-capability.js';
 
+const APPROVED_TENANT_ENV = 'MS365_MCP_DOCCONTROL_TENANT_ID';
 const SHARED = 'doccontrol@envirokinetics.com';
 const USER_OID = '22222222-2222-4222-8222-222222222222';
 const RECIP_OID = '33333333-3333-4333-8333-333333333333';
@@ -118,11 +120,13 @@ let transport: ExoTransport & { readSendAsAcl: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
   transport = { readSendAsAcl: vi.fn(async () => positiveSnapshot()) };
-  configureExoTransport(transport);
+  configureExoBroker({ transport, tenantId: TENANT });
+  process.env[APPROVED_TENANT_ENV] = TENANT;
 });
 
 afterEach(() => {
   brokerTesting.reset();
+  delete process.env[APPROVED_TENANT_ENV];
   vi.clearAllMocks();
 });
 
@@ -275,7 +279,7 @@ describe('get-shared-draft-capability tool', () => {
   });
 
   it('errors clearly when the Exchange broker is not configured', async () => {
-    configureExoTransport(undefined);
+    configureExoBroker(undefined);
     const { result } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('broker is not configured');
@@ -285,5 +289,76 @@ describe('get-shared-draft-capability tool', () => {
     const { result } = await invoke(undefined, {}, ctxWith(DRAFT_TOOLS));
     expect(result.isError).toBe(true);
     expect(transport.readSendAsAcl).not.toHaveBeenCalled();
+  });
+
+  describe('tenant boundary (f1)', () => {
+    it('fails closed when the signed-in tenant differs from the approved tenant', async () => {
+      const foreignToken = scopedToken('Mail.ReadWrite', {
+        tid: '99999999-9999-4999-8999-999999999999',
+      });
+      const { result } = await invoke(foreignToken, {}, ctxWith(DRAFT_TOOLS));
+      expect(result.isError).toBe(true);
+      // The ACL is never read once the tenant boundary is breached.
+      expect(transport.readSendAsAcl).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the approved tenant is not configured', async () => {
+      delete process.env[APPROVED_TENANT_ENV];
+      const { result } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+      expect(result.isError).toBe(true);
+      expect(transport.readSendAsAcl).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the configured broker serves a different tenant', async () => {
+      configureExoBroker({ transport, tenantId: '99999999-9999-4999-8999-999999999999' });
+      const { result } = await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+      expect(result.isError).toBe(true);
+      expect(transport.readSendAsAcl).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('audited single-exit path (f2)', () => {
+    it('audits a successful probe with status success', async () => {
+      await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+      const events = vi.mocked(auditLog).mock.calls.map((c) => c[0]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        tool: 'get-shared-draft-capability',
+        status: 'success',
+      });
+      expect(events[0].error_type).toBeUndefined();
+    });
+
+    it('audits a denied exit with status denied and an error class', async () => {
+      const { result } = await invoke(
+        scopedToken('Mail.ReadWrite'),
+        { sharedIdentity: 'someoneelse@envirokinetics.com' },
+        ctxWith(DRAFT_TOOLS)
+      );
+      expect(result.isError).toBe(true);
+      const events = vi.mocked(auditLog).mock.calls.map((c) => c[0]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ status: 'denied', error_type: 'unsupported_identity' });
+    });
+
+    it('audits an infrastructure failure with status error', async () => {
+      const { result } = await invoke(
+        scopedToken('Mail.ReadWrite'),
+        {},
+        ctxWith(DRAFT_TOOLS, rejectingGraphClient())
+      );
+      expect(result.isError).toBe(true);
+      const events = vi.mocked(auditLog).mock.calls.map((c) => c[0]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ status: 'error', error_type: 'graph_identity_rejected' });
+    });
+
+    it('never places token material in the audit event', async () => {
+      await invoke(scopedToken('Mail.ReadWrite'), {}, ctxWith(DRAFT_TOOLS));
+      const event = vi.mocked(auditLog).mock.calls[0][0];
+      const serialized = JSON.stringify(event);
+      expect(serialized).not.toContain('session-abc'); // sid
+      expect(serialized).not.toContain('eyJ'); // no JWT segment
+    });
   });
 });

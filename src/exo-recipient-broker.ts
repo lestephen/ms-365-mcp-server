@@ -20,6 +20,8 @@
  * method. There is no mutation entry point.
  */
 
+import { CAPABILITY_FRESHNESS_WINDOW_MS } from './shared-draft-capability.js';
+
 /** Recipient-type strings Exchange returns that we treat as a group identity. */
 const GROUP_RECIPIENT_TYPES = new Set([
   'groupmailbox',
@@ -31,8 +33,11 @@ const GROUP_RECIPIENT_TYPES = new Set([
   'universaldistributiongroup',
 ]);
 
-/** Default window within which the Exchange read is considered current. */
-const DEFAULT_FRESHNESS_WINDOW_MS = 120_000; // 2 minutes
+/**
+ * Default window within which the Exchange read is considered current. Shared
+ * with the proof validity policy so freshness and validUntil cannot drift apart.
+ */
+const DEFAULT_FRESHNESS_WINDOW_MS = CAPABILITY_FRESHNESS_WINDOW_MS;
 
 /**
  * Maximum tolerated clock skew for a FUTURE-dated Exchange observation. An
@@ -241,24 +246,35 @@ export async function readSendAsGrant(
  * <sharedAddress>` over the Exchange Online REST admin endpoint, stamps
  * `observedAt = new Date()`, and annotates each row with the trustee object id.
  *
- * Until that provisioning and owner authorization exist, no live transport is
+ * Until that provisioning and owner authorization exist, no transport is
  * configured and `get-shared-draft-capability` reports that the Exchange broker
  * is unavailable rather than guessing.
  */
-let configuredTransport: ExoTransport | undefined;
-
-export function configureExoTransport(transport: ExoTransport | undefined): void {
-  configuredTransport = transport;
+export interface ExoBrokerConfig {
+  transport: ExoTransport;
+  /**
+   * The Entra tenant that owns the doccontrol mailbox and that this transport is
+   * provisioned for. The probe requires this to equal the approved Document
+   * Control tenant AND the signed-in token's tenant, so a transport wired for a
+   * different tenant cannot satisfy the check.
+   */
+  tenantId: string;
 }
 
-export function getConfiguredExoTransport(): ExoTransport | undefined {
-  return configuredTransport;
+let configuredBroker: ExoBrokerConfig | undefined;
+
+export function configureExoBroker(config: ExoBrokerConfig | undefined): void {
+  configuredBroker = config;
+}
+
+export function getConfiguredExoBroker(): ExoBrokerConfig | undefined {
+  return configuredBroker;
 }
 
 // Exposed for tests only.
 export const __testing = {
   DEFAULT_FRESHNESS_WINDOW_MS,
   reset: () => {
-    configuredTransport = undefined;
+    configuredBroker = undefined;
   },
 };
