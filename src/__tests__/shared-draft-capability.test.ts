@@ -33,6 +33,7 @@ function baseInput(overrides: Partial<CapabilityBuildInput> = {}): CapabilityBui
       recipientType: 'shared_identity',
     },
     delegatedScopes: ['User.Read', 'Mail.ReadWrite', 'offline_access'],
+    recipientResolved: true,
     sendAsGranted: true,
     operations: { ...ALL_OPERATIONS },
     sendOperationExposed: false,
@@ -146,6 +147,11 @@ describe('buildSharedDraftCapabilityProof', () => {
       expect(buildSharedDraftCapabilityProof(baseInput({ sendOperationExposed: true })).ready).toBe(
         false
       );
+    });
+
+    it('is not ready when the recipient did not resolve to a directory object id', () => {
+      const proof = buildSharedDraftCapabilityProof(baseInput({ recipientResolved: false }));
+      expect(proof.ready).toBe(false);
     });
   });
 });

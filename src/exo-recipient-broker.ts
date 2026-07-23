@@ -35,6 +35,14 @@ const GROUP_RECIPIENT_TYPES = new Set([
 const DEFAULT_FRESHNESS_WINDOW_MS = 120_000; // 2 minutes
 
 /**
+ * Maximum tolerated clock skew for a FUTURE-dated Exchange observation. An
+ * observedAt further ahead of the post-read clock than this is treated as
+ * invalid (not current), so a bad or spoofed timestamp cannot satisfy
+ * freshness.
+ */
+const MAX_FUTURE_SKEW_MS = 5_000; // 5 seconds
+
+/**
  * The proof's `sharedIdentity.recipientType` is a closed enum of exactly
  * `'group' | 'shared_identity'` (see the consumer contract
  * `eki.doc-control-shared-draft-capability/v1`). Exchange returns a richer
@@ -107,8 +115,13 @@ export interface SendAsGrantQuery {
   signedInUserPrimaryAddress?: string;
   /** The approved shared identity whose ACL is read. */
   sharedPrimaryAddress: string;
-  /** Clock injection for tests; defaults to `new Date()`. */
-  now?: Date;
+  /**
+   * Clock read AFTER the Exchange read returns, for freshness evaluation.
+   * Injectable for tests; defaults to `new Date()`. Callers MUST NOT pass a
+   * pre-read timestamp: freshness must account for the time spent awaiting
+   * Exchange and must reject future-dated observations.
+   */
+  clock?: () => Date;
   /** Override the staleness window; defaults to 2 minutes. */
   freshnessWindowMs?: number;
 }
@@ -149,20 +162,29 @@ export async function readSendAsGrant(
   transport: ExoTransport,
   query: SendAsGrantQuery
 ): Promise<SendAsGrant> {
-  const now = query.now ?? new Date();
   const freshnessWindowMs = query.freshnessWindowMs ?? DEFAULT_FRESHNESS_WINDOW_MS;
   const trusteeObjectId = query.signedInUserObjectId.toLowerCase();
   const sharedTarget = query.sharedPrimaryAddress.toLowerCase();
 
   const snapshot = await transport.readSendAsAcl(query.sharedPrimaryAddress);
+  // Capture the freshness clock AFTER the read returns, so the time spent
+  // awaiting Exchange counts against the freshness window.
+  const now = (query.clock ?? (() => new Date()))();
   const observedAtIso = snapshot.observedAt.toISOString();
 
   const recipient = snapshot.recipient;
-  const recipientResolved = !!recipient && recipient.primaryAddress.toLowerCase() === sharedTarget;
+  const recipientObjectId = lower(recipient?.objectId);
+  // A recipient is resolved only when Exchange returns BOTH a directory object
+  // id AND the exact requested primary address. A missing object id is a
+  // negative result (never a ready proof with an unresolved recipient).
+  const recipientResolved =
+    !!recipient &&
+    recipientObjectId !== undefined &&
+    recipient.primaryAddress.toLowerCase() === sharedTarget;
   const recipientType = mapRecipientType(recipient?.recipientType);
 
   const base: SendAsGrant = {
-    recipientId: lower(recipient?.objectId),
+    recipientId: recipientObjectId,
     recipientPrimaryAddress: recipient?.primaryAddress,
     recipientType,
     accessRight: 'SendAs',
@@ -178,9 +200,11 @@ export async function readSendAsGrant(
     return base;
   }
 
-  // Stale ACL: a read older than the freshness window is not current proof.
+  // Stale or invalidly future-dated ACL: not current proof. Age is measured
+  // against the post-read clock; an observation dated further into the future
+  // than the tolerated skew is rejected the same as an over-age one.
   const ageMs = now.getTime() - snapshot.observedAt.getTime();
-  if (ageMs > freshnessWindowMs) {
+  if (ageMs > freshnessWindowMs || ageMs < -MAX_FUTURE_SKEW_MS) {
     return { ...base, stale: true };
   }
 
