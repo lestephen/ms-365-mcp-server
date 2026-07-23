@@ -156,6 +156,11 @@ export interface SessionClaims {
   sessionId?: string;
   /** JWT id (`jti`) when present; a per-token identifier. */
   tokenId?: string;
+  /**
+   * Unique token id (`uti`) when present. Microsoft access tokens commonly
+   * carry `uti` rather than `jti`, so it participates in session binding.
+   */
+  uniqueTokenId?: string;
   /** Individual delegated scopes from the `scp` claim (order preserved). */
   scopes: string[];
 }
@@ -189,6 +194,7 @@ export function getSessionClaims(token?: string): SessionClaims | undefined {
       stringClaim(payload.email),
     sessionId: stringClaim(payload.sid),
     tokenId: stringClaim(payload.jti),
+    uniqueTokenId: stringClaim(payload.uti),
     scopes,
   };
 }

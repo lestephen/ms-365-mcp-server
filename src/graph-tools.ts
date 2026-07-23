@@ -387,12 +387,27 @@ function deriveSendOperationExposed(
 }
 
 /**
+ * Return the per-session binder claim: `sid` (auth session id), else `jti`
+ * (JWT id), else `uti` (Microsoft's unique token id, which access tokens
+ * commonly carry instead of jti). Undefined when none is present, in which case
+ * the caller must fail closed rather than bind to a constant per-user value.
+ */
+function sessionBinder(claims: {
+  sessionId?: string;
+  tokenId?: string;
+  uniqueTokenId?: string;
+}): string | undefined {
+  return claims.sessionId ?? claims.tokenId ?? claims.uniqueTokenId;
+}
+
+/**
  * Bind the proof to the current auth session WITHOUT exposing token secrets.
  *
- * Input: `tid|oid|sid` (auth session id) when a `sid` claim is present, else
- * `tid|oid|jti` (per-token id) as a fallback. This ties the proof to the
- * signed-in identity and the auth session while deliberately excluding the raw
- * bearer token and its signature bytes.
+ * Input: `tid|oid|<binder>` where the binder is the sid/jti/uti chain above.
+ * This ties the proof to the signed-in identity and the specific session/token
+ * while deliberately excluding the raw bearer token and its signature bytes. The
+ * caller guarantees a binder is present (else it fails closed), so this never
+ * degrades to a constant per-user binding.
  *
  * DESIGN POINT FOR OWNER CONFIRMATION (issue #17): the consumer only requires a
  * SHA-256, so this binding input is a producer-side choice. If a stronger,
@@ -402,11 +417,9 @@ function deriveSendOperationExposed(
 function computeSessionBindingSha256(claims: {
   tenantId?: string;
   objectId?: string;
-  sessionId?: string;
-  tokenId?: string;
+  binder: string;
 }): string {
-  const binder = claims.sessionId ?? claims.tokenId ?? '';
-  const material = `${claims.tenantId ?? ''}|${claims.objectId ?? ''}|${binder}`;
+  const material = `${claims.tenantId ?? ''}|${claims.objectId ?? ''}|${claims.binder}`;
   return createHash('sha256').update(material, 'utf8').digest('hex');
 }
 
@@ -1195,8 +1208,19 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       const scopes = claims.scopes;
 
-      // 9. Read the live Send As ACL (read-only) for the exact trustee. The
-      //    broker captures its freshness clock AFTER the Exchange read returns.
+      // 9. Require a per-session binder (sid/jti/uti) BEFORE reading the ACL, so
+      //    the proof can never bind to a constant per-user value. Fail closed.
+      const binder = sessionBinder(claims);
+      if (!binder) {
+        return deny(
+          'unbindable_session',
+          'The session token carries no sid, jti, or uti claim to bind the proof to; refusing to emit a constant per-user binding.',
+          identity.primaryAddress
+        );
+      }
+
+      // 10. Read the live Send As ACL (read-only) for the exact trustee. The
+      //     broker captures its freshness clock AFTER the Exchange read returns.
       let grant;
       try {
         grant = await readSendAsGrant(broker.transport, {
@@ -1208,12 +1232,12 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         return fail('transport_failure', (error as Error).message, identity.primaryAddress);
       }
 
-      // 10. Derive the operation surface and send exposure structurally.
+      // 11. Derive the operation surface and send exposure structurally.
       const registered = ctx.registeredToolNames ?? new Set<string>();
       const operations = deriveOperationCapabilities(registered);
       const sendOperationExposed = deriveSendOperationExposed(registered, scopes);
 
-      // 11. Build the closed proof. Observation time is the Exchange read time;
+      // 12. Build the closed proof. Observation time is the Exchange read time;
       //     validUntil is capped at observedAt + the shared freshness window by
       //     the builder, so validity cannot outlast the observation.
       const observedAt = new Date(grant.sourceObservedAt);
@@ -1224,8 +1248,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         sessionBindingSha256: computeSessionBindingSha256({
           tenantId: approvedTenantId,
           objectId: identity.objectId,
-          sessionId: claims.sessionId,
-          tokenId: claims.tokenId,
+          binder,
         }),
         signedInUser: { objectId: identity.objectId, primaryAddress: identity.primaryAddress },
         sharedIdentity: {

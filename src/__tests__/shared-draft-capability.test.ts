@@ -79,6 +79,20 @@ describe('buildSharedDraftCapabilityProof', () => {
     expect(proof.proofSha256).toBe(GOLDEN);
   });
 
+  it('serializes the canonical proof bytes exactly (guards separators, escaping, key order, field set)', () => {
+    // GOLDEN CANONICAL BYTES: the exact canonical serialization of the unsigned
+    // baseInput() proof (json.dumps-equivalent: no whitespace, sorted keys). Any
+    // drift in separators, escaping, key order, or field set fails here in CI.
+    // Python end-to-end equivalence (canonical_sha256 + validate_proof, ready
+    // true) was verified manually against doc-control-capability-evidence.py.
+    const GOLDEN_CANONICAL =
+      '{"connector":{"operation":"get-shared-draft-capability","provider":"eki-ms365-mcp","sessionBindingSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tenantId":"11111111-1111-4111-8111-111111111111"},"customerMutationPerformed":false,"emailSendPermitted":false,"mode":"read_only_no_mailbox_mutation","observedAt":"2026-07-23T04:00:00.000Z","operations":{"createAttachmentUploadSession":true,"createDraft":true,"createReplyDraft":true,"getDownloadUrl":true,"listAttachments":true,"readDraft":true,"readDraftMime":true,"sendOperationExposed":false},"permissions":{"accessRight":"SendAs","delegatedScopes":["Mail.ReadWrite","User.Read","offline_access"],"granted":true,"trusteeObjectId":"22222222-2222-4222-8222-222222222222"},"proofId":"sdc-44444444-4444-4444-8444-444444444444","ready":true,"schema":"eki.doc-control-shared-draft-capability/v1","sharedIdentity":{"primaryAddress":"doccontrol@envirokinetics.com","recipientId":"33333333-3333-4333-8333-333333333333","recipientType":"shared_identity"},"signedInUser":{"objectId":"22222222-2222-4222-8222-222222222222","primaryAddress":"engineer@envirokinetics.com"},"validUntil":"2026-07-23T04:02:00.000Z"}';
+    const proof = buildSharedDraftCapabilityProof(baseInput());
+    const { proofSha256: _omit, ...unsigned } = proof;
+    void _omit;
+    expect(canonicalJson(unsigned)).toBe(GOLDEN_CANONICAL);
+  });
+
   it('caps validUntil at observedAt plus the freshness window (never a longer lifetime)', () => {
     const observedAt = new Date('2026-07-23T04:00:00.000Z');
     const proof = buildSharedDraftCapabilityProof(
