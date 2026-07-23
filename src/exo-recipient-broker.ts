@@ -175,6 +175,17 @@ function lower(value: string | undefined): string | undefined {
 }
 
 /**
+ * Lowercased object id, or undefined when absent, empty, or whitespace-only. A
+ * blank id is not a resolved directory object, so it must not satisfy the
+ * resolution gate.
+ */
+function resolvedObjectId(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed === '' ? undefined : trimmed.toLowerCase();
+}
+
+/**
  * Evaluate the Send As grant for the signed-in user on the shared identity from
  * a live Exchange read. Pure over the injected transport. Returns a normalized
  * grant; `granted` is true only when Exchange currently records an explicit
@@ -197,10 +208,11 @@ export async function readSendAsGrant(
   const observedAtIso = snapshot.observedAt.toISOString();
 
   const recipient = snapshot.recipient;
-  const recipientObjectId = lower(recipient?.objectId);
-  // A recipient is resolved only when Exchange returns BOTH a directory object
-  // id AND the exact requested primary address. A missing object id is a
-  // negative result (never a ready proof with an unresolved recipient).
+  const recipientObjectId = resolvedObjectId(recipient?.objectId);
+  // A recipient is resolved only when Exchange returns BOTH a non-blank directory
+  // object id AND the exact requested primary address. A missing, empty, or
+  // whitespace-only object id is a negative result (never a ready proof with an
+  // unresolved recipient).
   const recipientResolved =
     !!recipient &&
     recipientObjectId !== undefined &&
