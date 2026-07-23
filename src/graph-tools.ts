@@ -1,7 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import logger from './logger.js';
-import { auditLog, getUserIdentityForAudit } from './audit-log.js';
+import { auditLog, getSessionClaims, getUserIdentityForAudit } from './audit-log.js';
+import { getConfiguredExoTransport, readSendAsGrant } from './exo-recipient-broker.js';
+import {
+  buildSharedDraftCapabilityProof,
+  type OperationCapabilities,
+} from './shared-draft-capability.js';
 import GraphClient from './graph-client.js';
 import { isDestructiveOperation } from './lib/destructive-ops.js';
 import AuthManager, {
@@ -211,7 +216,37 @@ interface UtilityToolContext {
   authManager?: AuthManager;
   multiAccount: boolean;
   accountNames: string[];
+  /**
+   * Names of every tool registered on the running connector profile (Graph
+   * endpoints plus utility tools). `get-shared-draft-capability` reads this to
+   * derive its operation-capability flags and `sendOperationExposed`
+   * STRUCTURALLY from the actual surface, never from a hardcoded assumption.
+   */
+  registeredToolNames?: ReadonlySet<string>;
 }
+
+/**
+ * Tool names that transmit mail. If any of these is registered, the connector
+ * exposes a send operation. Draft-creation tools are deliberately excluded:
+ * creating a draft is not sending.
+ */
+const SEND_MAIL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'send-mail',
+  'send-draft-message',
+  'send-shared-mailbox-mail',
+  'reply-mail-message',
+  'reply-all-mail-message',
+  'reply-shared-mailbox-mail',
+  'reply-all-shared-mailbox-mail',
+  'forward-mail-message',
+  'forward-shared-mailbox-mail',
+]);
+
+/** Delegated scopes that permit sending mail (directly or via graph-batch). */
+const SEND_MAIL_SCOPES: ReadonlySet<string> = new Set(['Mail.Send', 'Mail.Send.Shared']);
+
+/** The approved shared identity for Document Control (issue #17). */
+const APPROVED_SHARED_IDENTITY = 'doccontrol@envirokinetics.com';
 
 interface UtilityTool {
   name: string;
@@ -287,6 +322,73 @@ async function checkAccountParamInBearerMode(
     `authenticated as that account, or run the server in stdio mode (or HTTP with --trust-proxy-auth) ` +
     `where cached accounts are available.`
   );
+}
+
+/**
+ * Map the required draft operations to the tool names that provide them, then
+ * report each as registered or not on the running profile. This is the
+ * structural source for the proof's `operations` flags: a flag is true only
+ * when its backing tool is actually registered.
+ */
+function deriveOperationCapabilities(registered: ReadonlySet<string>): OperationCapabilities {
+  return {
+    createDraft: registered.has('create-draft-email'),
+    createReplyDraft: registered.has('create-reply-draft'),
+    readDraft: registered.has('get-mail-message'),
+    readDraftMime: registered.has('get-mail-message-mime'),
+    createAttachmentUploadSession: registered.has('create-mail-attachment-upload-session'),
+    listAttachments: registered.has('list-mail-attachments'),
+    getDownloadUrl: registered.has('get-download-url'),
+  };
+}
+
+/**
+ * Derive `sendOperationExposed` structurally (never hardcoded). A send is
+ * possible if the connector registers any send-mail tool, OR the session token
+ * itself carries a send scope (which the general `graph-batch` passthrough, or
+ * any future tool, could exercise). Both must be absent for a truthful false,
+ * which is exactly why Document Control needs the restricted profile (issue #17,
+ * comment 2).
+ */
+function deriveSendOperationExposed(
+  registered: ReadonlySet<string>,
+  sessionScopes: readonly string[]
+): boolean {
+  for (const name of registered) {
+    if (SEND_MAIL_TOOL_NAMES.has(name)) return true;
+  }
+  return sessionScopes.some((scope) => SEND_MAIL_SCOPES.has(scope));
+}
+
+/**
+ * Bind the proof to the current auth session WITHOUT exposing token secrets.
+ *
+ * Input: `tid|oid|sid` (auth session id) when a `sid` claim is present, else
+ * `tid|oid|jti` (per-token id) as a fallback. This ties the proof to the
+ * signed-in identity and the auth session while deliberately excluding the raw
+ * bearer token and its signature bytes.
+ *
+ * DESIGN POINT FOR OWNER CONFIRMATION (issue #17): the consumer only requires a
+ * SHA-256, so this binding input is a producer-side choice. If a stronger,
+ * per-request non-replayable binding is wanted (e.g. mixing in a server nonce
+ * echoed by the consumer request), that is a follow-up the owner should confirm.
+ */
+function computeSessionBindingSha256(claims: {
+  tenantId?: string;
+  objectId?: string;
+  sessionId?: string;
+  tokenId?: string;
+}): string {
+  const binder = claims.sessionId ?? claims.tokenId ?? '';
+  const material = `${claims.tenantId ?? ''}|${claims.objectId ?? ''}|${binder}`;
+  return createHash('sha256').update(material, 'utf8').digest('hex');
+}
+
+function capabilityError(message: string): CallToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
+    isError: true,
+  };
 }
 
 export const UTILITY_TOOLS: readonly UtilityTool[] = [
@@ -905,6 +1007,115 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
           isError: true,
         };
+      }
+    },
+  },
+  {
+    name: 'get-shared-draft-capability',
+    method: 'GET',
+    path: 'tool:get-shared-draft-capability',
+    searchKeywords:
+      'shared draft capability send as sendas document control doccontrol readiness proof recipient permission delegated scope mail readwrite shared mailbox authorization',
+    description:
+      "Read-only capability probe for EKI Document Control. Proves, WITHOUT any mailbox mutation, that the signed-in connector session can prepare a final draft for the approved shared identity: it confirms Mail.ReadWrite on the session (from the token scope claim), reads the Exchange 'Send As' ACL for doccontrol@envirokinetics.com through the internal read-only recipient-permission broker, and reports the registered draft/read/attachment operations and whether any send operation is exposed. Returns the closed eki.doc-control-shared-draft-capability/v1 proof. Never creates, updates, deletes, or sends mail, and exposes no send operation.",
+    readOnlyHint: true,
+    openWorldHint: true,
+    buildSchema: () => ({
+      sharedIdentity: z
+        .string()
+        .optional()
+        .describe(
+          `The approved shared identity to probe. Only '${APPROVED_SHARED_IDENTITY}' is accepted; defaults to it when omitted.`
+        ),
+      proofLifetimeSeconds: z
+        .number()
+        .int()
+        .positive()
+        .max(600)
+        .optional()
+        .describe('Proof validity in seconds from observation (default 600, max 600).'),
+    }),
+    execute: async (params, ctx) => {
+      // 1. Resolve the delegated session from the connecting client's bearer.
+      const token = getRequestTokens()?.accessToken;
+      const claims = getSessionClaims(token);
+      if (!claims || !claims.objectId || !claims.tenantId || !claims.primaryAddress) {
+        return capabilityError(
+          'No authenticated delegated session: the bearer token is missing required claims (oid, tid, upn/preferred_username). This probe requires HTTP/OAuth mode.'
+        );
+      }
+
+      // 2. Enforce that only the approved shared identity may be probed.
+      const requested =
+        typeof params.sharedIdentity === 'string' && params.sharedIdentity.trim().length > 0
+          ? params.sharedIdentity.trim().toLowerCase()
+          : APPROVED_SHARED_IDENTITY;
+      if (requested !== APPROVED_SHARED_IDENTITY) {
+        return capabilityError(
+          `This probe only supports the approved shared identity '${APPROVED_SHARED_IDENTITY}'.`
+        );
+      }
+
+      // 3. The Exchange recipient-permission broker must be configured. When it
+      //    is not (the live app-only credential + RBAC are unprovisioned), fail
+      //    honestly rather than inferring Send As from Graph or group membership.
+      const transport = getConfiguredExoTransport();
+      if (!transport) {
+        return capabilityError(
+          'The Exchange Online recipient-permission broker is not configured on this server, so Send As cannot be proven read-only. See exo-recipient-broker.ts for the required app-only provisioning.'
+        );
+      }
+
+      try {
+        // 4. Read the live Send As ACL (read-only) for the exact trustee.
+        const observedAt = new Date();
+        const grant = await readSendAsGrant(transport, {
+          signedInUserObjectId: claims.objectId,
+          signedInUserPrimaryAddress: claims.primaryAddress,
+          sharedPrimaryAddress: APPROVED_SHARED_IDENTITY,
+          now: observedAt,
+        });
+
+        // 5. Derive the operation surface and send exposure structurally.
+        const registered = ctx.registeredToolNames ?? new Set<string>();
+        const operations = deriveOperationCapabilities(registered);
+        const sendOperationExposed = deriveSendOperationExposed(registered, claims.scopes);
+
+        // 6. Build the closed proof (readiness derived inside the builder).
+        const lifetimeSeconds =
+          typeof params.proofLifetimeSeconds === 'number' ? params.proofLifetimeSeconds : 600;
+        const validUntil = new Date(observedAt.getTime() + lifetimeSeconds * 1000);
+        const proof = buildSharedDraftCapabilityProof({
+          proofId: `sdc-${randomUUID()}`,
+          tenantId: claims.tenantId,
+          sessionBindingSha256: computeSessionBindingSha256(claims),
+          signedInUser: { objectId: claims.objectId, primaryAddress: claims.primaryAddress },
+          sharedIdentity: {
+            recipientId: grant.recipientId ?? 'unresolved',
+            primaryAddress: grant.recipientPrimaryAddress ?? APPROVED_SHARED_IDENTITY,
+            recipientType: grant.recipientType,
+          },
+          delegatedScopes: claims.scopes,
+          sendAsGranted: grant.granted,
+          operations,
+          sendOperationExposed,
+          observedAt,
+          validUntil,
+        });
+
+        auditLog({
+          event: 'capability.shared-draft.probe',
+          request_id: randomUUID(),
+          user_principal_name: claims.primaryAddress,
+          tool: 'get-shared-draft-capability',
+          http_method: 'GET',
+          status: proof.ready ? 'success' : 'denied',
+          target_resource: { type: 'exchange.recipient', id: APPROVED_SHARED_IDENTITY },
+        });
+
+        return { content: [{ type: 'text', text: JSON.stringify(proof) }] };
+      } catch (error) {
+        return capabilityError((error as Error).message);
       }
     },
   },
@@ -1565,6 +1776,9 @@ export function registerGraphTools(
   let failedCount = 0;
   const allowedScopes = parseAllowedScopes(allowedScopesValue);
   const disabledByAllowedScopes: DisabledToolScope[] = [];
+  // Names of tools actually registered on this profile, so get-shared-draft-capability
+  // can derive its operation surface and send exposure structurally.
+  const registeredToolNames = new Set<string>();
 
   for (const tool of allEndpoints) {
     const endpointConfig = endpointsData.find((e) => e.toolName === tool.alias);
@@ -1807,6 +2021,7 @@ export function registerGraphTools(
           executeGraphTool(tool, endpointConfig, graphClient, params, authManager)
       );
       registeredCount++;
+      registeredToolNames.add(tool.alias);
     } catch (error) {
       logger.error(`Failed to register tool ${tool.alias}: ${(error as Error).message}`);
       failedCount++;
@@ -1823,11 +2038,14 @@ export function registerGraphTools(
     );
   }
 
+  // The set is shared by reference; utility executes read it at call time, by
+  // which point every registered utility name below has been added.
   const utilityCtx: UtilityToolContext = {
     graphClient,
     authManager,
     multiAccount,
     accountNames,
+    registeredToolNames,
   };
   for (const utility of UTILITY_TOOLS) {
     if (readOnly && !utility.readOnlyHint) continue;
@@ -1836,6 +2054,7 @@ export function registerGraphTools(
     try {
       registerUtilityToolWithMcp(server, utility, utilityCtx);
       registeredCount++;
+      registeredToolNames.add(utility.name);
     } catch (error) {
       logger.error(`Failed to register tool ${utility.name}: ${(error as Error).message}`);
       failedCount++;
@@ -2047,11 +2266,18 @@ export function registerDiscoveryTools(
     `Discovery mode: ${totalCount} tools (${toolsRegistry.size} Graph + ${utilityTools.length} utility)`
   );
 
+  // In discovery mode the profile surface is every tool available to load:
+  // the Graph tools in the registry plus the filtered utility tools.
+  const registeredToolNames = new Set<string>([
+    ...toolsRegistry.keys(),
+    ...utilityTools.map((u) => u.name),
+  ]);
   const utilityCtx: UtilityToolContext = {
     graphClient,
     authManager,
     multiAccount,
     accountNames,
+    registeredToolNames,
   };
   const utilityByName = new Map(utilityTools.map((u) => [u.name, u]));
 
