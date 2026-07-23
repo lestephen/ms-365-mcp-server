@@ -112,6 +112,89 @@ describe('readSendAsGrant', () => {
     expect(grant.granted).toBe(false);
   });
 
+  describe('group Deny masking (f1)', () => {
+    const GROUP_OID = '55555555-5555-4555-8555-555555555555';
+    const OTHER_USER_OID = '66666666-6666-4666-8666-666666666666';
+
+    it('denies a direct Allow when a group SendAs Deny cannot be excluded', async () => {
+      const grant = await readSendAsGrant(
+        transportOf(
+          snapshot({
+            permissions: [
+              sendAsAllow,
+              {
+                trusteeObjectId: GROUP_OID,
+                trusteeType: 'group',
+                accessControlType: 'Deny',
+                accessRights: ['SendAs'],
+              },
+            ],
+          })
+        ),
+        { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+      );
+      expect(grant.granted).toBe(false);
+      expect(grant.unexcludableDeny).toBe(true);
+    });
+
+    it('keeps a direct Allow positive when a Deny targets a different resolved user', async () => {
+      const grant = await readSendAsGrant(
+        transportOf(
+          snapshot({
+            permissions: [
+              sendAsAllow,
+              {
+                trusteeObjectId: OTHER_USER_OID,
+                trusteeType: 'user',
+                accessControlType: 'Deny',
+                accessRights: ['SendAs'],
+              },
+            ],
+          })
+        ),
+        { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+      );
+      expect(grant.granted).toBe(true);
+      expect(grant.unexcludableDeny).toBe(false);
+    });
+
+    it('denies conservatively when a Deny trustee is unclassified (no trusteeType)', async () => {
+      const grant = await readSendAsGrant(
+        transportOf(
+          snapshot({
+            permissions: [
+              sendAsAllow,
+              {
+                trusteeObjectId: OTHER_USER_OID,
+                accessControlType: 'Deny',
+                accessRights: ['SendAs'],
+              },
+            ],
+          })
+        ),
+        { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+      );
+      expect(grant.granted).toBe(false);
+      expect(grant.unexcludableDeny).toBe(true);
+    });
+
+    it('denies conservatively when a Deny trustee is unresolved (no object id)', async () => {
+      const grant = await readSendAsGrant(
+        transportOf(
+          snapshot({
+            permissions: [
+              sendAsAllow,
+              { trusteeType: 'user', accessControlType: 'Deny', accessRights: ['SendAs'] },
+            ],
+          })
+        ),
+        { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+      );
+      expect(grant.granted).toBe(false);
+      expect(grant.unexcludableDeny).toBe(true);
+    });
+  });
+
   it('denies and flags stale when the read is older than the freshness window', async () => {
     const staleNow = new Date('2026-07-23T04:10:00.000Z'); // 10 min after observedAt
     const grant = await readSendAsGrant(transportOf(snapshot({ permissions: [sendAsAllow] })), {
