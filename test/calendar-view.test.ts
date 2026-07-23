@@ -143,7 +143,8 @@ describe('Calendar View Tools', () => {
           toolName === 'parse-teams-url' ||
           toolName === 'download-bytes' ||
           toolName === 'copilot-retrieve' ||
-          toolName === 'get-download-url'
+          toolName === 'get-download-url' ||
+          toolName === 'get-shared-draft-capability'
         )
           continue;
         const paramSchema = call[2] as Record<string, z.ZodTypeAny>;

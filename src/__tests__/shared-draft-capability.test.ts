@@ -1,0 +1,192 @@
+import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
+import {
+  buildSharedDraftCapabilityProof,
+  canonicalJson,
+  canonicalSha256,
+  type CapabilityBuildInput,
+  type OperationCapabilities,
+} from '../shared-draft-capability.js';
+
+const ALL_OPERATIONS: OperationCapabilities = {
+  createDraft: true,
+  createReplyDraft: true,
+  readDraft: true,
+  readDraftMime: true,
+  createAttachmentUploadSession: true,
+  listAttachments: true,
+  getDownloadUrl: true,
+};
+
+function baseInput(overrides: Partial<CapabilityBuildInput> = {}): CapabilityBuildInput {
+  return {
+    proofId: 'sdc-44444444-4444-4444-8444-444444444444',
+    tenantId: '11111111-1111-4111-8111-111111111111',
+    sessionBindingSha256: 'a'.repeat(64),
+    signedInUser: {
+      objectId: '22222222-2222-4222-8222-222222222222',
+      primaryAddress: 'engineer@envirokinetics.com',
+    },
+    sharedIdentity: {
+      recipientId: '33333333-3333-4333-8333-333333333333',
+      primaryAddress: 'doccontrol@envirokinetics.com',
+      recipientType: 'shared_identity',
+    },
+    delegatedScopes: ['User.Read', 'Mail.ReadWrite', 'offline_access'],
+    recipientResolved: true,
+    sendAsGranted: true,
+    operations: { ...ALL_OPERATIONS },
+    sendOperationExposed: false,
+    observedAt: new Date('2026-07-23T04:00:00.000Z'),
+    validUntil: new Date('2026-07-23T04:10:00.000Z'),
+    ...overrides,
+  };
+}
+
+describe('canonicalJson', () => {
+  it('sorts keys recursively with no whitespace, matching Python json.dumps sort_keys', () => {
+    expect(canonicalJson({ b: 1, a: { d: 2, c: 3 } })).toBe('{"a":{"c":3,"d":2},"b":1}');
+  });
+
+  it('preserves array order (arrays are sequences, not sorted)', () => {
+    expect(canonicalJson({ x: [3, 1, 2] })).toBe('{"x":[3,1,2]}');
+  });
+});
+
+describe('buildSharedDraftCapabilityProof', () => {
+  it('produces a proofSha256 equal to the SHA-256 of the proof minus proofSha256', () => {
+    const proof = buildSharedDraftCapabilityProof(baseInput());
+    const { proofSha256, ...unsigned } = proof;
+    const recomputed = createHash('sha256').update(canonicalJson(unsigned), 'utf8').digest('hex');
+    expect(proofSha256).toBe(recomputed);
+    expect(canonicalSha256(unsigned)).toBe(proofSha256);
+  });
+
+  it('matches the cross-language golden digest computed by the Python consumer', () => {
+    // GOLDEN VECTOR: this hex is the output of the consumer's
+    // canonical_sha256() (json.dumps(..., ensure_ascii=False,
+    // separators=(",",":"), sort_keys=True) then sha256) over the exact unsigned
+    // proof that baseInput() produces, verified end-to-end against
+    // doc-control-capability-evidence.py validate_proof (ready: true). If this
+    // assertion breaks, the TS producer and Python consumer have diverged on
+    // canonicalization and the proof will be rejected in production.
+    //
+    // Re-derived in round 2: validUntil is now capped at observedAt + the
+    // freshness window (04:00:00 -> 04:02:00), so the proof content and this
+    // digest changed from the round-1 value.
+    const GOLDEN = 'f05ad4e276ea4643118aeae3ebcbf3b11230581628e752352aa2c52f1cefe1c0';
+    const proof = buildSharedDraftCapabilityProof(baseInput());
+    expect(proof.proofSha256).toBe(GOLDEN);
+  });
+
+  it('serializes the canonical proof bytes exactly (guards separators, escaping, key order, field set)', () => {
+    // GOLDEN CANONICAL BYTES: the exact canonical serialization of the unsigned
+    // baseInput() proof (json.dumps-equivalent: no whitespace, sorted keys). Any
+    // drift in separators, escaping, key order, or field set fails here in CI.
+    // Python end-to-end equivalence (canonical_sha256 + validate_proof, ready
+    // true) was verified manually against doc-control-capability-evidence.py.
+    const GOLDEN_CANONICAL =
+      '{"connector":{"operation":"get-shared-draft-capability","provider":"eki-ms365-mcp","sessionBindingSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tenantId":"11111111-1111-4111-8111-111111111111"},"customerMutationPerformed":false,"emailSendPermitted":false,"mode":"read_only_no_mailbox_mutation","observedAt":"2026-07-23T04:00:00.000Z","operations":{"createAttachmentUploadSession":true,"createDraft":true,"createReplyDraft":true,"getDownloadUrl":true,"listAttachments":true,"readDraft":true,"readDraftMime":true,"sendOperationExposed":false},"permissions":{"accessRight":"SendAs","delegatedScopes":["Mail.ReadWrite","User.Read","offline_access"],"granted":true,"trusteeObjectId":"22222222-2222-4222-8222-222222222222"},"proofId":"sdc-44444444-4444-4444-8444-444444444444","ready":true,"schema":"eki.doc-control-shared-draft-capability/v1","sharedIdentity":{"primaryAddress":"doccontrol@envirokinetics.com","recipientId":"33333333-3333-4333-8333-333333333333","recipientType":"shared_identity"},"signedInUser":{"objectId":"22222222-2222-4222-8222-222222222222","primaryAddress":"engineer@envirokinetics.com"},"validUntil":"2026-07-23T04:02:00.000Z"}';
+    const proof = buildSharedDraftCapabilityProof(baseInput());
+    const { proofSha256: _omit, ...unsigned } = proof;
+    void _omit;
+    expect(canonicalJson(unsigned)).toBe(GOLDEN_CANONICAL);
+  });
+
+  it('caps validUntil at observedAt plus the freshness window (never a longer lifetime)', () => {
+    const observedAt = new Date('2026-07-23T04:00:00.000Z');
+    const proof = buildSharedDraftCapabilityProof(
+      baseInput({ observedAt, validUntil: new Date('2026-07-23T04:10:00.000Z') })
+    );
+    // 04:00:00 + 120s = 04:02:00, not the requested 04:10:00.
+    expect(proof.validUntil).toBe('2026-07-23T04:02:00.000Z');
+  });
+
+  it('preserves a validUntil shorter than the freshness window', () => {
+    const observedAt = new Date('2026-07-23T04:00:00.000Z');
+    const proof = buildSharedDraftCapabilityProof(
+      baseInput({ observedAt, validUntil: new Date('2026-07-23T04:00:30.000Z') })
+    );
+    expect(proof.validUntil).toBe('2026-07-23T04:00:30.000Z');
+  });
+
+  it('lowercases identifiers and casefolds addresses so they pass the consumer safe-id/email rules', () => {
+    const proof = buildSharedDraftCapabilityProof(
+      baseInput({
+        proofId: 'SDC-ABCDEF',
+        tenantId: 'AAAAAAAA-1111-4111-8111-111111111111',
+        signedInUser: {
+          objectId: 'BBBBBBBB-2222-4222-8222-222222222222',
+          primaryAddress: 'Engineer@Envirokinetics.com',
+        },
+        sharedIdentity: {
+          recipientId: 'CCCCCCCC-3333-4333-8333-333333333333',
+          primaryAddress: 'DocControl@EnviroKinetics.com',
+          recipientType: 'group',
+        },
+      })
+    );
+    expect(proof.proofId).toBe('sdc-abcdef');
+    expect(proof.connector.tenantId).toBe('aaaaaaaa-1111-4111-8111-111111111111');
+    expect(proof.signedInUser.objectId).toBe('bbbbbbbb-2222-4222-8222-222222222222');
+    expect(proof.signedInUser.primaryAddress).toBe('engineer@envirokinetics.com');
+    expect(proof.sharedIdentity.recipientId).toBe('cccccccc-3333-4333-8333-333333333333');
+    expect(proof.sharedIdentity.primaryAddress).toBe('doccontrol@envirokinetics.com');
+    expect(proof.permissions.trusteeObjectId).toBe(proof.signedInUser.objectId);
+  });
+
+  it('emits delegatedScopes as a sorted, de-duplicated set', () => {
+    const proof = buildSharedDraftCapabilityProof(
+      baseInput({ delegatedScopes: ['User.Read', 'Mail.ReadWrite', 'Mail.ReadWrite', 'User.Read'] })
+    );
+    expect(proof.permissions.delegatedScopes).toEqual(['Mail.ReadWrite', 'User.Read']);
+  });
+
+  it('holds the read-only invariants constant regardless of inputs', () => {
+    const proof = buildSharedDraftCapabilityProof(baseInput());
+    expect(proof.schema).toBe('eki.doc-control-shared-draft-capability/v1');
+    expect(proof.mode).toBe('read_only_no_mailbox_mutation');
+    expect(proof.connector.provider).toBe('eki-ms365-mcp');
+    expect(proof.connector.operation).toBe('get-shared-draft-capability');
+    expect(proof.customerMutationPerformed).toBe(false);
+    expect(proof.emailSendPermitted).toBe(false);
+    expect(proof.permissions.accessRight).toBe('SendAs');
+  });
+
+  describe('readiness derivation', () => {
+    it('is ready for the exact positive case', () => {
+      expect(buildSharedDraftCapabilityProof(baseInput()).ready).toBe(true);
+    });
+
+    it('is not ready when SendAs is not granted', () => {
+      expect(buildSharedDraftCapabilityProof(baseInput({ sendAsGranted: false })).ready).toBe(
+        false
+      );
+    });
+
+    it('is not ready when Mail.ReadWrite is absent from the session scopes', () => {
+      const proof = buildSharedDraftCapabilityProof(
+        baseInput({ delegatedScopes: ['User.Read', 'offline_access'] })
+      );
+      expect(proof.ready).toBe(false);
+    });
+
+    it('is not ready when a required draft operation is not registered', () => {
+      const proof = buildSharedDraftCapabilityProof(
+        baseInput({ operations: { ...ALL_OPERATIONS, getDownloadUrl: false } })
+      );
+      expect(proof.ready).toBe(false);
+    });
+
+    it('is not ready when a send operation is exposed', () => {
+      expect(buildSharedDraftCapabilityProof(baseInput({ sendOperationExposed: true })).ready).toBe(
+        false
+      );
+    });
+
+    it('is not ready when the recipient did not resolve to a directory object id', () => {
+      const proof = buildSharedDraftCapabilityProof(baseInput({ recipientResolved: false }));
+      expect(proof.ready).toBe(false);
+    });
+  });
+});
