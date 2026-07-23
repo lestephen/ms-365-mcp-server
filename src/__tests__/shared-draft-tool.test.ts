@@ -173,6 +173,34 @@ describe('get-shared-draft-capability tool', () => {
     expect(json.connector.sessionBindingSha256).not.toContain('session-abc');
   });
 
+  describe('session binding (f2/f4)', () => {
+    it('binds via uti when sid and jti are absent (Microsoft access-token shape)', async () => {
+      // Token carries only uti (no sid, no jti); the proof still binds.
+      const token = makeToken({
+        tid: TENANT,
+        scp: 'Mail.ReadWrite',
+        uti: 'unique-token-id-xyz',
+      });
+      const { result, json } = await invoke(token, {}, ctxWith(DRAFT_TOOLS));
+      expect(result.isError).toBeFalsy();
+      expect(json.ready).toBe(true);
+      expect(json.connector.sessionBindingSha256).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('fails closed when the token has no sid, jti, or uti binder', async () => {
+      const token = makeToken({ tid: TENANT, scp: 'Mail.ReadWrite' });
+      const { result } = await invoke(token, {}, ctxWith(DRAFT_TOOLS));
+      expect(result.isError).toBe(true);
+      // The binder check precedes the ACL read.
+      expect(transport.readSendAsAcl).not.toHaveBeenCalled();
+      const events = vi.mocked(auditLog).mock.calls.map((c) => c[0]);
+      expect(events[events.length - 1]).toMatchObject({
+        status: 'denied',
+        error_type: 'unbindable_session',
+      });
+    });
+  });
+
   it('is not ready when the session lacks Mail.ReadWrite', async () => {
     const { json } = await invoke(scopedToken('User.Read'), {}, ctxWith(DRAFT_TOOLS));
     expect(json.ready).toBe(false);
