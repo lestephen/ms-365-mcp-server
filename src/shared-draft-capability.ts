@@ -22,6 +22,17 @@ export const CONNECTOR_OPERATION = 'get-shared-draft-capability';
 export const REQUIRED_DRAFT_SCOPE = 'Mail.ReadWrite';
 
 /**
+ * Single source of truth for the capability freshness/validity policy. The
+ * Exchange broker rejects a Send As observation older than this window, and the
+ * proof's validUntil is capped at observedAt plus this same window (see
+ * {@link buildSharedDraftCapabilityProof}). Tying the two together means a proof
+ * can never be presentable longer than the observation it rests on was
+ * considered current, so a grant revoked after the read cannot be replayed past
+ * the window. The consumer still clamps validUntil by its own request expiry.
+ */
+export const CAPABILITY_FRESHNESS_WINDOW_MS = 120_000; // 2 minutes
+
+/**
  * The draft-composition operations Document Control requires. Each flag is the
  * structural fact "this operation is registered on the running connector
  * profile"; the builder does not invent them.
@@ -165,6 +176,14 @@ export function buildSharedDraftCapabilityProof(
 
   const trusteeObjectId = lowerSafe(input.signedInUser.objectId);
 
+  // Cap validity at observedAt + the freshness window, centralizing the policy
+  // here so a proof is never presentable longer than its observation was fresh
+  // (never the caller's independent lifetime). The consumer clamps further by
+  // its own request expiry.
+  const windowValidUntil = new Date(input.observedAt.getTime() + CAPABILITY_FRESHNESS_WINDOW_MS);
+  const validUntil =
+    input.validUntil.getTime() < windowValidUntil.getTime() ? input.validUntil : windowValidUntil;
+
   const unsigned: Omit<SharedDraftCapabilityProof, 'proofSha256'> = {
     schema: CAPABILITY_SCHEMA,
     proofId: lowerSafe(input.proofId),
@@ -204,7 +223,7 @@ export function buildSharedDraftCapabilityProof(
     customerMutationPerformed: false,
     emailSendPermitted: false,
     observedAt: input.observedAt.toISOString(),
-    validUntil: input.validUntil.toISOString(),
+    validUntil: validUntil.toISOString(),
   };
 
   return { ...unsigned, proofSha256: canonicalSha256(unsigned) };

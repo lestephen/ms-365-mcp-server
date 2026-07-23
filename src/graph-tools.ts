@@ -2,9 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash, randomUUID } from 'crypto';
 import logger from './logger.js';
 import { auditLog, getSessionClaims, getUserIdentityForAudit } from './audit-log.js';
-import { getConfiguredExoTransport, readSendAsGrant } from './exo-recipient-broker.js';
+import { getConfiguredExoBroker, readSendAsGrant } from './exo-recipient-broker.js';
 import {
   buildSharedDraftCapabilityProof,
+  CAPABILITY_FRESHNESS_WINDOW_MS,
   type OperationCapabilities,
 } from './shared-draft-capability.js';
 import GraphClient from './graph-client.js';
@@ -257,6 +258,19 @@ const SEND_MAIL_SCOPES: ReadonlySet<string> = new Set([
 
 /** The approved shared identity for Document Control (issue #17). */
 const APPROVED_SHARED_IDENTITY = 'doccontrol@envirokinetics.com';
+
+/** Env var naming the Entra tenant that owns the approved Document Control mailbox. */
+const APPROVED_TENANT_ENV = 'MS365_MCP_DOCCONTROL_TENANT_ID';
+
+/**
+ * The configured approved Document Control tenant (lowercased), or undefined
+ * when unset. A missing value is a hard negative for the probe, never a pass:
+ * without it the tenant boundary cannot be enforced.
+ */
+function getApprovedTenantId(): string | undefined {
+  const value = process.env[APPROVED_TENANT_ENV];
+  return value && value.trim() ? value.trim().toLowerCase() : undefined;
+}
 
 interface UtilityTool {
   name: string;
@@ -1066,19 +1080,41 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         .describe(
           `The approved shared identity to probe. Only '${APPROVED_SHARED_IDENTITY}' is accepted; defaults to it when omitted.`
         ),
-      proofLifetimeSeconds: z
-        .number()
-        .int()
-        .positive()
-        .max(600)
-        .optional()
-        .describe('Proof validity in seconds from observation (default 600, max 600).'),
     }),
     execute: async (params, ctx) => {
+      // Every exit routes through one audited path: denied for policy negatives,
+      // error for infrastructure failures, success for a ready proof. No token
+      // material or secrets are placed in the event.
+      const auditProbe = (
+        status: 'success' | 'denied' | 'error',
+        errorType: string | undefined,
+        upn: string | undefined
+      ): void => {
+        auditLog({
+          event: 'capability.shared-draft.probe',
+          request_id: randomUUID(),
+          user_principal_name: upn,
+          tool: 'get-shared-draft-capability',
+          http_method: 'GET',
+          status,
+          error_type: errorType,
+          target_resource: { type: 'exchange.recipient', id: APPROVED_SHARED_IDENTITY },
+        });
+      };
+      const deny = (errorType: string, message: string, upn?: string): CallToolResult => {
+        auditProbe('denied', errorType, upn);
+        return capabilityError(message);
+      };
+      const fail = (errorType: string, message: string, upn?: string): CallToolResult => {
+        auditProbe('error', errorType, upn);
+        return capabilityError(message);
+      };
+
       // 1. A connecting client bearer must be present (HTTP/OAuth mode).
       const token = getRequestTokens()?.accessToken;
       if (!token) {
-        return capabilityError(
+        return deny(
+          'no_session',
           'No authenticated delegated session: this probe requires HTTP/OAuth mode with a bearer token.'
         );
       }
@@ -1089,7 +1125,8 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           ? params.sharedIdentity.trim().toLowerCase()
           : APPROVED_SHARED_IDENTITY;
       if (requested !== APPROVED_SHARED_IDENTITY) {
-        return capabilityError(
+        return deny(
+          'unsupported_identity',
           `This probe only supports the approved shared identity '${APPROVED_SHARED_IDENTITY}'.`
         );
       }
@@ -1097,88 +1134,120 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       // 3. The Exchange recipient-permission broker must be configured. When it
       //    is not (the live app-only credential + RBAC are unprovisioned), fail
       //    honestly rather than inferring Send As from Graph or group membership.
-      const transport = getConfiguredExoTransport();
-      if (!transport) {
-        return capabilityError(
+      const broker = getConfiguredExoBroker();
+      if (!broker) {
+        return deny(
+          'broker_unconfigured',
           'The Exchange Online recipient-permission broker is not configured on this server, so Send As cannot be proven read-only. See exo-recipient-broker.ts for the required app-only provisioning.'
         );
       }
 
+      // 4. The approved Document Control tenant must be configured; a missing
+      //    value is a hard negative, never a pass.
+      const approvedTenantId = getApprovedTenantId();
+      if (!approvedTenantId) {
+        return deny(
+          'approved_tenant_unconfigured',
+          `The approved Document Control tenant (${APPROVED_TENANT_ENV}) is not configured, so the tenant boundary cannot be enforced.`
+        );
+      }
+
+      // 5. Bind the transport side: the broker must be provisioned for the same
+      //    approved tenant, so an injected or misconfigured transport from
+      //    another tenant cannot satisfy the check.
+      if (broker.tenantId.toLowerCase() !== approvedTenantId) {
+        return deny(
+          'transport_tenant_mismatch',
+          'The configured Exchange broker serves a different tenant than the approved Document Control tenant.'
+        );
+      }
+
+      // 6. Resolve the signed-in identity through an AUTHENTICATED read-only
+      //    Graph GET /me. A forged or alg=none token cannot pass, so it can never
+      //    mint a proof (we fail closed here).
+      let identity: { objectId: string; primaryAddress: string };
       try {
-        // 4. Resolve the signed-in identity through an AUTHENTICATED read-only
-        //    Graph GET /me. This is the security root: a forged or alg=none token
-        //    cannot pass, so it can never mint a proof (we fail closed below).
-        const identity = await resolveSignedInIdentity(ctx.graphClient);
+        identity = await resolveSignedInIdentity(ctx.graphClient);
+      } catch (error) {
+        return fail('graph_identity_rejected', (error as Error).message);
+      }
 
-        // 5. The GET /me above proves this token is Microsoft-validated, so its
-        //    tid/scp/sid/jti claims are now authoritative. Object id and address
-        //    come from the /me response body (the strongest source); only the
-        //    non-identity fields are read from the validated token.
-        const claims = getSessionClaims(token);
-        if (!claims || !claims.tenantId) {
-          return capabilityError(
-            'The authenticated session token is missing a tenant claim (tid).'
-          );
-        }
-        const scopes = claims.scopes;
+      // 7. The GET /me above proves the token is Microsoft-validated, so its
+      //    tid/scp/sid/jti claims are now authoritative. Identity comes from the
+      //    /me response body; only non-identity fields come from the token.
+      const claims = getSessionClaims(token);
+      if (!claims || !claims.tenantId) {
+        return deny(
+          'malformed_claims',
+          'The authenticated session token is missing a tenant claim (tid).',
+          identity.primaryAddress
+        );
+      }
 
-        // 6. Read the live Send As ACL (read-only) for the exact trustee. The
-        //    broker captures its freshness clock AFTER the Exchange read returns.
-        const grant = await readSendAsGrant(transport, {
+      // 8. Tenant boundary: the validated token tenant MUST equal the approved
+      //    Document Control tenant. Do not copy whatever tid the token presents.
+      if (claims.tenantId.toLowerCase() !== approvedTenantId) {
+        return deny(
+          'tenant_mismatch',
+          'The signed-in tenant is not the approved Document Control tenant.',
+          identity.primaryAddress
+        );
+      }
+      const scopes = claims.scopes;
+
+      // 9. Read the live Send As ACL (read-only) for the exact trustee. The
+      //    broker captures its freshness clock AFTER the Exchange read returns.
+      let grant;
+      try {
+        grant = await readSendAsGrant(broker.transport, {
           signedInUserObjectId: identity.objectId,
           signedInUserPrimaryAddress: identity.primaryAddress,
           sharedPrimaryAddress: APPROVED_SHARED_IDENTITY,
         });
-
-        // 7. Derive the operation surface and send exposure structurally.
-        const registered = ctx.registeredToolNames ?? new Set<string>();
-        const operations = deriveOperationCapabilities(registered);
-        const sendOperationExposed = deriveSendOperationExposed(registered, scopes);
-
-        // 8. Build the closed proof (readiness derived inside the builder). The
-        //    observation time is the Exchange read time reported by the broker.
-        const lifetimeSeconds =
-          typeof params.proofLifetimeSeconds === 'number' ? params.proofLifetimeSeconds : 600;
-        const observedAt = new Date(grant.sourceObservedAt);
-        const validUntil = new Date(observedAt.getTime() + lifetimeSeconds * 1000);
-        const proof = buildSharedDraftCapabilityProof({
-          proofId: `sdc-${randomUUID()}`,
-          tenantId: claims.tenantId,
-          sessionBindingSha256: computeSessionBindingSha256({
-            tenantId: claims.tenantId,
-            objectId: identity.objectId,
-            sessionId: claims.sessionId,
-            tokenId: claims.tokenId,
-          }),
-          signedInUser: { objectId: identity.objectId, primaryAddress: identity.primaryAddress },
-          sharedIdentity: {
-            recipientId: grant.recipientId ?? 'unresolved',
-            primaryAddress: grant.recipientPrimaryAddress ?? APPROVED_SHARED_IDENTITY,
-            recipientType: grant.recipientType,
-          },
-          recipientResolved: grant.recipientResolved,
-          delegatedScopes: scopes,
-          sendAsGranted: grant.granted,
-          operations,
-          sendOperationExposed,
-          observedAt,
-          validUntil,
-        });
-
-        auditLog({
-          event: 'capability.shared-draft.probe',
-          request_id: randomUUID(),
-          user_principal_name: identity.primaryAddress,
-          tool: 'get-shared-draft-capability',
-          http_method: 'GET',
-          status: proof.ready ? 'success' : 'denied',
-          target_resource: { type: 'exchange.recipient', id: APPROVED_SHARED_IDENTITY },
-        });
-
-        return { content: [{ type: 'text', text: JSON.stringify(proof) }] };
       } catch (error) {
-        return capabilityError((error as Error).message);
+        return fail('transport_failure', (error as Error).message, identity.primaryAddress);
       }
+
+      // 10. Derive the operation surface and send exposure structurally.
+      const registered = ctx.registeredToolNames ?? new Set<string>();
+      const operations = deriveOperationCapabilities(registered);
+      const sendOperationExposed = deriveSendOperationExposed(registered, scopes);
+
+      // 11. Build the closed proof. Observation time is the Exchange read time;
+      //     validUntil is capped at observedAt + the shared freshness window by
+      //     the builder, so validity cannot outlast the observation.
+      const observedAt = new Date(grant.sourceObservedAt);
+      const validUntil = new Date(observedAt.getTime() + CAPABILITY_FRESHNESS_WINDOW_MS);
+      const proof = buildSharedDraftCapabilityProof({
+        proofId: `sdc-${randomUUID()}`,
+        tenantId: approvedTenantId,
+        sessionBindingSha256: computeSessionBindingSha256({
+          tenantId: approvedTenantId,
+          objectId: identity.objectId,
+          sessionId: claims.sessionId,
+          tokenId: claims.tokenId,
+        }),
+        signedInUser: { objectId: identity.objectId, primaryAddress: identity.primaryAddress },
+        sharedIdentity: {
+          recipientId: grant.recipientId ?? 'unresolved',
+          primaryAddress: grant.recipientPrimaryAddress ?? APPROVED_SHARED_IDENTITY,
+          recipientType: grant.recipientType,
+        },
+        recipientResolved: grant.recipientResolved,
+        delegatedScopes: scopes,
+        sendAsGranted: grant.granted,
+        operations,
+        sendOperationExposed,
+        observedAt,
+        validUntil,
+      });
+
+      auditProbe(
+        proof.ready ? 'success' : 'denied',
+        proof.ready ? undefined : 'not_ready',
+        identity.primaryAddress
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(proof) }] };
     },
   },
 ];

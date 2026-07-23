@@ -70,9 +70,30 @@ describe('buildSharedDraftCapabilityProof', () => {
     // doc-control-capability-evidence.py validate_proof (ready: true). If this
     // assertion breaks, the TS producer and Python consumer have diverged on
     // canonicalization and the proof will be rejected in production.
-    const GOLDEN = '53a71c7d80b9631377bd5bce2e12bcfd274bac683ba3099571173617378c1b01';
+    //
+    // Re-derived in round 2: validUntil is now capped at observedAt + the
+    // freshness window (04:00:00 -> 04:02:00), so the proof content and this
+    // digest changed from the round-1 value.
+    const GOLDEN = 'f05ad4e276ea4643118aeae3ebcbf3b11230581628e752352aa2c52f1cefe1c0';
     const proof = buildSharedDraftCapabilityProof(baseInput());
     expect(proof.proofSha256).toBe(GOLDEN);
+  });
+
+  it('caps validUntil at observedAt plus the freshness window (never a longer lifetime)', () => {
+    const observedAt = new Date('2026-07-23T04:00:00.000Z');
+    const proof = buildSharedDraftCapabilityProof(
+      baseInput({ observedAt, validUntil: new Date('2026-07-23T04:10:00.000Z') })
+    );
+    // 04:00:00 + 120s = 04:02:00, not the requested 04:10:00.
+    expect(proof.validUntil).toBe('2026-07-23T04:02:00.000Z');
+  });
+
+  it('preserves a validUntil shorter than the freshness window', () => {
+    const observedAt = new Date('2026-07-23T04:00:00.000Z');
+    const proof = buildSharedDraftCapabilityProof(
+      baseInput({ observedAt, validUntil: new Date('2026-07-23T04:00:30.000Z') })
+    );
+    expect(proof.validUntil).toBe('2026-07-23T04:00:30.000Z');
   });
 
   it('lowercases identifiers and casefolds addresses so they pass the consumer safe-id/email rules', () => {
