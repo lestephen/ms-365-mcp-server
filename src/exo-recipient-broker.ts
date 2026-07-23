@@ -77,6 +77,15 @@ export interface ExoAnnotatedPermission {
   trusteeObjectId?: string;
   /** Primary SMTP address of the trustee, when resolvable. */
   trusteePrimaryAddress?: string;
+  /**
+   * Whether the trustee resolves to a single user or a group. Set by the
+   * transport from the trustee's Exchange RecipientType. Undefined when the
+   * transport could not classify it; an unclassified Deny is treated as
+   * potentially applicable (conservative). Only a Deny whose trustee is a
+   * DIFFERENT resolved user (`user`) is provably unrelated to the signed-in
+   * user and can be excluded.
+   */
+  trusteeType?: 'user' | 'group';
   /** Exchange `AccessControlType`, e.g. 'Allow' or 'Deny'. */
   accessControlType: string;
   /** Exchange `AccessRights`, e.g. ['SendAs']. */
@@ -153,6 +162,12 @@ export interface SendAsGrant {
   stale: boolean;
   /** Set when the shared recipient could not be resolved or did not match. */
   recipientResolved: boolean;
+  /**
+   * Set when a SendAs Deny row applies to the signed-in user or cannot be
+   * excluded (a group or unclassified trustee), forcing a conservative
+   * negative even though a direct user Allow exists.
+   */
+  unexcludableDeny: boolean;
 }
 
 function lower(value: string | undefined): string | undefined {
@@ -202,6 +217,7 @@ export async function readSendAsGrant(
     sourceObservedAt: observedAtIso,
     stale: false,
     recipientResolved,
+    unexcludableDeny: false,
   };
 
   // Wrong / unresolved shared identity: never a positive.
@@ -217,24 +233,41 @@ export async function readSendAsGrant(
     return { ...base, stale: true };
   }
 
-  // Strong match: an explicit Allow + SendAs entry whose trustee resolves to the
-  // signed-in user's object id. A Deny anywhere for this trustee blocks it.
+  // Evaluate the SendAs rows. Granting requires a direct Allow to the signed-in
+  // user's own object id. Blocking is deliberately conservative and READ-ONLY
+  // (we never resolve group membership): a Deny to the user's own id blocks, and
+  // so does ANY other SendAs Deny we cannot prove is unrelated to the user. Only
+  // a Deny to a DIFFERENT resolved USER is provably unrelated and excludable; a
+  // Deny to a group, or to an unresolved/unclassified trustee, is treated as
+  // potentially applicable (the user might belong to that group), forcing a
+  // negative even behind a direct Allow.
   let sendAsAllowed = false;
-  let sendAsDenied = false;
+  let unexcludableDeny = false;
   for (const perm of snapshot.permissions) {
     const rightMatches = perm.accessRights.some((right) => right.toLowerCase() === 'sendas');
     if (!rightMatches) continue;
+    const control = perm.accessControlType.toLowerCase();
     const permTrustee = lower(perm.trusteeObjectId);
-    const trusteeMatches = permTrustee !== undefined && permTrustee === trusteeObjectId;
-    if (!trusteeMatches) continue;
-    if (perm.accessControlType.toLowerCase() === 'deny') {
-      sendAsDenied = true;
-    } else if (perm.accessControlType.toLowerCase() === 'allow') {
-      sendAsAllowed = true;
+    const isOurUser = permTrustee !== undefined && permTrustee === trusteeObjectId;
+
+    if (control === 'allow') {
+      if (isOurUser) sendAsAllowed = true;
+      continue; // group/other Allow never grants us (no membership inference)
     }
+    if (control !== 'deny') continue;
+
+    if (isOurUser) {
+      unexcludableDeny = true; // direct user Deny always wins
+      continue;
+    }
+    // A Deny to some other trustee. Provably unrelated only if it is a resolved,
+    // different USER; otherwise it might apply to us via group membership.
+    const provablyUnrelated =
+      perm.trusteeType === 'user' && permTrustee !== undefined && permTrustee !== trusteeObjectId;
+    if (!provablyUnrelated) unexcludableDeny = true;
   }
 
-  return { ...base, granted: sendAsAllowed && !sendAsDenied };
+  return { ...base, unexcludableDeny, granted: sendAsAllowed && !unexcludableDeny };
 }
 
 /**
