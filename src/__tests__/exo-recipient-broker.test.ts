@@ -151,6 +151,21 @@ describe('readSendAsGrant', () => {
     expect(grant.recipientId).toBeUndefined();
   });
 
+  it('yields a clean negative (no throw) when the recipient lacks a primaryAddress (f2)', async () => {
+    const grant = await readSendAsGrant(
+      transportOf(
+        snapshot({
+          // Malformed transport response: object id present, address missing.
+          recipient: { objectId: RECIP_OID, recipientType: 'SharedMailbox' },
+          permissions: [sendAsAllow],
+        })
+      ),
+      { signedInUserObjectId: USER_OID, sharedPrimaryAddress: SHARED, clock }
+    );
+    expect(grant.granted).toBe(false);
+    expect(grant.recipientResolved).toBe(false);
+  });
+
   it('denies when the shared recipient does not resolve to the requested address', async () => {
     const grant = await readSendAsGrant(
       transportOf(

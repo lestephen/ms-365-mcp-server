@@ -87,8 +87,12 @@ export interface ExoAnnotatedPermission {
 export interface ExoResolvedRecipient {
   /** Entra object id (ExternalDirectoryObjectId), lowercased. */
   objectId?: string;
-  /** Primary SMTP address as Exchange reports it. */
-  primaryAddress: string;
+  /**
+   * Primary SMTP address as Exchange reports it. Optional because a malformed
+   * transport response may omit it; a missing address is a clean negative, not
+   * a crash.
+   */
+  primaryAddress?: string;
   /** Raw Exchange RecipientTypeDetails / RecipientType string. */
   recipientType?: string;
 }
@@ -185,7 +189,7 @@ export async function readSendAsGrant(
   const recipientResolved =
     !!recipient &&
     recipientObjectId !== undefined &&
-    recipient.primaryAddress.toLowerCase() === sharedTarget;
+    recipient.primaryAddress?.toLowerCase() === sharedTarget;
   const recipientType = mapRecipientType(recipient?.recipientType);
 
   const base: SendAsGrant = {
