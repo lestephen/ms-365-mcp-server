@@ -236,6 +236,26 @@ class MicrosoftGraphServer {
     } else if (this.options.directTools) {
       logger.warn('--direct-tools has no effect without --discovery; ignoring it');
     }
+
+    // The blocklist matches tool NAMES, so a generic passthrough tool that takes an
+    // arbitrary Graph method and path can still reach a blocked operation: graph-batch
+    // can carry POST /me/sendMail as a subrequest, and the download helpers accept any
+    // Graph path. Enforcing this properly means authorizing normalized method/path
+    // pairs on every request and every batch subrequest, which is tracked separately.
+    // Until then, say so plainly at startup rather than letting an operator believe a
+    // name-based policy is airtight.
+    if (this.options.blockedTools) {
+      const passthrough = ['graph-batch', 'download-bytes', 'get-download-url'].filter(
+        (name) => !new RegExp(this.options.blockedTools!, 'i').test(name)
+      );
+      if (passthrough.length > 0) {
+        logger.warn(
+          `--blocked-tools matches tool names only. These generic passthrough tools are ` +
+            `still registered and can reach a blocked Graph operation by method and path: ` +
+            `${passthrough.join(', ')}. Add them to --blocked-tools if your policy must hold.`
+        );
+      }
+    }
   }
 
   async start(): Promise<void> {
