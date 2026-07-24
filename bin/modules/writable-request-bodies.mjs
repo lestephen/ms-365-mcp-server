@@ -39,8 +39,7 @@ const WRITABLE_NAVIGATION_PROPERTIES = {
   // callers stash their own sync metadata on an item.
   'microsoft.graph.message': ['attachments', ...EXTENDED_PROPERTIES],
   'microsoft.graph.event': ['attachments', ...EXTENDED_PROPERTIES],
-  'microsoft.graph.post': ['attachments', ...EXTENDED_PROPERTIES],
-  'microsoft.graph.todoTask': ['attachments', 'checklistItems', 'linkedResources'],
+  'microsoft.graph.todoTask': ['attachments', 'checklistItems', 'linkedResources', 'extensions'],
   'microsoft.graph.contact': EXTENDED_PROPERTIES,
   'microsoft.graph.contactFolder': EXTENDED_PROPERTIES,
   'microsoft.graph.mailFolder': EXTENDED_PROPERTIES,
@@ -53,6 +52,16 @@ const WRITABLE_NAVIGATION_PROPERTIES = {
   'microsoft.graph.chat': ['members'],
   'microsoft.graph.channel': ['members'],
   'microsoft.graph.plannerTask': ['details'],
+  // Inline images in a Teams message are sent as hostedContents referenced from the
+  // HTML body, so this is writable on create. `replies` is not: replies are posted
+  // to their own endpoint.
+  'microsoft.graph.chatMessage': ['hostedContents'],
+  // An open extension can be created inline with the item that carries it.
+  'microsoft.graph.post': ['attachments', 'extensions', ...EXTENDED_PROPERTIES],
+  'microsoft.graph.todoTaskList': ['extensions'],
+  // POST /teams accepts members. No create-team tool exists today, but keeping this
+  // here means the silent-loss bug does not return if one is added.
+  'microsoft.graph.team': ['members'],
   // Excel formatting is applied by PATCHing these onto the range format, so they
   // are the entire point of format-excel-range. Graph models them as navigation
   // properties even though they are writable.
@@ -224,15 +233,21 @@ export function restrictRequestBodiesToWritableProperties(spec) {
     const allowed = new Set(WRITABLE_NAVIGATION_PROPERTIES[declaringSchema] ?? []);
 
     if (isRecord(node.properties)) {
+      const deleted = new Set();
       for (const [property, definition] of Object.entries(node.properties)) {
         if (!isRecord(definition)) continue;
         if (definition['x-ms-navigationProperty'] !== true) continue;
         if (allowed.has(property)) continue;
         delete node.properties[property];
+        deleted.add(property);
         report.removed.push({ schema: declaringSchema, property });
       }
-      if (Array.isArray(node.required)) {
-        node.required = node.required.filter((property) => property in node.properties);
+      // Filter `required` by what this pass actually deleted, not by membership in
+      // node.properties: Graph declares some required names in an allOf branch other
+      // than the one carrying `properties`, and dropping those would weaken
+      // validation for a body this pass did not otherwise touch.
+      if (deleted.size > 0 && Array.isArray(node.required)) {
+        node.required = node.required.filter((property) => !deleted.has(property));
       }
     }
 
@@ -270,8 +285,10 @@ export function restrictRequestBodiesToWritableProperties(spec) {
       schema.$ref = writableVariantRef(direct);
       return;
     }
-    // Inline body schema: strip in place, then repoint anything it references.
-    stripNavigationProperties(schema, '(inline request body)');
+    // Inline body schema. There is no declaring entity name, so the allowlist could
+    // never match and stripping here would drop every navigation property including
+    // the writable ones. Leave the inline schema alone and only follow its refs,
+    // where a named entity does resolve.
     repointRefs(schema);
   });
 
