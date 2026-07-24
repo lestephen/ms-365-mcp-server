@@ -4,7 +4,7 @@
     "method": "post",
     "toolName": "graph-batch",
     "scopes": [],
-    "llmTip": "Combine up to 20 Graph requests into a single HTTP call. Body: { requests: [{ id: '1', method: 'GET'|'POST'|'PATCH'|'DELETE', url: '/me/messages?$top=5', headers?: {...}, body?: {...}, dependsOn?: ['1'] }, ...] }. Returns { responses: [{ id, status, body, headers }] } in arbitrary order — match by id. Use cases: (1) parallelize many small reads (e.g. fetch 15 mail messages by id in one round-trip); (2) sequence dependent writes via dependsOn; (3) batch many Excel range writes into one call to dramatically reduce latency on large workbook builds. Note: each sub-request URL is relative to the Graph version root (/me/..., /drives/..., NOT https://graph.microsoft.com/v1.0/...)."
+    "llmTip": "Combine up to 20 Graph requests into a single HTTP call. Body: { requests: [{ id: '1', method: 'GET'|'POST'|'PATCH'|'DELETE', url: '/me/messages?$top=5', headers?: {...}, body?: {...}, dependsOn?: ['1'] }, ...] }. Returns { responses: [{ id, status, body, headers }] } in arbitrary order \u2014 match by id. Use cases: (1) parallelize many small reads (e.g. fetch 15 mail messages by id in one round-trip); (2) sequence dependent writes via dependsOn; (3) batch many Excel range writes into one call to dramatically reduce latency on large workbook builds. Note: each sub-request URL is relative to the Graph version root (/me/..., /drives/..., NOT https://graph.microsoft.com/v1.0/...)."
   },
   {
     "pathPattern": "/me/messages",
@@ -166,7 +166,7 @@
     "toolName": "delete-mail-message",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Soft delete — moves to Deleted Items. To permanently delete, delete again from Deleted Items."
+    "llmTip": "Soft delete \u2014 moves to Deleted Items. To permanently delete, delete again from Deleted Items."
   },
   {
     "pathPattern": "/me/messages/{message-id}/move",
@@ -268,7 +268,7 @@
     "toolName": "send-draft-message",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Send"],
-    "llmTip": "No request body needed — just call with the message ID. Draft must exist in Drafts folder."
+    "llmTip": "No request body needed \u2014 just call with the message ID. Draft must exist in Drafts folder."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}/messageRules",
@@ -308,7 +308,7 @@
     "toolName": "list-focused-inbox-overrides",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Read"],
-    "llmTip": "Lists Focused Inbox classification overrides — explicit rules that force messages from a given sender (by SMTP address) into either the Focused or Other tab, regardless of what the Outlook ML classifier would predict. Each override has id, classifyAs ('focused' or 'other'), and senderEmailAddress {name, address}. Returns an empty collection if the user has never set an override."
+    "llmTip": "Lists Focused Inbox classification overrides \u2014 explicit rules that force messages from a given sender (by SMTP address) into either the Focused or Other tab, regardless of what the Outlook ML classifier would predict. Each override has id, classifyAs ('focused' or 'other'), and senderEmailAddress {name, address}. Returns an empty collection if the user has never set an override."
   },
   {
     "pathPattern": "/me/inferenceClassification/overrides",
@@ -316,7 +316,7 @@
     "toolName": "create-focused-inbox-override",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Creates a Focused Inbox override for a sender. Body: { classifyAs: 'focused', senderEmailAddress: { name: 'Display Name', address: 'sender@example.com' } }. classifyAs must be 'focused' or 'other'. If an override already exists for that SMTP address, POST updates the existing override's name and classifyAs (use this to rename a sender). Resolve the sender's address with list-users or by reading a recent mail header — do not invent SMTP addresses."
+    "llmTip": "Creates a Focused Inbox override for a sender. Body: { classifyAs: 'focused', senderEmailAddress: { name: 'Display Name', address: 'sender@example.com' } }. classifyAs must be 'focused' or 'other'. If an override already exists for that SMTP address, POST updates the existing override's name and classifyAs (use this to rename a sender). Resolve the sender's address with list-users or by reading a recent mail header \u2014 do not invent SMTP addresses."
   },
   {
     "pathPattern": "/me/inferenceClassification/overrides/{inferenceClassificationOverride-id}",
@@ -324,7 +324,7 @@
     "toolName": "update-focused-inbox-override",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "Updates the classifyAs field of an existing override. Body: { classifyAs: 'focused' } or { classifyAs: 'other' }. Per Graph API, PATCH cannot change senderEmailAddress — to change the SMTP address, delete and recreate the override. To rename the display name only, POST a new override with the same SMTP address (it will overwrite the name)."
+    "llmTip": "Updates the classifyAs field of an existing override. Body: { classifyAs: 'focused' } or { classifyAs: 'other' }. Per Graph API, PATCH cannot change senderEmailAddress \u2014 to change the SMTP address, delete and recreate the override. To rename the display name only, POST a new override with the same SMTP address (it will overwrite the name)."
   },
   {
     "pathPattern": "/me/inferenceClassification/overrides/{inferenceClassificationOverride-id}",
@@ -342,7 +342,7 @@
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
     "supportsExpandExtendedProperties": true,
-    "llmTip": "WARNING: Does NOT expand recurring events — only returns seriesMaster. Use get-calendar-view instead to see individual occurrences within a date range."
+    "llmTip": "WARNING: Does NOT expand recurring events \u2014 only returns seriesMaster. Use get-calendar-view instead to see individual occurrences within a date range."
   },
   {
     "pathPattern": "/me/events/{event-id}",
@@ -359,7 +359,7 @@
     "toolName": "create-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "descriptionOverride": "Create (schedule) a new calendar event — a meeting or appointment — on the user's calendar. Set subject, start/end times, time zone, location, body, and attendees; supports online meetings and recurrence.",
+    "descriptionOverride": "Create (schedule) a new calendar event \u2014 a meeting or appointment \u2014 on the user's calendar. Set subject, start/end times, time zone, location, body, and attendees; supports online meetings and recurrence.",
     "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
   },
   {
@@ -368,7 +368,7 @@
     "toolName": "update-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list \u2014 include all attendees, not just new ones."
   },
   {
     "pathPattern": "/me/events/{event-id}",
@@ -410,7 +410,7 @@
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
     "supportsExpandExtendedProperties": true,
-    "llmTip": "WARNING: Does NOT expand recurring events — only returns seriesMaster. Use get-specific-calendar-view instead."
+    "llmTip": "WARNING: Does NOT expand recurring events \u2014 only returns seriesMaster. Use get-specific-calendar-view instead."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events/{event-id}",
@@ -435,7 +435,7 @@
     "toolName": "update-specific-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones."
+    "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list \u2014 include all attendees, not just new ones."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/events/{event-id}",
@@ -651,7 +651,7 @@
     "toolName": "list-drive-item-thumbnails",
     "presets": ["files", "onedrive", "personal"],
     "scopes": ["Files.Read"],
-    "llmTip": "Lists thumbnail sets for a file. Each set contains small (96px), medium (176px), large (800px) thumbnails with url and dimensions. Returns empty for unsupported types (text docs). Use $select=small,medium,large or $expand=small($select=url) to fetch specific sizes. The returned URLs are short-lived — fetch the bytes immediately."
+    "llmTip": "Lists thumbnail sets for a file. Each set contains small (96px), medium (176px), large (800px) thumbnails with url and dimensions. Returns empty for unsupported types (text docs). Use $select=small,medium,large or $expand=small($select=url) to fetch specific sizes. The returned URLs are short-lived \u2014 fetch the bytes immediately."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/permissions",
@@ -702,7 +702,7 @@
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
     "skipEncoding": ["address"],
-    "llmTip": "Apply rangeFormat properties to a specific range. Required path param 'address' (e.g. 'A1:E5' or 'Sheet1!A1:E5'). Body: { horizontalAlignment, verticalAlignment, wrapText, columnWidth, rowHeight }. Note: font, fill, and borders are sub-resources on rangeFormat — set them via /format/font, /format/fill, and /format/borders/{sideIndex} respectively, not on this endpoint."
+    "llmTip": "Apply rangeFormat properties to a specific range. Required path param 'address' (e.g. 'A1:E5' or 'Sheet1!A1:E5'). Body: { horizontalAlignment, verticalAlignment, wrapText, columnWidth, rowHeight }. Note: font, fill, and borders are sub-resources on rangeFormat \u2014 set them via /format/font, /format/fill, and /format/borders/{sideIndex} respectively, not on this endpoint."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/range()/sort",
@@ -738,7 +738,7 @@
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
     "skipEncoding": ["address"],
-    "llmTip": "Set cell values, formulas, or number format on any range — does NOT require the worksheet to be a formal Excel table. Body: { values: [['v1','v2','v3']] } for a single row, or [['a','b'],['c','d']] for multi-row. Use this for append (target the next empty row's address, e.g. 'A172:H172'), update (target a single cell like 'H42'), or prepend-style edits (read existing, concatenate, write back). Number of inner-array values must match the column count of the address."
+    "llmTip": "Set cell values, formulas, or number format on any range \u2014 does NOT require the worksheet to be a formal Excel table. Body: { values: [['v1','v2','v3']] } for a single row, or [['a','b'],['c','d']] for multi-row. Use this for append (target the next empty row's address, e.g. 'A172:H172'), update (target a single cell like 'H42'), or prepend-style edits (read existing, concatenate, write back). Number of inner-array values must match the column count of the address."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/range(address='{address}')/insert",
@@ -797,7 +797,7 @@
     "presets": ["excel", "personal"],
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
-    "llmTip": "Get the smallest range that encompasses any cells with values or formatting on the worksheet. Returns address, values, formulas, numberFormat, rowCount, columnCount. Use this to discover the populated bounds of a sheet before reading or appending — avoids guessing how far data extends. Optional $select to trim the response."
+    "llmTip": "Get the smallest range that encompasses any cells with values or formatting on the worksheet. Returns address, values, formulas, numberFormat, rowCount, columnCount. Use this to discover the populated bounds of a sheet before reading or appending \u2014 avoids guessing how far data extends. Optional $select to trim the response."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/tables/{workbookTable-id}/rows/itemAt(index={index})",
@@ -1005,7 +1005,7 @@
     "toolName": "list-todo-task-lists",
     "presets": ["personal", "tasks"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Lists all To Do task lists. Returns todoTaskList-id needed for all task operations. The default list is typically called 'Tasks'. NOTE: $select is NOT supported by this endpoint — do not pass select parameter, Graph returns 400."
+    "llmTip": "Lists all To Do task lists. Returns todoTaskList-id needed for all task operations. The default list is typically called 'Tasks'. NOTE: $select is NOT supported by this endpoint \u2014 do not pass select parameter, Graph returns 400."
   },
   {
     "pathPattern": "/me/todo/lists/{todoTaskList-id}/tasks",
@@ -1013,7 +1013,7 @@
     "toolName": "list-todo-tasks",
     "presets": ["personal", "tasks"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Lists tasks in a To Do list. Requires todoTaskList-id — use list-todo-task-lists to find it. NOTE: $select is NOT supported — do not pass select, Graph returns 400. Use $filter=status eq 'notStarted' or $filter=status eq 'completed' to filter by status. Use $top to limit results. Status values: 'notStarted', 'inProgress', 'completed', 'waitingOnOthers', 'deferred'."
+    "llmTip": "Lists tasks in a To Do list. Requires todoTaskList-id \u2014 use list-todo-task-lists to find it. NOTE: $select is NOT supported \u2014 do not pass select, Graph returns 400. Use $filter=status eq 'notStarted' or $filter=status eq 'completed' to filter by status. Use $top to limit results. Status values: 'notStarted', 'inProgress', 'completed', 'waitingOnOthers', 'deferred'."
   },
   {
     "pathPattern": "/me/todo/lists/{todoTaskList-id}/tasks/{todoTask-id}",
@@ -1021,7 +1021,7 @@
     "toolName": "get-todo-task",
     "presets": ["personal", "tasks"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Returns a single To Do task. NOTE: $select is NOT supported — do not pass select parameter, Graph returns RequestBroker--ParseUri (400). Use $expand=linkedResources to include linked email/resource. Returns body content (HTML format), checklist items, and linked resources."
+    "llmTip": "Returns a single To Do task. NOTE: $select is NOT supported \u2014 do not pass select parameter, Graph returns RequestBroker--ParseUri (400). Use $expand=linkedResources to include linked email/resource. Returns body content (HTML format), checklist items, and linked resources."
   },
   {
     "pathPattern": "/me/todo/lists/{todoTaskList-id}/tasks",
@@ -1097,7 +1097,7 @@
     "toolName": "get-planner-task",
     "presets": ["tasks", "work"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Response includes @odata.etag — save it, required as If-Match header for update-planner-task. Use includeHeaders=true to capture it."
+    "llmTip": "Response includes @odata.etag \u2014 save it, required as If-Match header for update-planner-task. Use includeHeaders=true to capture it."
   },
   {
     "pathPattern": "/planner/tasks",
@@ -1120,7 +1120,7 @@
     "toolName": "get-planner-task-details",
     "presets": ["tasks", "work"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Response includes @odata.etag — required for update-planner-task-details. Use includeHeaders=true."
+    "llmTip": "Response includes @odata.etag \u2014 required for update-planner-task-details. Use includeHeaders=true."
   },
   {
     "pathPattern": "/planner/tasks/{plannerTask-id}/details",
@@ -1143,7 +1143,7 @@
     "toolName": "get-planner-bucket",
     "presets": ["tasks", "work"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Response includes @odata.etag — required as If-Match for update-planner-bucket and delete-planner-bucket. Use includeHeaders=true."
+    "llmTip": "Response includes @odata.etag \u2014 required as If-Match for update-planner-bucket and delete-planner-bucket. Use includeHeaders=true."
   },
   {
     "pathPattern": "/planner/buckets",
@@ -1174,7 +1174,7 @@
     "toolName": "list-planner-task-messages",
     "scopes": ["Tasks.Read"],
     "apiVersion": "beta",
-    "llmTip": "Lists messages in a Planner task's chat — the modern Planner 'task chat', distinct from the legacy conversationThreadId comments (which live in the M365 group conversation thread). Each message has id, content (HTML), createdBy, createdDateTime, mentions, reactions. BETA Graph API: subject to change; delegated work/school accounts only — no application permissions, no personal Microsoft accounts, global cloud only (not GCC/DoD/21Vianet)."
+    "llmTip": "Lists messages in a Planner task's chat \u2014 the modern Planner 'task chat', distinct from the legacy conversationThreadId comments (which live in the M365 group conversation thread). Each message has id, content (HTML), createdBy, createdDateTime, mentions, reactions. BETA Graph API: subject to change; delegated work/school accounts only \u2014 no application permissions, no personal Microsoft accounts, global cloud only (not GCC/DoD/21Vianet)."
   },
   {
     "pathPattern": "/planner/tasks/{plannerTask-id}/messages",
@@ -1182,7 +1182,7 @@
     "toolName": "create-planner-task-message",
     "scopes": ["Tasks.ReadWrite"],
     "apiVersion": "beta",
-    "llmTip": "Posts a message to a Planner task's chat (the modern 'task chat', not the legacy conversationThreadId comment). Microsoft is retiring the classic task comments experience and hiding it from the task (Planner 2026 update), so task chat is the current supported way to post per-task updates teammates will see, with @mentions. Body: { content: 'plain text or sanitized HTML', mentions?: [{ mentioned: 'user-id', position: 0, mentionType: 'user' }] } (mentions optional). No ETag/If-Match required. BETA Graph API: subject to change; delegated work/school accounts only — no application permissions, no personal Microsoft accounts, global cloud only (not GCC/DoD/21Vianet)."
+    "llmTip": "Posts a message to a Planner task's chat (the modern 'task chat', not the legacy conversationThreadId comment). Microsoft is retiring the classic task comments experience and hiding it from the task (Planner 2026 update), so task chat is the current supported way to post per-task updates teammates will see, with @mentions. Body: { content: 'plain text or sanitized HTML', mentions?: [{ mentioned: 'user-id', position: 0, mentionType: 'user' }] } (mentions optional). No ETag/If-Match required. BETA Graph API: subject to change; delegated work/school accounts only \u2014 no application permissions, no personal Microsoft accounts, global cloud only (not GCC/DoD/21Vianet)."
   },
   {
     "pathPattern": "/planner/tasks/{plannerTask-id}/messages/{plannerTaskChatMessage-id}",
@@ -1190,7 +1190,7 @@
     "toolName": "delete-planner-task-message",
     "scopes": ["Tasks.ReadWrite"],
     "apiVersion": "beta",
-    "llmTip": "Deletes a message from a Planner task's chat. No request body; If-Match is optional if you want conditional deletion; returns 204. BETA Graph API: subject to change; delegated work/school accounts only — no application permissions, no personal Microsoft accounts, global cloud only (not GCC/DoD/21Vianet)."
+    "llmTip": "Deletes a message from a Planner task's chat. No request body; If-Match is optional if you want conditional deletion; returns 204. BETA Graph API: subject to change; delegated work/school accounts only \u2014 no application permissions, no personal Microsoft accounts, global cloud only (not GCC/DoD/21Vianet)."
   },
   {
     "pathPattern": "/me/contacts",
@@ -1198,7 +1198,7 @@
     "toolName": "list-outlook-contacts",
     "presets": ["contacts", "outlook", "personal"],
     "scopes": ["Contacts.Read"],
-    "llmTip": "$filter only supports startswith() — contains() and eq on emailAddresses do not work. Use $search as alternative for broader matching."
+    "llmTip": "$filter only supports startswith() \u2014 contains() and eq on emailAddresses do not work. Use $search as alternative for broader matching."
   },
   {
     "pathPattern": "/me/contacts/{contact-id}",
@@ -1220,7 +1220,7 @@
     "toolName": "update-outlook-contact",
     "presets": ["contacts", "outlook", "personal"],
     "scopes": ["Contacts.ReadWrite"],
-    "llmTip": "emailAddresses array is replaced entirely — include all addresses, not just new ones."
+    "llmTip": "emailAddresses array is replaced entirely \u2014 include all addresses, not just new ones."
   },
   {
     "pathPattern": "/me/contacts/{contact-id}",
@@ -1307,7 +1307,7 @@
     "toolName": "list-my-memberships",
     "presets": ["users", "work"],
     "workScopes": ["Directory.Read.All"],
-    "llmTip": "Lists all groups, directory roles, and administrative units the current user is a member of. Returns directoryObjects — use $filter=isof('microsoft.graph.group') to filter to groups only. Each group has displayName, mail, groupTypes, membershipRule."
+    "llmTip": "Lists all groups, directory roles, and administrative units the current user is a member of. Returns directoryObjects \u2014 use $filter=isof('microsoft.graph.group') to filter to groups only. Each group has displayName, mail, groupTypes, membershipRule."
   },
   {
     "pathPattern": "/groups",
@@ -1407,7 +1407,7 @@
     "toolName": "send-chat-message",
     "presets": ["teams", "work"],
     "workScopes": ["ChatMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body \u2014 plain text contentType gets mangled by Graph API."
   },
   {
     "pathPattern": "/me/joinedTeams",
@@ -1486,7 +1486,7 @@
     "toolName": "send-channel-message",
     "presets": ["teams", "work"],
     "workScopes": ["ChannelMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body \u2014 plain text contentType gets mangled by Graph API."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
@@ -1494,7 +1494,7 @@
     "toolName": "reply-to-channel-message",
     "presets": ["teams", "work"],
     "workScopes": ["ChannelMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body \u2014 plain text contentType gets mangled by Graph API."
   },
   {
     "pathPattern": "/teams/{team-id}/channels/{channel-id}/messages/{chatMessage-id}/replies",
@@ -1566,7 +1566,7 @@
     "toolName": "reply-to-chat-message",
     "presets": ["teams", "work"],
     "workScopes": ["ChatMessage.Send"],
-    "llmTip": "Use contentType 'html' in the body — plain text contentType gets mangled by Graph API."
+    "llmTip": "Use contentType 'html' in the body \u2014 plain text contentType gets mangled by Graph API."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}/setReaction",
@@ -1594,7 +1594,19 @@
     "method": "post",
     "toolName": "pin-chat-message",
     "presets": ["teams", "work"],
-    "workScopes": ["ChatMessage.Send"]
+    "workScopes": ["ChatMessage.Send"],
+    "requestBodySchema": {
+      "type": "object",
+      "required": ["message@odata.bind"],
+      "additionalProperties": false,
+      "properties": {
+        "message@odata.bind": {
+          "type": "string",
+          "description": "Full Graph URL of the message to pin, for example https://graph.microsoft.com/v1.0/chats/{chat-id}/messages/{message-id}. Graph accepts only this @odata.bind reference here; a nested message object is rejected."
+        }
+      }
+    },
+    "llmTip": "Pin an existing message. The body is a single @odata.bind reference to the message, not a message object: { \"message@odata.bind\": \"https://graph.microsoft.com/v1.0/chats/{chat-id}/messages/{message-id}\" }."
   },
   {
     "pathPattern": "/chats/{chat-id}/pinnedMessages/{pinnedChatMessageInfo-id}",
@@ -1697,7 +1709,7 @@
     "toolName": "delete-sharepoint-list-item",
     "presets": ["work"],
     "workScopes": ["Sites.ReadWrite.All"],
-    "llmTip": "Deletes a list item permanently. This cannot be undone — the item is moved to the site recycle bin."
+    "llmTip": "Deletes a list item permanently. This cannot be undone \u2014 the item is moved to the site recycle bin."
   },
   {
     "pathPattern": "/sites/{site-id}/lists",
@@ -1737,7 +1749,7 @@
     "toolName": "update-sharepoint-list-column",
     "presets": ["work"],
     "workScopes": ["Sites.Manage.All"],
-    "llmTip": "Updates a column definition. Body: { displayName: 'New name', description: 'New description', required: true, ... }. The column type itself (text, choice, etc.) cannot be changed — only its metadata and per-type options (e.g. choices array for a choice column). Send only the fields you want to change."
+    "llmTip": "Updates a column definition. Body: { displayName: 'New name', description: 'New description', required: true, ... }. The column type itself (text, choice, etc.) cannot be changed \u2014 only its metadata and per-type options (e.g. choices array for a choice column). Send only the fields you want to change."
   },
   {
     "pathPattern": "/sites/{site-id}/lists/{list-id}/columns/{columnDefinition-id}",
@@ -1745,7 +1757,7 @@
     "toolName": "delete-sharepoint-list-column",
     "presets": ["work"],
     "workScopes": ["Sites.Manage.All"],
-    "llmTip": "Deletes a column from a SharePoint list. This is irreversible — all data stored in this column across every list item is lost. Confirm with the user before calling. Cannot delete built-in columns (Title, Created, Modified, etc.)."
+    "llmTip": "Deletes a column from a SharePoint list. This is irreversible \u2014 all data stored in this column across every list item is lost. Confirm with the user before calling. Cannot delete built-in columns (Title, Created, Modified, etc.)."
   },
   {
     "pathPattern": "/sites/{site-id}/getByPath(path='{path}')",
@@ -1797,7 +1809,7 @@
         "dataSource": {
           "type": "string",
           "enum": ["sharePoint", "oneDriveBusiness", "externalItem"],
-          "description": "Which source to retrieve from — one at a time (interleaved results are not supported). 'sharePoint', 'oneDriveBusiness', or 'externalItem' (Copilot connectors)."
+          "description": "Which source to retrieve from \u2014 one at a time (interleaved results are not supported). 'sharePoint', 'oneDriveBusiness', or 'externalItem' (Copilot connectors)."
         },
         "filterExpression": {
           "type": "string",
@@ -1805,18 +1817,20 @@
         },
         "resourceMetadata": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Optional list of retrievable metadata fields to return per hit (e.g. ['title', 'author']). By default no metadata is returned."
         },
         "maximumNumberOfResults": {
           "type": "integer",
           "minimum": 1,
           "maximum": 25,
-          "description": "Optional cap on the number of results (1-25). Best practice: leave unset unless your LLM has strict token limits — results are unordered."
+          "description": "Optional cap on the number of results (1-25). Best practice: leave unset unless your LLM has strict token limits \u2014 results are unordered."
         }
       }
     },
-    "llmTip": "Semantic/hybrid search over Microsoft 365 content via the Copilot Retrieval API. Grounds a natural-language query against the same hybrid index that powers Microsoft 365 Copilot and returns permission-trimmed text extracts with their source URLs — unlike search-query/search-onedrive-files/search-sharepoint-sites, which are lexical KQL. Prefer this for paraphrase/intent queries (e.g. resolving an informal project nickname, or matching 'packaging requirements' against text that never uses that phrase). Pass the request fields nested under a 'body' object: { queryString, dataSource, filterExpression?, resourceMetadata?, maximumNumberOfResults? }. Returns { retrievalHits: [{ webUrl, extracts: [{ text, relevanceScore }], resourceType, resourceMetadata, sensitivityLabel? }] }. Work/school accounts only (personal accounts are not supported). dataSource 'sharePoint'/'oneDriveBusiness' need delegated Files.Read.All + Sites.Read.All (requested by default); dataSource 'externalItem' (Copilot connectors) needs ExternalItem.Read.All, which is not requested by default - add it with --extra-scopes ExternalItem.Read.All."
+    "llmTip": "Semantic/hybrid search over Microsoft 365 content via the Copilot Retrieval API. Grounds a natural-language query against the same hybrid index that powers Microsoft 365 Copilot and returns permission-trimmed text extracts with their source URLs \u2014 unlike search-query/search-onedrive-files/search-sharepoint-sites, which are lexical KQL. Prefer this for paraphrase/intent queries (e.g. resolving an informal project nickname, or matching 'packaging requirements' against text that never uses that phrase). Pass the request fields nested under a 'body' object: { queryString, dataSource, filterExpression?, resourceMetadata?, maximumNumberOfResults? }. Returns { retrievalHits: [{ webUrl, extracts: [{ text, relevanceScore }], resourceType, resourceMetadata, sensitivityLabel? }] }. Work/school accounts only (personal accounts are not supported). dataSource 'sharePoint'/'oneDriveBusiness' need delegated Files.Read.All + Sites.Read.All (requested by default); dataSource 'externalItem' (Copilot connectors) needs ExternalItem.Read.All, which is not requested by default - add it with --extra-scopes ExternalItem.Read.All."
   },
   {
     "pathPattern": "/me/onlineMeetings",
@@ -1937,7 +1951,7 @@
     "toolName": "list-group-conversations",
     "presets": ["work"],
     "workScopes": ["Group.Read.All"],
-    "llmTip": "Legacy — Microsoft recommends Teams channels instead of group conversations."
+    "llmTip": "Legacy \u2014 Microsoft recommends Teams channels instead of group conversations."
   },
   {
     "pathPattern": "/groups/{group-id}/threads",
@@ -1945,7 +1959,7 @@
     "toolName": "list-group-threads",
     "presets": ["work"],
     "workScopes": ["Group.Read.All"],
-    "llmTip": "Legacy — Microsoft recommends Teams channels instead of group threads."
+    "llmTip": "Legacy \u2014 Microsoft recommends Teams channels instead of group threads."
   },
   {
     "pathPattern": "/groups/{group-id}/threads/{conversationThread-id}/reply",
@@ -1953,7 +1967,7 @@
     "toolName": "reply-to-group-thread",
     "presets": ["work"],
     "workScopes": ["Group.ReadWrite.All"],
-    "llmTip": "Legacy — Microsoft recommends Teams channels instead of group threads."
+    "llmTip": "Legacy \u2014 Microsoft recommends Teams channels instead of group threads."
   },
   {
     "pathPattern": "/me/presence",
@@ -2050,7 +2064,7 @@
     "toolName": "cancel-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "Cancels a meeting (organizer only) and sends a cancellation message to all attendees. Body: { Comment (optional string, custom message) }. Use this instead of delete-calendar-event when you want attendees to see 'Canceled' in their calendar. Attendees calling this get HTTP 400 — they should use decline-calendar-event instead."
+    "llmTip": "Cancels a meeting (organizer only) and sends a cancellation message to all attendees. Body: { Comment (optional string, custom message) }. Use this instead of delete-calendar-event when you want attendees to see 'Canceled' in their calendar. Attendees calling this get HTTP 400 \u2014 they should use decline-calendar-event instead."
   },
   {
     "pathPattern": "/me/events/{event-id}/forward",
@@ -2082,7 +2096,7 @@
     "toolName": "list-calendar-events-delta",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.Read"],
-    "llmTip": "Incremental sync of events across the default calendar. First call returns all events plus @odata.deltaLink. Subsequent calls with that link return only additions/updates/removals. Use $select to limit fields. Deltas expire after ~30 days — start over if the server returns 410 Gone. For a time-bounded view with delta semantics, use list-calendar-view-delta instead."
+    "llmTip": "Incremental sync of events across the default calendar. First call returns all events plus @odata.deltaLink. Subsequent calls with that link return only additions/updates/removals. Use $select to limit fields. Deltas expire after ~30 days \u2014 start over if the server returns 410 Gone. For a time-bounded view with delta semantics, use list-calendar-view-delta instead."
   },
   {
     "pathPattern": "/me/calendarView/delta()",
@@ -2146,7 +2160,7 @@
     "toolName": "remove-group-owner",
     "presets": ["work"],
     "workScopes": ["Group.ReadWrite.All"],
-    "llmTip": "Removes an owner from a group. A group must have at least one owner — this call fails if you try to remove the last owner. Use list-group-owners to find the owner's ID."
+    "llmTip": "Removes an owner from a group. A group must have at least one owner \u2014 this call fails if you try to remove the last owner. Use list-group-owners to find the owner's ID."
   },
   {
     "pathPattern": "/chats",
@@ -2154,21 +2168,21 @@
     "toolName": "create-chat",
     "presets": ["teams", "work"],
     "workScopes": ["Chat.Create", "Chat.ReadWrite"],
-    "llmTip": "Creates a new 1:1 or group Teams chat. Body: { chatType ('oneOnOne' or 'group'), topic (optional, group only), members: [{ '@odata.type': '#microsoft.graph.aadUserConversationMember', roles: ['owner' | 'guest'], 'user@odata.bind': 'https://graph.microsoft.com/v1.0/users({id})' }] }. A oneOnOne chat requires exactly 2 members (self + other), both with role 'owner'. For group chats, include all participants. The signed-in user must be one of the members. Returns the created chat with its id — use that id with send-chat-message, list-chat-members, etc."
+    "llmTip": "Creates a new 1:1 or group Teams chat. Body: { chatType ('oneOnOne' or 'group'), topic (optional, group only), members: [{ '@odata.type': '#microsoft.graph.aadUserConversationMember', roles: ['owner' | 'guest'], 'user@odata.bind': 'https://graph.microsoft.com/v1.0/users({id})' }] }. A oneOnOne chat requires exactly 2 members (self + other), both with role 'owner'. For group chats, include all participants. The signed-in user must be one of the members. Returns the created chat with its id \u2014 use that id with send-chat-message, list-chat-members, etc."
   },
   {
     "pathPattern": "/subscriptions",
     "method": "get",
     "toolName": "list-subscriptions",
     "scopes": [],
-    "llmTip": "Lists webhook subscriptions owned by the current app/user. Returns id, resource, changeType, notificationUrl, expirationDateTime, clientState. Use $filter=resource eq '/me/messages' to find subscriptions for a specific resource. No dedicated 'Subscription.*' scope exists — the caller must already have a read permission for the subscribed resource (e.g. Mail.Read for /me/messages), which is supplied by the tool that reads that resource."
+    "llmTip": "Lists webhook subscriptions owned by the current app/user. Returns id, resource, changeType, notificationUrl, expirationDateTime, clientState. Use $filter=resource eq '/me/messages' to find subscriptions for a specific resource. No dedicated 'Subscription.*' scope exists \u2014 the caller must already have a read permission for the subscribed resource (e.g. Mail.Read for /me/messages), which is supplied by the tool that reads that resource."
   },
   {
     "pathPattern": "/subscriptions",
     "method": "post",
     "toolName": "create-subscription",
     "scopes": [],
-    "llmTip": "Creates a webhook subscription for change notifications. Required body: { changeType (comma-separated: 'created,updated,deleted'), notificationUrl (HTTPS, must validate with token echo), resource (e.g. '/me/mailFolders/inbox/messages', '/users/{id}/events', '/teams/{id}/channels/{id}/messages'), expirationDateTime (ISO 8601, max varies by resource type — 1 hour for calls, 24h for messages, 3 days for mail), clientState (opaque string returned in notifications, for validation) }. Optional: includeResourceData (true enables rich notifications, requires encryptionCertificate + encryptionCertificateId). No dedicated scope — caller must have a read permission for the target resource (e.g. Mail.Read, Calendars.Read, ChannelMessage.Read.All, Files.Read.All)."
+    "llmTip": "Creates a webhook subscription for change notifications. Required body: { changeType (comma-separated: 'created,updated,deleted'), notificationUrl (HTTPS, must validate with token echo), resource (e.g. '/me/mailFolders/inbox/messages', '/users/{id}/events', '/teams/{id}/channels/{id}/messages'), expirationDateTime (ISO 8601, max varies by resource type \u2014 1 hour for calls, 24h for messages, 3 days for mail), clientState (opaque string returned in notifications, for validation) }. Optional: includeResourceData (true enables rich notifications, requires encryptionCertificate + encryptionCertificateId). No dedicated scope \u2014 caller must have a read permission for the target resource (e.g. Mail.Read, Calendars.Read, ChannelMessage.Read.All, Files.Read.All)."
   },
   {
     "pathPattern": "/subscriptions/{subscription-id}",
@@ -2182,7 +2196,7 @@
     "method": "patch",
     "toolName": "update-subscription",
     "scopes": [],
-    "llmTip": "Renews a webhook subscription by extending its expiration. Body: { expirationDateTime (ISO 8601, new expiry) }. Call before the current expirationDateTime to avoid missing notifications. Max extension varies by resource type — check Microsoft Graph docs for subscription limits."
+    "llmTip": "Renews a webhook subscription by extending its expiration. Body: { expirationDateTime (ISO 8601, new expiry) }. Call before the current expirationDateTime to avoid missing notifications. Max extension varies by resource type \u2014 check Microsoft Graph docs for subscription limits."
   },
   {
     "pathPattern": "/subscriptions/{subscription-id}",
@@ -2236,7 +2250,7 @@
     "toolName": "list-mail-folder-messages-delta",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Read"],
-    "llmTip": "Incremental sync of messages within a mail folder. Graph only supports delta scoped to a folder — use mailFolder-id = 'inbox' for the well-known inbox, or another folder id from list-mail-folders. First call returns all messages plus @odata.deltaLink; subsequent calls with that link return only changes (created/updated/deleted). @odata.nextLink paginates within a single delta window. Deltas expire after ~30 days of inactivity — start over if the server returns 410. Prefer this over full re-list for polling."
+    "llmTip": "Incremental sync of messages within a mail folder. Graph only supports delta scoped to a folder \u2014 use mailFolder-id = 'inbox' for the well-known inbox, or another folder id from list-mail-folders. First call returns all messages plus @odata.deltaLink; subsequent calls with that link return only changes (created/updated/deleted). @odata.nextLink paginates within a single delta window. Deltas expire after ~30 days of inactivity \u2014 start over if the server returns 410. Prefer this over full re-list for polling."
   },
   {
     "pathPattern": "/me/outlook/masterCategories",
@@ -2252,7 +2266,7 @@
     "toolName": "create-outlook-category",
     "presets": ["calendar", "mail", "outlook", "personal"],
     "scopes": ["MailboxSettings.ReadWrite"],
-    "llmTip": "Creates a new Outlook category. Body: { displayName (unique), color (one of: none, preset0 … preset24 — maps to red, orange, yellow, green, teal, olive, blue, purple, cranberry, steel, dark-steel, gray, dark-gray, black, dark-red, dark-orange, dark-yellow, dark-green, dark-teal, dark-olive, dark-blue, dark-purple, dark-cranberry) }. Category names are case-sensitive when applied to messages/events."
+    "llmTip": "Creates a new Outlook category. Body: { displayName (unique), color (one of: none, preset0 \u2026 preset24 \u2014 maps to red, orange, yellow, green, teal, olive, blue, purple, cranberry, steel, dark-steel, gray, dark-gray, black, dark-red, dark-orange, dark-yellow, dark-green, dark-teal, dark-olive, dark-blue, dark-purple, dark-cranberry) }. Category names are case-sensitive when applied to messages/events."
   },
   {
     "pathPattern": "/me/getMailTips",
@@ -2261,7 +2275,7 @@
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Read"],
     "contentType": "application/json",
-    "llmTip": "Looks up MailTips for one or more recipients before sending an email — answers 'is this person on auto-reply / OOF?', 'will my email exceed their mailbox quota?', 'are they an external recipient?', 'is this a mailbox or distribution list?'. Body: { EmailAddresses: ['user@contoso.com', ...], MailTipsOptions: 'automaticReplies, mailboxFullStatus, customMailTip, externalMemberCount, totalMemberCount, maxMessageSize, deliveryRestriction, moderationStatus, recipientScope, recipientSuggestions' (comma-separated subset) }. Returns mailTips per recipient with the requested fields populated. Use this to short-circuit urgent emails when a recipient is OOF, or to warn before fanning out to a large DL."
+    "llmTip": "Looks up MailTips for one or more recipients before sending an email \u2014 answers 'is this person on auto-reply / OOF?', 'will my email exceed their mailbox quota?', 'are they an external recipient?', 'is this a mailbox or distribution list?'. Body: { EmailAddresses: ['user@contoso.com', ...], MailTipsOptions: 'automaticReplies, mailboxFullStatus, customMailTip, externalMemberCount, totalMemberCount, maxMessageSize, deliveryRestriction, moderationStatus, recipientScope, recipientSuggestions' (comma-separated subset) }. Returns mailTips per recipient with the requested fields populated. Use this to short-circuit urgent emails when a recipient is OOF, or to warn before fanning out to a large DL."
   },
   {
     "pathPattern": "/me/outlook/supportedTimeZones(TimeZoneStandard='{TimeZoneStandard}')",
@@ -2269,7 +2283,7 @@
     "toolName": "list-supported-time-zones",
     "presets": ["calendar", "mail", "outlook", "personal"],
     "scopes": ["User.Read"],
-    "llmTip": "Lists time zones the user's mailbox server supports. TimeZoneStandard path parameter must be one of: Windows (default — Windows time zone names like 'Pacific Standard Time'), or Iana (IANA / Olson names like 'America/Los_Angeles'). Note the PascalCase — the values are case-sensitive enums, not lowercase strings. Returns timeZoneInformation objects with alias and displayName. Use the result to validate or look up the value before calling update-mailbox-settings to change the user's preferred timeZone — the format must match what the server expects."
+    "llmTip": "Lists time zones the user's mailbox server supports. TimeZoneStandard path parameter must be one of: Windows (default \u2014 Windows time zone names like 'Pacific Standard Time'), or Iana (IANA / Olson names like 'America/Los_Angeles'). Note the PascalCase \u2014 the values are case-sensitive enums, not lowercase strings. Returns timeZoneInformation objects with alias and displayName. Use the result to validate or look up the value before calling update-mailbox-settings to change the user's preferred timeZone \u2014 the format must match what the server expects."
   },
   {
     "pathPattern": "/me/outlook/supportedLanguages()",
@@ -2285,7 +2299,7 @@
     "toolName": "list-my-calendar-permissions",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.Read"],
-    "llmTip": "Lists share recipients and delegates on the user's primary calendar. Returns calendarPermission objects with id, role ('none' | 'freeBusyRead' | 'limitedRead' | 'read' | 'write' | 'delegateWithoutPrivateEventAccess' | 'delegateWithPrivateEventAccess' | 'custom'), emailAddress { name, address }, isInsideOrganization, isRemovable, allowedRoles. Returns an empty collection when called by a delegate or share recipient (only the calendar owner sees the full list). For a non-primary calendar, use /me/calendars/{calendar-id}/calendarPermissions — not currently exposed."
+    "llmTip": "Lists share recipients and delegates on the user's primary calendar. Returns calendarPermission objects with id, role ('none' | 'freeBusyRead' | 'limitedRead' | 'read' | 'write' | 'delegateWithoutPrivateEventAccess' | 'delegateWithPrivateEventAccess' | 'custom'), emailAddress { name, address }, isInsideOrganization, isRemovable, allowedRoles. Returns an empty collection when called by a delegate or share recipient (only the calendar owner sees the full list). For a non-primary calendar, use /me/calendars/{calendar-id}/calendarPermissions \u2014 not currently exposed."
   },
   {
     "pathPattern": "/me/calendar/calendarPermissions",
@@ -2301,7 +2315,7 @@
     "toolName": "update-my-calendar-permission",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "Changes the role (permission level) granted to an existing share recipient or delegate. Body: { role: 'read' | 'write' | 'delegateWithoutPrivateEventAccess' | 'delegateWithPrivateEventAccess' }. Only the role property is writable — to change the recipient's email or other properties, delete and recreate via delete-my-calendar-permission + create-my-calendar-permission. Get the permission id via list-my-calendar-permissions."
+    "llmTip": "Changes the role (permission level) granted to an existing share recipient or delegate. Body: { role: 'read' | 'write' | 'delegateWithoutPrivateEventAccess' | 'delegateWithPrivateEventAccess' }. Only the role property is writable \u2014 to change the recipient's email or other properties, delete and recreate via delete-my-calendar-permission + create-my-calendar-permission. Get the permission id via list-my-calendar-permissions."
   },
   {
     "pathPattern": "/me/calendar/calendarPermissions/{calendarPermission-id}",
@@ -2309,7 +2323,7 @@
     "toolName": "delete-my-calendar-permission",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "llmTip": "Revokes a calendar share or delegate access. Get the permission id via list-my-calendar-permissions. Permissions where isRemovable=false (e.g. the implicit 'My Organization' default) cannot be deleted — Graph returns an error."
+    "llmTip": "Revokes a calendar share or delegate access. Get the permission id via list-my-calendar-permissions. Permissions where isRemovable=false (e.g. the implicit 'My Organization' default) cannot be deleted \u2014 Graph returns an error."
   },
   {
     "pathPattern": "/me/contactFolders/{contactFolder-id}/childFolders",
@@ -2325,7 +2339,7 @@
     "toolName": "create-contact-child-folder",
     "presets": ["contacts", "outlook", "personal"],
     "scopes": ["Contacts.ReadWrite"],
-    "llmTip": "Creates a sub-folder under an existing contact folder. Body: { displayName: 'Sub-folder name' }. Use list-contact-folders to discover the parent id. The returned contactFolder has its own id usable with update-contact-folder, delete-contact-folder, list-contact-folder-contacts, and create-contact-in-folder — contactFolder ids are mailbox-unique regardless of nesting depth."
+    "llmTip": "Creates a sub-folder under an existing contact folder. Body: { displayName: 'Sub-folder name' }. Use list-contact-folders to discover the parent id. The returned contactFolder has its own id usable with update-contact-folder, delete-contact-folder, list-contact-folder-contacts, and create-contact-in-folder \u2014 contactFolder ids are mailbox-unique regardless of nesting depth."
   },
   {
     "pathPattern": "/me/contactFolders",
@@ -2349,7 +2363,7 @@
     "toolName": "update-contact-folder",
     "presets": ["contacts", "outlook", "personal"],
     "scopes": ["Contacts.ReadWrite"],
-    "llmTip": "Updates a contact folder. Body: { displayName?: 'New name', parentFolderId?: '<id>' } — both displayName (rename) and parentFolderId (move) are writable. The default 'Contacts' folder may not be renameable. Get the folder id via list-contact-folders."
+    "llmTip": "Updates a contact folder. Body: { displayName?: 'New name', parentFolderId?: '<id>' } \u2014 both displayName (rename) and parentFolderId (move) are writable. The default 'Contacts' folder may not be renameable. Get the folder id via list-contact-folders."
   },
   {
     "pathPattern": "/me/contactFolders/{contactFolder-id}",
@@ -2357,7 +2371,7 @@
     "toolName": "delete-contact-folder",
     "presets": ["contacts", "outlook", "personal"],
     "scopes": ["Contacts.ReadWrite"],
-    "llmTip": "Deletes a contact folder. The default 'Contacts' folder cannot be deleted — Graph returns an error. The folder (and its contents) typically lands in Deleted Items rather than being permanently removed. Get the folder id via list-contact-folders."
+    "llmTip": "Deletes a contact folder. The default 'Contacts' folder cannot be deleted \u2014 Graph returns an error. The folder (and its contents) typically lands in Deleted Items rather than being permanently removed. Get the folder id via list-contact-folders."
   },
   {
     "pathPattern": "/me/contactFolders/{contactFolder-id}/contacts",
@@ -2365,7 +2379,7 @@
     "toolName": "list-contact-folder-contacts",
     "presets": ["contacts", "outlook", "personal"],
     "scopes": ["Contacts.Read"],
-    "llmTip": "Lists contacts inside a specific folder. Pair with list-contact-folders to discover the folder id. Note: the existing list-outlook-contacts (GET /me/contacts) only returns contacts from the default folder — use this tool to read contacts from any folder. Supports $filter, $search='query', $orderby, $top, $select."
+    "llmTip": "Lists contacts inside a specific folder. Pair with list-contact-folders to discover the folder id. Note: the existing list-outlook-contacts (GET /me/contacts) only returns contacts from the default folder \u2014 use this tool to read contacts from any folder. Supports $filter, $search='query', $orderby, $top, $select."
   },
   {
     "pathPattern": "/me/contactFolders/{contactFolder-id}/contacts",
@@ -2398,7 +2412,7 @@
     "toolName": "update-todo-task-list",
     "presets": ["personal", "tasks"],
     "scopes": ["Tasks.ReadWrite"],
-    "llmTip": "Renames a Microsoft To Do task list. Body: { displayName: 'New name' }. Only displayName is writable. Built-in lists (Flagged emails, the default Tasks list) cannot be renamed — the API returns an error. Get list ids via list-todo-task-lists."
+    "llmTip": "Renames a Microsoft To Do task list. Body: { displayName: 'New name' }. Only displayName is writable. Built-in lists (Flagged emails, the default Tasks list) cannot be renamed \u2014 the API returns an error. Get list ids via list-todo-task-lists."
   },
   {
     "pathPattern": "/me/todo/lists/{todoTaskList-id}",
@@ -2406,7 +2420,7 @@
     "toolName": "delete-todo-task-list",
     "presets": ["personal", "tasks"],
     "scopes": ["Tasks.ReadWrite"],
-    "llmTip": "Deletes a Microsoft To Do task list. Built-in lists (Flagged emails, the default Tasks list) cannot be deleted — the API returns an error for those. Get list ids via list-todo-task-lists."
+    "llmTip": "Deletes a Microsoft To Do task list. Built-in lists (Flagged emails, the default Tasks list) cannot be deleted \u2014 the API returns an error for those. Get list ids via list-todo-task-lists."
   },
   {
     "pathPattern": "/me/onenote/pages",
@@ -2414,7 +2428,7 @@
     "toolName": "list-onenote-pages",
     "presets": ["onenote", "personal"],
     "scopes": ["Notes.Read"],
-    "llmTip": "Lists all OneNote pages across every notebook and section the user has access to — transverse alternative to walking notebooks → sections → pages. Default returns top 20 ordered by lastModifiedTime desc. Supports $filter (e.g. lastModifiedTime gt 2026-01-01, or contains(tolower(title), 'topic') for title search), $top (max 100), $select, and $expand=parentNotebook,parentSection. Use this instead of bouncing through list-onenote-notebooks / list-all-onenote-sections / list-onenote-section-pages when you have a topic in mind."
+    "llmTip": "Lists all OneNote pages across every notebook and section the user has access to \u2014 transverse alternative to walking notebooks \u2192 sections \u2192 pages. Default returns top 20 ordered by lastModifiedTime desc. Supports $filter (e.g. lastModifiedTime gt 2026-01-01, or contains(tolower(title), 'topic') for title search), $top (max 100), $select, and $expand=parentNotebook,parentSection. Use this instead of bouncing through list-onenote-notebooks / list-all-onenote-sections / list-onenote-section-pages when you have a topic in mind."
   },
   {
     "pathPattern": "/me/onenote/sectionGroups",
@@ -2422,7 +2436,7 @@
     "toolName": "list-onenote-section-groups",
     "presets": ["onenote", "personal"],
     "scopes": ["Notes.Read"],
-    "llmTip": "Lists all OneNote section groups (subfolders inside notebooks that contain their own sections and nested section groups) for the user. A section group is a folder-like container — many notebooks use them to organize sections by theme. Default sort is name asc. Supports $expand=sections,sectionGroups,parentNotebook,parentSectionGroup to traverse the full hierarchy. Pair with list-onenote-notebooks for a complete picture of the user's notebook structure."
+    "llmTip": "Lists all OneNote section groups (subfolders inside notebooks that contain their own sections and nested section groups) for the user. A section group is a folder-like container \u2014 many notebooks use them to organize sections by theme. Default sort is name asc. Supports $expand=sections,sectionGroups,parentNotebook,parentSectionGroup to traverse the full hierarchy. Pair with list-onenote-notebooks for a complete picture of the user's notebook structure."
   },
   {
     "pathPattern": "/me/onenote/notebooks/getNotebookFromWebUrl",
@@ -2431,7 +2445,7 @@
     "presets": ["onenote", "personal"],
     "workScopes": ["Notes.Read"],
     "contentType": "application/json",
-    "llmTip": "Resolves a OneNote notebook from its web URL (the link a user copies from OneNote / SharePoint / Teams). Body: { webUrl: 'https://...' }. Returns a notebook object with id, displayName, sectionsUrl, sectionGroupsUrl, and isShared — you can then list its sections via list-onenote-notebook-sections. Accepts user notebooks, group notebooks, and SharePoint-hosted team notebooks. Personal Microsoft accounts are not supported."
+    "llmTip": "Resolves a OneNote notebook from its web URL (the link a user copies from OneNote / SharePoint / Teams). Body: { webUrl: 'https://...' }. Returns a notebook object with id, displayName, sectionsUrl, sectionGroupsUrl, and isShared \u2014 you can then list its sections via list-onenote-notebook-sections. Accepts user notebooks, group notebooks, and SharePoint-hosted team notebooks. Personal Microsoft accounts are not supported."
   },
   {
     "pathPattern": "/me/presence/setPresence",
@@ -2440,7 +2454,7 @@
     "presets": ["teams", "work"],
     "workScopes": ["Presence.ReadWrite"],
     "contentType": "application/json",
-    "llmTip": "Sets the user's presence session as an application. Body: { sessionId (your app's client/session id, required), availability + activity (must be one of these documented combos: Available/Available, Busy/InACall, Busy/InAConferenceCall, Away/Away, DoNotDisturb/Presenting), expirationDuration (ISO 8601 duration like 'PT1H' — defaults to PT5M, valid range PT5M–PT4H) }. Note: if the user also wants to override their *visible* status regardless of activity, prefer set-my-user-preferred-presence. clear-my-presence ends the session."
+    "llmTip": "Sets the user's presence session as an application. Body: { sessionId (your app's client/session id, required), availability + activity (must be one of these documented combos: Available/Available, Busy/InACall, Busy/InAConferenceCall, Away/Away, DoNotDisturb/Presenting), expirationDuration (ISO 8601 duration like 'PT1H' \u2014 defaults to PT5M, valid range PT5M\u2013PT4H) }. Note: if the user also wants to override their *visible* status regardless of activity, prefer set-my-user-preferred-presence. clear-my-presence ends the session."
   },
   {
     "pathPattern": "/me/presence/clearPresence",
@@ -2449,7 +2463,7 @@
     "presets": ["teams", "work"],
     "workScopes": ["Presence.ReadWrite"],
     "contentType": "application/json",
-    "llmTip": "Ends the application's presence session for the current user. Body: { sessionId } — must match the sessionId used in set-my-presence. If this was the user's only presence session, their status returns to Offline."
+    "llmTip": "Ends the application's presence session for the current user. Body: { sessionId } \u2014 must match the sessionId used in set-my-presence. If this was the user's only presence session, their status returns to Offline."
   },
   {
     "pathPattern": "/me/presence/setUserPreferredPresence",
@@ -2458,7 +2472,7 @@
     "presets": ["teams", "work"],
     "workScopes": ["Presence.ReadWrite"],
     "contentType": "application/json",
-    "llmTip": "Sets the user's preferred (sticky) availability and activity — the value Teams clients display regardless of underlying activity. Body: { availability + activity (must be one of these documented combos: Available/Available, Busy/Busy, DoNotDisturb/DoNotDisturb, BeRightBack/BeRightBack, Away/Away, Offline/OffWork), expirationDuration (ISO 8601 duration like 'PT2H' — if omitted, defaults to 1 day for DoNotDisturb/Busy and 7 days for other availability values; not 'indefinite'). Requires at least one active presence session (Teams client signed in or set-my-presence call) — otherwise the user appears Offline. Use this for 'put me in Do Not Disturb for 2 hours' workflows. clear-my-user-preferred-presence reverts to actual presence."
+    "llmTip": "Sets the user's preferred (sticky) availability and activity \u2014 the value Teams clients display regardless of underlying activity. Body: { availability + activity (must be one of these documented combos: Available/Available, Busy/Busy, DoNotDisturb/DoNotDisturb, BeRightBack/BeRightBack, Away/Away, Offline/OffWork), expirationDuration (ISO 8601 duration like 'PT2H' \u2014 if omitted, defaults to 1 day for DoNotDisturb/Busy and 7 days for other availability values; not 'indefinite'). Requires at least one active presence session (Teams client signed in or set-my-presence call) \u2014 otherwise the user appears Offline. Use this for 'put me in Do Not Disturb for 2 hours' workflows. clear-my-user-preferred-presence reverts to actual presence."
   },
   {
     "pathPattern": "/me/presence/clearUserPreferredPresence",
@@ -2467,7 +2481,7 @@
     "presets": ["teams", "work"],
     "workScopes": ["Presence.ReadWrite"],
     "contentType": "application/json",
-    "llmTip": "Clears any preferred (sticky) presence override set via set-my-user-preferred-presence. The user's visible status returns to their actual activity. Body: {} (an empty JSON object — required, not 'no body')."
+    "llmTip": "Clears any preferred (sticky) presence override set via set-my-user-preferred-presence. The user's visible status returns to their actual activity. Body: {} (an empty JSON object \u2014 required, not 'no body')."
   },
   {
     "pathPattern": "/me/presence/setStatusMessage",
@@ -2476,7 +2490,7 @@
     "presets": ["teams", "work"],
     "workScopes": ["Presence.ReadWrite"],
     "contentType": "application/json",
-    "llmTip": "Sets the user's Teams status message (the free-text note shown next to their name, e.g. 'Heads-down on Q3 plan'). Body: { statusMessage: { message: { content: 'text or HTML', contentType: 'text' | 'html' }, expiryDateTime: { dateTime: '2026-05-06T17:00:00', timeZone: 'UTC' } (optional) } }. Pass an empty object {} or message.content='' to clear. expiryDateTime is optional — omit for no expiration."
+    "llmTip": "Sets the user's Teams status message (the free-text note shown next to their name, e.g. 'Heads-down on Q3 plan'). Body: { statusMessage: { message: { content: 'text or HTML', contentType: 'text' | 'html' }, expiryDateTime: { dateTime: '2026-05-06T17:00:00', timeZone: 'UTC' } (optional) } }. Pass an empty object {} or message.content='' to clear. expiryDateTime is optional \u2014 omit for no expiration."
   },
   {
     "pathPattern": "/me/teamwork/associatedTeams",
@@ -2484,7 +2498,7 @@
     "toolName": "list-my-associated-teams",
     "presets": ["teams", "work"],
     "workScopes": ["Team.ReadBasic.All"],
-    "llmTip": "Lists Teams the current user is associated with — both joined teams and host teams of shared channels the user is a direct member of. Returns associatedTeamInfo objects with id, displayName, and tenantId. Broader than list-joined-teams because it includes shared-channel host teams."
+    "llmTip": "Lists Teams the current user is associated with \u2014 both joined teams and host teams of shared channels the user is a direct member of. Returns associatedTeamInfo objects with id, displayName, and tenantId. Broader than list-joined-teams because it includes shared-channel host teams."
   },
   {
     "pathPattern": "/me/teamwork/installedApps",
@@ -2501,6 +2515,6 @@
     "presets": ["teams", "work"],
     "workScopes": ["TeamsActivity.Send"],
     "contentType": "application/json",
-    "llmTip": "Sends a Teams activity feed notification to the current user (the badge + entry in their Activity tab). Body: { topic: { source: 'entityUrl' | 'text', value: <Graph URL or plain text>, webUrl: <required when source='text', click-through URL> }, activityType: <must be declared in the calling Teams app's manifest, OR the reserved 'systemDefault' which provides free-form Actor+Reason text>, previewText: { content: 'short preview' }, templateParameters?: [{ name, value }] (substituted into the manifest's localized notification template), teamsAppId?: <optional disambiguator when multiple installed apps share a Microsoft Entra app ID — fetch via list-my-installed-teams-apps>, chainId?, iconId? }. Use to ping the user with 'action required' notifications from agentic workflows. See https://learn.microsoft.com/graph/teams-send-activityfeednotifications."
+    "llmTip": "Sends a Teams activity feed notification to the current user (the badge + entry in their Activity tab). Body: { topic: { source: 'entityUrl' | 'text', value: <Graph URL or plain text>, webUrl: <required when source='text', click-through URL> }, activityType: <must be declared in the calling Teams app's manifest, OR the reserved 'systemDefault' which provides free-form Actor+Reason text>, previewText: { content: 'short preview' }, templateParameters?: [{ name, value }] (substituted into the manifest's localized notification template), teamsAppId?: <optional disambiguator when multiple installed apps share a Microsoft Entra app ID \u2014 fetch via list-my-installed-teams-apps>, chainId?, iconId? }. Use to ping the user with 'action required' notifications from agentic workflows. See https://learn.microsoft.com/graph/teams-send-activityfeednotifications."
   }
 ]

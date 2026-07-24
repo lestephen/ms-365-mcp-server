@@ -85,6 +85,10 @@ const WRITABLE_MANIFEST: Array<[string, string[]]> = [
   ['update-todo-task-list', ['extensions']],
   // Excel formatting is applied by PATCHing these onto the range format.
   ['format-excel-range', ['borders', 'fill', 'font', 'protection']],
+  // Graph takes only an @odata.bind reference here, so narrowing away the `message`
+  // relationship left the body with nothing but a read-only id and no way for a model
+  // to say which message to pin. endpoints.json now declares the real wire shape.
+  ['pin-chat-message', ['message@odata.bind']],
 ];
 
 // Reasoned spot checks kept alongside the manifest, because these carry the WHY.
@@ -145,6 +149,9 @@ const MUST_DROP: Array<[string, string[]]> = [
   // Apps and tabs are installed through their own endpoints, not the create body.
   ['create-chat', ['installedApps', 'tabs', 'pinnedMessages', 'lastMessagePreview']],
   ['create-team-channel', ['tabs']],
+  // The nested message entity is not the input Graph accepts, so advertising it only
+  // misled callers into filling an object that Graph rejects.
+  ['pin-chat-message', ['message', 'id']],
 ];
 
 describe('every writable navigation property in the manifest survives codegen', () => {
