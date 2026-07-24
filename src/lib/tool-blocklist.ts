@@ -52,17 +52,29 @@ export function withToolBlocklist(server: McpServer, pattern?: string): McpServe
   const blocked = compileBlockedToolsRegex(pattern);
   if (!blocked) return server;
 
-  const register = server.tool.bind(server);
   const guarded = Object.create(server) as McpServer;
-  guarded.tool = ((name: string, ...rest: unknown[]) => {
-    if (typeof name === 'string' && blocked.test(name)) {
-      logger.info(`Blocking tool ${name} - matches blocklist pattern`);
-      // Returning undefined is safe: every caller either ignores the handle or
-      // guards its own registration in a try/catch.
-      return undefined as never;
-    }
-    return (register as (...args: unknown[]) => unknown)(name, ...rest) as never;
-  }) as McpServer['tool'];
+
+  // Guard every registration entry point the SDK exposes, not just the one current
+  // registrars happen to use. All call sites use tool() today, but this is the single
+  // enforcement point for an operator policy, so it should not be one refactor away
+  // from a bypass.
+  for (const method of ['tool', 'registerTool'] as const) {
+    const original = server[method];
+    if (typeof original !== 'function') continue;
+    const register = (original as (...args: unknown[]) => unknown).bind(server);
+    (guarded as unknown as Record<string, unknown>)[method] = (
+      name: string,
+      ...rest: unknown[]
+    ) => {
+      if (typeof name === 'string' && blocked.test(name)) {
+        logger.info(`Blocking tool ${name} - matches blocklist pattern`);
+        // Returning undefined is safe: every caller either ignores the handle or
+        // guards its own registration in a try/catch.
+        return undefined;
+      }
+      return register(name, ...rest);
+    };
+  }
 
   return guarded;
 }

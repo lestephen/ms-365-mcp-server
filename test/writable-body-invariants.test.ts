@@ -32,8 +32,62 @@ function bodyShape(alias: string): Record<string, z.ZodTypeAny> {
   return shape;
 }
 
-// Navigation properties Graph genuinely accepts on write. Losing any of these is a
-// functional regression, not a size win.
+/**
+ * Exhaustive manifest of the writable navigation properties this server advertises.
+ *
+ * Deliberately maintained independently of WRITABLE_NAVIGATION_PROPERTIES: a test
+ * derived from the allowlist would lose its assertion whenever an allowlist entry
+ * was deleted, which is the exact regression it needs to catch. Round 3 caught that
+ * the earlier hand-picked samples left gaps, for example event's
+ * multiValueExtendedProperties was preserved by the implementation but asserted
+ * nowhere, so deleting it would have narrowed the schema silently.
+ *
+ * Covers the safety-critical direction only: a property that disappears from a body
+ * is a silent capability loss and must fail here. A newly published Graph navigation
+ * property that this pass then drops is not covered, and is the far less dangerous
+ * direction, since the tool keeps working with the fields it already had.
+ */
+const EXT = ['singleValueExtendedProperties', 'multiValueExtendedProperties'];
+const WRITABLE_MANIFEST: Array<[string, string[]]> = [
+  // Outlook: attachments inline on create, plus caller-owned extended properties.
+  ['create-draft-email', ['attachments', ...EXT]],
+  ['create-shared-mailbox-draft', ['attachments', ...EXT]],
+  ['update-mail-message', ['attachments', ...EXT]],
+  ['create-calendar-event', ['attachments', ...EXT]],
+  ['create-specific-calendar-event', ['attachments', ...EXT]],
+  ['update-calendar-event', ['attachments', ...EXT]],
+  ['update-specific-calendar-event', ['attachments', ...EXT]],
+  ['create-mail-folder', EXT],
+  ['create-mail-child-folder', EXT],
+  ['update-mail-folder', EXT],
+  ['create-calendar', EXT],
+  ['update-calendar', EXT],
+  ['create-contact-folder', EXT],
+  ['update-contact-folder', EXT],
+  ['create-outlook-contact', EXT],
+  ['update-outlook-contact', EXT],
+  // SharePoint.
+  ['create-sharepoint-list', ['columns']],
+  ['create-sharepoint-list-item', ['fields']],
+  ['update-sharepoint-list-item', ['fields']],
+  // Teams: members on create, and hostedContents for inline images.
+  ['create-chat', ['members']],
+  ['create-team-channel', ['members']],
+  ['update-team-channel', ['members']],
+  ['send-chat-message', ['attachments', 'hostedContents']],
+  ['send-channel-message', ['attachments', 'hostedContents']],
+  ['reply-to-chat-message', ['attachments', 'hostedContents']],
+  ['reply-to-channel-message', ['attachments', 'hostedContents']],
+  // To Do.
+  ['create-todo-task', ['attachments', 'checklistItems', 'extensions', 'linkedResources']],
+  ['update-todo-task', ['attachments', 'checklistItems', 'extensions', 'linkedResources']],
+  ['create-todo-task-list', ['extensions']],
+  ['update-todo-task-list', ['extensions']],
+  // Excel formatting is applied by PATCHing these onto the range format.
+  ['format-excel-range', ['borders', 'fill', 'font', 'protection']],
+];
+
+// Reasoned spot checks kept alongside the manifest, because these carry the WHY.
 const MUST_KEEP: Array<[string, string[], string]> = [
   [
     'format-excel-range',
@@ -92,6 +146,21 @@ const MUST_DROP: Array<[string, string[]]> = [
   ['create-chat', ['installedApps', 'tabs', 'pinnedMessages', 'lastMessagePreview']],
   ['create-team-channel', ['tabs']],
 ];
+
+describe('every writable navigation property in the manifest survives codegen', () => {
+  for (const [alias, properties] of WRITABLE_MANIFEST) {
+    for (const property of properties) {
+      it(`${alias} keeps ${property}`, () => {
+        expect(
+          Object.keys(bodyShape(alias)),
+          `${alias}.body.${property} vanished. Either an entry was removed from ` +
+            'WRITABLE_NAVIGATION_PROPERTIES, or Graph stopped declaring it. Silently ' +
+            'dropping a writable property removes a capability with no error anywhere.'
+        ).toContain(property);
+      });
+    }
+  }
+});
 
 describe('request bodies keep every writable property', () => {
   for (const [alias, properties, why] of MUST_KEEP) {
