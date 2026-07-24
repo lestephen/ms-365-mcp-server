@@ -71,7 +71,7 @@ program
   )
   .option(
     '--blocked-tools <pattern>',
-    'Make tools matching this regex unreachable by every path: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --direct-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. An invalid pattern is fatal rather than ignored.'
+    'Make tools matching this regex unregisterable and undispatchable BY NAME: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --direct-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. LIMITATION: this matches tool names, not Graph operations, so a generic passthrough tool can still reach a blocked operation by method and path (graph-batch can issue POST /me/sendMail in a subrequest; download-bytes and get-download-url take arbitrary Graph paths). Block those tools too if your policy needs to hold. An invalid pattern is fatal rather than ignored.'
   )
   .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)')
   .option(
@@ -271,6 +271,22 @@ export function parseArgs(): CommandOptions {
       console.error(
         `Error: invalid --blocked-tools regex pattern: "${options.blockedTools}". ` +
           `Refusing to start, because the tools you asked to block would stay reachable.`
+      );
+      process.exit(1);
+    }
+  }
+
+  // And --direct-tools, where the runtime fallback is actively harmful: registration
+  // logs an invalid filter and carries on with no filter at all, which registers the
+  // whole catalogue. That reintroduces the context-window blowout hybrid mode exists
+  // to avoid, from a single typo, with only a log line to show for it.
+  if (options.directTools) {
+    try {
+      new RegExp(options.directTools, 'i');
+    } catch {
+      console.error(
+        `Error: invalid --direct-tools regex pattern: "${options.directTools}". ` +
+          `Without a valid filter, every tool would be registered directly.`
       );
       process.exit(1);
     }
