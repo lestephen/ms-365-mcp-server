@@ -58,7 +58,6 @@ const MUST_KEEP: Array<[string, string[], string]> = [
     ['checklistItems', 'linkedResources', 'attachments'],
     'a task can carry these on create',
   ],
-  ['create-planner-task', ['details'], 'planner task details travel with the task'],
   // Graph accepts hostedContents when creating a chat or channel message, which is
   // how inline images are sent. Dropping it silently removed that capability.
   ['send-chat-message', ['hostedContents'], 'inline images are sent as hostedContents'],
@@ -82,6 +81,10 @@ const MUST_DROP: Array<[string, string[]]> = [
   ['create-calendar', ['calendarView', 'events', 'calendarPermissions']],
   ['create-contact-folder', ['contacts']],
   ['create-onenote-notebook', ['sectionGroups', 'sections']],
+  // plannerTask.details is a read-only relationship: it is written through the
+  // plannerTaskDetails endpoint (see update-planner-task-details), not inline.
+  ['create-planner-task', ['details']],
+  ['create-planner-bucket', ['tasks']],
   // Replies are posted to their own endpoint, never inline with the parent message.
   ['send-chat-message', ['replies']],
   ['send-channel-message', ['replies']],
