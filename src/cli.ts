@@ -260,6 +260,22 @@ export function parseArgs(): CommandOptions {
     }
   }
 
+  // Same for the blocklist, and for a stronger reason. In HTTP mode the MCP server
+  // is constructed per request, so without this check an unparseable pattern yields
+  // a listener that comes up healthy and then fails every /mcp call, instead of the
+  // documented refusal to start.
+  if (options.blockedTools) {
+    try {
+      new RegExp(options.blockedTools, 'i');
+    } catch {
+      console.error(
+        `Error: invalid --blocked-tools regex pattern: "${options.blockedTools}". ` +
+          `Refusing to start, because the tools you asked to block would stay reachable.`
+      );
+      process.exit(1);
+    }
+  }
+
   if (process.env.MS365_MCP_ORG_MODE === 'true' || process.env.MS365_MCP_ORG_MODE === '1') {
     options.orgMode = true;
   }

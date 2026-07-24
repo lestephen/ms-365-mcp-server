@@ -59,6 +59,15 @@ const MUST_KEEP: Array<[string, string[], string]> = [
     'a task can carry these on create',
   ],
   ['create-planner-task', ['details'], 'planner task details travel with the task'],
+  // Graph accepts hostedContents when creating a chat or channel message, which is
+  // how inline images are sent. Dropping it silently removed that capability.
+  ['send-chat-message', ['hostedContents'], 'inline images are sent as hostedContents'],
+  ['send-channel-message', ['hostedContents'], 'inline images are sent as hostedContents'],
+  ['reply-to-chat-message', ['hostedContents'], 'inline images are sent as hostedContents'],
+  ['reply-to-channel-message', ['hostedContents'], 'inline images are sent as hostedContents'],
+  // An open extension can be created inline with the item that carries it.
+  ['create-todo-task', ['extensions'], 'an open extension can be created with the task'],
+  ['create-todo-task-list', ['extensions'], 'an open extension can be created with the list'],
 ];
 
 // Read-only navigation properties that dominated the payload. `create-team-channel`
@@ -73,6 +82,12 @@ const MUST_DROP: Array<[string, string[]]> = [
   ['create-calendar', ['calendarView', 'events', 'calendarPermissions']],
   ['create-contact-folder', ['contacts']],
   ['create-onenote-notebook', ['sectionGroups', 'sections']],
+  // Replies are posted to their own endpoint, never inline with the parent message.
+  ['send-chat-message', ['replies']],
+  ['send-channel-message', ['replies']],
+  // Apps and tabs are installed through their own endpoints, not the create body.
+  ['create-chat', ['installedApps', 'tabs', 'pinnedMessages', 'lastMessagePreview']],
+  ['create-team-channel', ['tabs']],
 ];
 
 describe('request bodies keep every writable property', () => {

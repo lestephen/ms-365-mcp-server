@@ -118,6 +118,27 @@ describe('CLI Module', () => {
       expect(process.exit).toHaveBeenCalledWith(1);
     });
 
+    it('should fail closed at startup on an invalid --blocked-tools regex', () => {
+      // In HTTP mode the MCP server is built per request, so without this check an
+      // unparseable blocklist yields a healthy listener whose every /mcp call fails,
+      // rather than the documented refusal to start.
+      commanderMocks.mockCommand.opts.mockReturnValue({ blockedTools: '([bad', http: true });
+
+      parseArgs();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--blocked-tools'));
+      expect(process.exit).toHaveBeenCalledWith(1);
+    });
+
+    it('should accept a valid --blocked-tools regex', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({ blockedTools: '^(send-mail)$' });
+
+      const result = parseArgs();
+
+      expect(result.blockedTools).toBe('^(send-mail)$');
+      expect(process.exit).not.toHaveBeenCalled();
+    });
+
     it('should parse --extra-scopes from CLI options', () => {
       commanderMocks.mockCommand.opts.mockReturnValue({
         extraScopes: 'CopilotPackages.ReadWrite.All',
