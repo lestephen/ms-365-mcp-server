@@ -1,5 +1,6 @@
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import logger from '../logger.js';
 
 /**
  * Make emitted tool schemas acceptable to strict OpenAI-compatible providers.
@@ -142,7 +143,21 @@ export function hoistRefsUnderDefs(schema: unknown): unknown {
   const hoisted: JsonRecord = {};
   for (const pointer of pointers) {
     const target = resolvePointer(root, pointer);
-    hoisted[names.get(pointer)!] = target === undefined ? {} : structuredClone(target);
+    if (target === undefined) {
+      // Should not happen: every pointer the converter emits addresses a subschema it
+      // just wrote, and no unresolvable pointer occurs across the current tool set.
+      // If the converter ever changes, degrade to a permissive definition rather than
+      // dropping the tool, but say so loudly: the emitted schema is then weaker than
+      // the zod schema that still validates the arguments, and a caller could be led
+      // to send something the server rejects.
+      logger.warn(
+        `Tool schema: could not resolve $ref ${pointer}; emitting a permissive {} for it. ` +
+          'The advertised schema is now looser than the validated one.'
+      );
+      hoisted[names.get(pointer)!] = {};
+      continue;
+    }
+    hoisted[names.get(pointer)!] = structuredClone(target);
   }
 
   const rewrite = (node: unknown) =>

@@ -5,6 +5,9 @@ import {
   registerDiscoveryTools,
   registerGraphTools,
 } from '../src/graph-tools.js';
+import { withToolBlocklist } from '../src/lib/tool-blocklist.js';
+import { registerAuthTools } from '../src/auth-tools.js';
+import type AuthManager from '../src/auth.js';
 import GraphClient from '../src/graph-client.js';
 
 vi.mock('../src/logger.js', () => ({
@@ -201,6 +204,37 @@ describe('blocked tools', () => {
     const names = registeredNames();
     expect(names).toContain('create-draft-email');
     expect(names).not.toContain('send-mail');
+  });
+
+  it('blocks auth tools too, so the contract holds on every registration path', () => {
+    // Four reviewers independently flagged that registerAuthTools was outside the
+    // guardrail, so --blocked-tools '^logout$' silently did nothing.
+    const guarded = withToolBlocklist(server, '^(logout|remove-account)$');
+    registerAuthTools(guarded, {} as AuthManager);
+
+    const names = registeredNames();
+    expect(names).toContain('login');
+    expect(names).toContain('verify-login');
+    expect(names).not.toContain('logout');
+    expect(names).not.toContain('remove-account');
+  });
+
+  it('can block the generic dispatcher itself', () => {
+    // An operator may want the named tools without generic Graph execution.
+    const guarded = withToolBlocklist(server, '^execute-tool$');
+    registerDiscoveryTools(guarded, graphClient, false, true);
+
+    const names = registeredNames();
+    expect(names).toContain('search-tools');
+    expect(names).toContain('get-tool-schema');
+    expect(names).not.toContain('execute-tool');
+  });
+
+  it('registers everything when no blocklist is given', () => {
+    const guarded = withToolBlocklist(server, undefined);
+    registerAuthTools(guarded, {} as AuthManager);
+
+    expect(registeredNames()).toContain('logout');
   });
 
   it('refuses to start on an invalid blocklist regex instead of failing open', () => {
