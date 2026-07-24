@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'crypto';
 import logger from './logger.js';
+import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
 import { auditLog, getUserIdentityForAudit } from './audit-log.js';
 import GraphClient from './graph-client.js';
 import AuthManager, {
@@ -1201,29 +1202,6 @@ async function executeGraphTool(
   }
 }
 
-/**
- * Compile the --blocked-tools pattern.
- *
- * Unlike --enabled-tools, an unparseable pattern here is fatal. This is a guardrail
- * rather than a filter: `execute-tool` dispatches by name, so a client-side deny
- * rule on a tool name is bypassed in discovery mode, and this blocklist is what
- * actually stops the call. Ignoring a typo would silently unblock the very tools an
- * operator asked to be unreachable, so refuse to start instead.
- */
-export function compileBlockedToolsRegex(pattern?: string): RegExp | undefined {
-  if (!pattern) return undefined;
-  try {
-    const regex = new RegExp(pattern, 'i');
-    logger.info(`Tool blocklist active with pattern: ${pattern}`);
-    return regex;
-  } catch (error) {
-    throw new Error(
-      `Invalid --blocked-tools regex ${JSON.stringify(pattern)}: ${(error as Error).message}. ` +
-        'Refusing to start, because ignoring it would leave the blocked tools reachable.'
-    );
-  }
-}
-
 export function registerGraphTools(
   server: McpServer,
   graphClient: GraphClient,
@@ -1915,3 +1893,6 @@ export function registerDiscoveryTools(
 
   // Layer 3 (list-accounts) is registered by registerAuthTools — no duplicate here.
 }
+
+// Re-exported so existing importers keep working after the helper moved to lib/.
+export { compileBlockedToolsRegex };

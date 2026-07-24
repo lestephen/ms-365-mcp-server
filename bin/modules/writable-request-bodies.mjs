@@ -51,7 +51,6 @@ const WRITABLE_NAVIGATION_PROPERTIES = {
   // POST /chats and a private channel both require `members`.
   'microsoft.graph.chat': ['members'],
   'microsoft.graph.channel': ['members'],
-  'microsoft.graph.plannerTask': ['details'],
   // Inline images in a Teams message are sent as hostedContents referenced from the
   // HTML body, so this is writable on create. `replies` is not: replies are posted
   // to their own endpoint.

@@ -25,6 +25,7 @@ import {
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
 import { withStrictToolSchemas } from './lib/strict-tool-schemas.js';
+import { withToolBlocklist } from './lib/tool-blocklist.js';
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
@@ -108,14 +109,21 @@ class MicrosoftGraphServer {
       }
     );
 
+    // Single registration boundary for the blocklist. Wrapping the server here means
+    // a blocked name cannot be registered by ANY registrar (auth, Graph, utility, the
+    // discovery triad), rather than each one having to remember to filter. The
+    // registry inside registerDiscoveryTools still gets the pattern separately,
+    // because execute-tool/get-tool-schema/search-tools read that, not a registration.
+    const registrar = withToolBlocklist(server, this.options.blockedTools);
+
     const shouldRegisterAuthTools = !this.options.http || this.options.enableAuthTools;
     if (shouldRegisterAuthTools) {
-      registerAuthTools(server, this.authManager);
+      registerAuthTools(registrar, this.authManager);
     }
 
     if (this.options.discovery) {
       registerDiscoveryTools(
-        server,
+        registrar,
         this.graphClient!,
         this.options.readOnly,
         this.options.orgMode,
@@ -133,7 +141,7 @@ class MicrosoftGraphServer {
       // trimming to a preset would put the rarely used tools out of reach entirely.
       if (this.options.directTools) {
         registerGraphTools(
-          server,
+          registrar,
           this.graphClient!,
           this.options.readOnly,
           this.options.directTools,
@@ -147,7 +155,7 @@ class MicrosoftGraphServer {
       }
     } else {
       registerGraphTools(
-        server,
+        registrar,
         this.graphClient!,
         this.options.readOnly,
         this.options.enabledTools,
