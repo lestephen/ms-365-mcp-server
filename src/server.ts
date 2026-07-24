@@ -25,6 +25,7 @@ import {
   toOAuthErrorResponse,
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
+import { withStrictToolSchemas } from './lib/strict-tool-schemas.js';
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
@@ -717,7 +718,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(transport);
+            await server.connect(withStrictToolSchemas(transport));
             await transport.handleRequest(req as any, res as any, undefined);
           };
 
@@ -762,7 +763,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(transport);
+            await server.connect(withStrictToolSchemas(transport));
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -826,7 +827,7 @@ class MicrosoftGraphServer {
       transport.onerror = (error) => {
         logger.error('Stdio transport error', { error: dumpError(error) });
       };
-      await this.server!.connect(transport);
+      await this.server!.connect(withStrictToolSchemas(transport));
       logger.info('Server connected to stdio transport');
     }
   }
