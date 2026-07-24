@@ -65,6 +65,14 @@ program
   .option('--force-work-scopes', 'Backwards compatibility alias for --org-mode (deprecated)')
   .option('--toon', '(experimental) Enable TOON output format for 30-60% token reduction')
   .option('--discovery', 'Enable runtime tool discovery and loading (experimental feature)')
+  .option(
+    '--direct-tools <pattern>',
+    'Use with --discovery for hybrid mode: also register tools matching this regex directly, by name, alongside search-tools/get-tool-schema/execute-tool. Every other tool stays reachable through execute-tool without its schema being sent up front, so a small named tool set can coexist with full Graph reach on a limited context budget.'
+  )
+  .option(
+    '--blocked-tools <pattern>',
+    'Make tools matching this regex unreachable by every path: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --direct-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. An invalid pattern is fatal rather than ignored.'
+  )
   .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)')
   .option(
     '--enable-dynamic-registration',
@@ -125,6 +133,8 @@ export interface CommandOptions {
   forceWorkScopes?: boolean;
   toon?: boolean;
   discovery?: boolean;
+  directTools?: string;
+  blockedTools?: string;
   cloud?: string;
   enableDynamicRegistration?: boolean;
   dynamicRegistration?: boolean;
