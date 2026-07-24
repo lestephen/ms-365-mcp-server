@@ -1903,6 +1903,29 @@ async function executeGraphTool(
   }
 }
 
+/**
+ * Compile the --blocked-tools pattern.
+ *
+ * Unlike --enabled-tools, an unparseable pattern here is fatal. This is a guardrail
+ * rather than a filter: `execute-tool` dispatches by name, so a client-side deny
+ * rule on a tool name is bypassed in discovery mode, and this blocklist is what
+ * actually stops the call. Ignoring a typo would silently unblock the very tools an
+ * operator asked to be unreachable, so refuse to start instead.
+ */
+export function compileBlockedToolsRegex(pattern?: string): RegExp | undefined {
+  if (!pattern) return undefined;
+  try {
+    const regex = new RegExp(pattern, 'i');
+    logger.info(`Tool blocklist active with pattern: ${pattern}`);
+    return regex;
+  } catch (error) {
+    throw new Error(
+      `Invalid --blocked-tools regex ${JSON.stringify(pattern)}: ${(error as Error).message}. ` +
+        'Refusing to start, because ignoring it would leave the blocked tools reachable.'
+    );
+  }
+}
+
 export function registerGraphTools(
   server: McpServer,
   graphClient: GraphClient,
@@ -1913,8 +1936,10 @@ export function registerGraphTools(
   multiAccount: boolean = false,
   accountNames: string[] = [],
   allowedScopesValue?: string,
-  httpMode: boolean = false
+  httpMode: boolean = false,
+  blockedToolsPattern?: string
 ): number {
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
@@ -1956,6 +1981,14 @@ export function registerGraphTools(
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
       logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
+      skippedCount++;
+      continue;
+    }
+
+    // The blocklist wins over any enable pattern, including an explicit --direct-tools
+    // selection, so a blocked tool is unreachable by every path.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
+      logger.info(`Blocking tool ${tool.alias} - matches blocklist pattern`);
       skippedCount++;
       continue;
     }
@@ -2205,6 +2238,7 @@ export function registerGraphTools(
     if (readOnly && !utility.readOnlyHint) continue;
     if (httpMode && utility.stdioOnly) continue;
     if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
+    if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
     try {
       registerUtilityToolWithMcp(server, utility, utilityCtx);
       registeredCount++;
@@ -2229,7 +2263,8 @@ export function buildToolsRegistry(
   orgMode: boolean,
   enabledToolsRegex?: RegExp,
   allowedScopesValue?: string,
-  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = []
+  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [],
+  blockedToolsRegex?: RegExp
 ): Map<string, { tool: (typeof api.endpoints)[0]; config: EndpointConfig | undefined }> {
   const toolsMap = new Map<
     string,
@@ -2252,6 +2287,12 @@ export function buildToolsRegistry(
     }
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+      continue;
+    }
+
+    // A blocked tool is unreachable by every path: direct registration, the
+    // discovery registry, search-tools, get-tool-schema and execute-tool.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
       continue;
     }
 
@@ -2381,8 +2422,10 @@ export function registerDiscoveryTools(
   accountNames: string[] = [],
   enabledTools?: string,
   allowedScopesValue?: string,
-  httpMode: boolean = false
+  httpMode: boolean = false,
+  blockedToolsPattern?: string
 ): void {
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
     try {
@@ -2401,7 +2444,10 @@ export function registerDiscoveryTools(
     orgMode,
     enabledToolsRegex,
     allowedScopesValue,
-    disabledByAllowedScopes
+    disabledByAllowedScopes,
+    // Keeps blocked tools out of the registry itself, which is what execute-tool,
+    // get-tool-schema and search-tools all read from.
+    blockedToolsRegex
   );
   if (disabledByAllowedScopes.length > 0) {
     logger.info(
@@ -2412,6 +2458,7 @@ export function registerDiscoveryTools(
     if (readOnly && !u.readOnlyHint) return false;
     if (httpMode && u.stdioOnly) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
+    if (blockedToolsRegex && blockedToolsRegex.test(u.name)) return false;
     return true;
   });
   const searchIndex = buildDiscoverySearchIndex(toolsRegistry, utilityTools);
