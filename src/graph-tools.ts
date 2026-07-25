@@ -2,6 +2,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash, randomUUID } from 'crypto';
 import logger from './logger.js';
 import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
+import {
+  buildBlockedOperationMatchers,
+  describeBlockedSubrequests,
+  findBlockedSubrequests,
+  type BlockedOperationMatcher,
+} from './lib/batch-guard.js';
 import { auditLog, getSessionClaims, getUserIdentityForAudit } from './audit-log.js';
 import { getConfiguredExoBroker, readSendAsGrant } from './exo-recipient-broker.js';
 import {
@@ -1137,9 +1143,36 @@ async function executeGraphTool(
   config: EndpointConfig | undefined,
   graphClient: GraphClient,
   params: Record<string, unknown>,
-  authManager?: AuthManager
+  authManager?: AuthManager,
+  blockedOperations: BlockedOperationMatcher[] = []
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
+
+  // A blocked tool is unreachable by name, but graph-batch carries arbitrary
+  // method/url subrequests, so the operation itself has to be checked (#24). Without
+  // this, POST /me/sendMail inside a batch reaches Graph while send-mail is blocked.
+  if (blockedOperations.length > 0 && tool.path === '/$batch') {
+    const hits = findBlockedSubrequests(params.body, blockedOperations);
+    if (hits.length > 0) {
+      logger.warn(
+        `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
+          hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
+      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              error: 'blocked_operation',
+              message: describeBlockedSubrequests(hits),
+              blocked: hits,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
 
   if (
     isConfirmGateEnabled() &&
@@ -1656,6 +1689,9 @@ export function registerGraphTools(
   blockedToolsPattern?: string
 ): number {
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+  // Operations the blocklist prohibits, so graph-batch cannot carry one as a
+  // subrequest (#24).
+  const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
@@ -1910,7 +1946,15 @@ export function registerGraphTools(
           destructiveHint: destructive,
           openWorldHint: true, // All tools call Microsoft Graph API
         },
-        async (params) => executeGraphTool(tool, endpointConfig, graphClient, params, authManager)
+        async (params) =>
+          executeGraphTool(
+            tool,
+            endpointConfig,
+            graphClient,
+            params,
+            authManager,
+            blockedOperations
+          )
       );
       registeredCount++;
       registeredToolNames.add(tool.alias);
@@ -2130,6 +2174,8 @@ export function registerDiscoveryTools(
   directToolsPattern?: string
 ): void {
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+  // execute-tool can dispatch graph-batch, so the same operation check applies here (#24).
+  const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
 
   // Hybrid mode registers some tools by name and leaves the rest reachable only
   // through execute-tool. Discovery output must say which, per tool: a payload whose
@@ -2382,7 +2428,8 @@ export function registerDiscoveryTools(
           toolData.config,
           graphClient,
           parameters,
-          authManager
+          authManager,
+          blockedOperations
         );
       }
       const utility = utilityByName.get(tool_name);
