@@ -27,6 +27,8 @@ import {
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
 import { withStrictToolSchemas } from './lib/strict-tool-schemas.js';
 import { withToolBlocklist } from './lib/tool-blocklist.js';
+import { withMetricsObserver } from './lib/metrics-transport.js';
+import { contentType, enableMetrics, metricsText } from './metrics.js';
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
@@ -270,12 +272,46 @@ class MicrosoftGraphServer {
     }
   }
 
+  /**
+   * Serve Prometheus metrics on a dedicated port.
+   *
+   * Deliberately a separate listener rather than a route on the MCP app: the MCP app is
+   * published through a public IngressRoute, and operational detail should not be one
+   * routing mistake away from the internet. Expose this port on the Service only and
+   * scrape it in-cluster.
+   */
+  private startMetricsListener(): void {
+    if (!this.options.metrics) return;
+
+    const port =
+      typeof this.options.metrics === 'string' ? parseInt(this.options.metrics, 10) || 9464 : 9464;
+
+    enableMetrics();
+    const metricsApp = express();
+    metricsApp.get('/metrics', async (_req: Request, res: Response) => {
+      try {
+        res.set('Content-Type', contentType());
+        res.end(await metricsText());
+      } catch (error) {
+        logger.error(`Failed to render metrics: ${(error as Error).message}`);
+        res.status(500).end();
+      }
+    });
+    metricsApp.get('/healthz', (_req: Request, res: Response) => res.status(200).send('ok'));
+
+    metricsApp.listen(port, () => {
+      logger.info(`Metrics listening on :${port}/metrics (not exposed through the MCP ingress)`);
+    });
+  }
+
   async start(): Promise<void> {
     if (this.options.v) {
       enableConsoleLogging();
     }
 
     logger.info('Microsoft 365 MCP Server starting...');
+
+    this.startMetricsListener();
 
     // Debug: Check if secrets are loaded
     logger.info('Secrets Check:', {
@@ -779,7 +815,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(withStrictToolSchemas(transport));
+            await server.connect(withMetricsObserver(withStrictToolSchemas(transport)));
             await transport.handleRequest(req as any, res as any, undefined);
           };
 
@@ -824,7 +860,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(withStrictToolSchemas(transport));
+            await server.connect(withMetricsObserver(withStrictToolSchemas(transport)));
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -888,7 +924,7 @@ class MicrosoftGraphServer {
       transport.onerror = (error) => {
         logger.error('Stdio transport error', { error: dumpError(error) });
       };
-      await this.server!.connect(withStrictToolSchemas(transport));
+      await this.server!.connect(withMetricsObserver(withStrictToolSchemas(transport)));
       logger.info('Server connected to stdio transport');
     }
   }
