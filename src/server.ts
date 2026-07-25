@@ -156,6 +156,12 @@ class MicrosoftGraphServer {
           this.multiAccount,
           this.accountNames,
           this.options.allowedScopes,
+          // httpMode. Upstream added this at position 10 in v0.132, where our
+          // blockedTools used to sit. Omitting it silently shifted the blocklist into
+          // the httpMode slot and left blockedToolsPattern undefined, which disabled
+          // the graph-batch subrequest guard (#24) in exactly the mode production
+          // runs. tsc caught it; tsup does not typecheck, so nothing else did.
+          Boolean(this.options.http),
           this.options.blockedTools
         );
       }

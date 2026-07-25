@@ -209,7 +209,14 @@ export function parseRange(
 
 /** Express handler for `GET /download/:handle`. Tokenless by design. */
 export function downloadRouteHandler(req: Request, res: Response): void {
+  // Express types this as string | string[]; a repeated param would otherwise be
+  // handed to lookupCapability as an array and stringify into a lookup that cannot
+  // match. Reject it rather than coerce.
   const handle = req.params.handle;
+  if (typeof handle !== 'string') {
+    res.status(404).json({ error: 'Download link is invalid or has expired.' });
+    return;
+  }
   const cap = lookupCapability(handle);
   if (!cap) {
     res.status(404).json({ error: 'Download link is invalid or has expired.' });

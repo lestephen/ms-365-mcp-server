@@ -19,7 +19,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "verify": "npm run generate && npm run lint && npm run format:check && npm run build && npm run test",
-    "inspector": "npx @modelcontextprotocol/inspector tsx src/index.ts"
+    "inspector": "npx @modelcontextprotocol/inspector tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "microsoft",
