@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHash, randomUUID } from 'crypto';
 import logger from './logger.js';
+import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
 import { auditLog, getSessionClaims, getUserIdentityForAudit } from './audit-log.js';
 import { getConfiguredExoBroker, readSendAsGrant } from './exo-recipient-broker.js';
 import {
@@ -1651,8 +1652,10 @@ export function registerGraphTools(
   authManager?: AuthManager,
   multiAccount: boolean = false,
   accountNames: string[] = [],
-  allowedScopesValue?: string
+  allowedScopesValue?: string,
+  blockedToolsPattern?: string
 ): number {
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
@@ -1694,6 +1697,14 @@ export function registerGraphTools(
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
       logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
+      skippedCount++;
+      continue;
+    }
+
+    // The blocklist wins over any enable pattern, including an explicit --direct-tools
+    // selection, so a blocked tool is unreachable by every path.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
+      logger.info(`Blocking tool ${tool.alias} - matches blocklist pattern`);
       skippedCount++;
       continue;
     }
@@ -1931,6 +1942,7 @@ export function registerGraphTools(
   for (const utility of UTILITY_TOOLS) {
     if (readOnly && !utility.readOnlyHint) continue;
     if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
+    if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
     try {
       registerUtilityToolWithMcp(server, utility, utilityCtx);
       registeredCount++;
@@ -1955,7 +1967,8 @@ export function buildToolsRegistry(
   orgMode: boolean,
   enabledToolsRegex?: RegExp,
   allowedScopesValue?: string,
-  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = []
+  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [],
+  blockedToolsRegex?: RegExp
 ): Map<string, { tool: (typeof api.endpoints)[0]; config: EndpointConfig | undefined }> {
   const toolsMap = new Map<
     string,
@@ -1978,6 +1991,12 @@ export function buildToolsRegistry(
     }
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+      continue;
+    }
+
+    // A blocked tool is unreachable by every path: direct registration, the
+    // discovery registry, search-tools, get-tool-schema and execute-tool.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
       continue;
     }
 
@@ -2106,8 +2125,10 @@ export function registerDiscoveryTools(
   multiAccount: boolean = false,
   accountNames: string[] = [],
   enabledTools?: string,
-  allowedScopesValue?: string
+  allowedScopesValue?: string,
+  blockedToolsPattern?: string
 ): void {
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
     try {
@@ -2126,7 +2147,10 @@ export function registerDiscoveryTools(
     orgMode,
     enabledToolsRegex,
     allowedScopesValue,
-    disabledByAllowedScopes
+    disabledByAllowedScopes,
+    // Keeps blocked tools out of the registry itself, which is what execute-tool,
+    // get-tool-schema and search-tools all read from.
+    blockedToolsRegex
   );
   if (disabledByAllowedScopes.length > 0) {
     logger.info(
@@ -2136,6 +2160,7 @@ export function registerDiscoveryTools(
   const utilityTools = UTILITY_TOOLS.filter((u) => {
     if (readOnly && !u.readOnlyHint) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
+    if (blockedToolsRegex && blockedToolsRegex.test(u.name)) return false;
     return true;
   });
   const searchIndex = buildDiscoverySearchIndex(toolsRegistry, utilityTools);
@@ -2335,3 +2360,6 @@ export function registerDiscoveryTools(
 
   // Layer 3 (list-accounts) is registered by registerAuthTools — no duplicate here.
 }
+
+// Re-exported so existing importers keep working after the helper moved to lib/.
+export { compileBlockedToolsRegex };

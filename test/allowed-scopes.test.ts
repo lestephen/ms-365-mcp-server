@@ -211,7 +211,9 @@ describe('allowed scope HTTP behavior', () => {
       expect.anything(),
       false,
       [],
-      'Mail.Read'
+      'Mail.Read',
+      // --blocked-tools, not set in this configuration
+      undefined
     );
   });
 });

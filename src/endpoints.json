@@ -1687,7 +1687,19 @@
     "method": "post",
     "toolName": "pin-chat-message",
     "presets": ["teams", "work"],
-    "workScopes": ["ChatMessage.Send"]
+    "workScopes": ["ChatMessage.Send"],
+    "requestBodySchema": {
+      "type": "object",
+      "required": ["message@odata.bind"],
+      "additionalProperties": false,
+      "properties": {
+        "message@odata.bind": {
+          "type": "string",
+          "description": "Full Graph URL of the message to pin, for example https://graph.microsoft.com/v1.0/chats/{chat-id}/messages/{message-id}. Graph accepts only this @odata.bind reference here; a nested message object is rejected."
+        }
+      }
+    },
+    "llmTip": "Pin an existing message. The body is a single @odata.bind reference to the message, not a message object: { \"message@odata.bind\": \"https://graph.microsoft.com/v1.0/chats/{chat-id}/messages/{message-id}\" }."
   },
   {
     "pathPattern": "/chats/{chat-id}/pinnedMessages/{pinnedChatMessageInfo-id}",
@@ -1899,7 +1911,9 @@
         },
         "resourceMetadata": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Optional list of retrievable metadata fields to return per hit (e.g. ['title', 'author']). By default no metadata is returned."
         },
         "maximumNumberOfResults": {
