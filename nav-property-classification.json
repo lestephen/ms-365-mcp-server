@@ -1,0 +1,152 @@
+{
+  "_comment": [
+    "Classification of every Graph navigation property reachable from a request body.",
+    "",
+    "bin/modules/writable-request-bodies.mjs drops navigation properties from request",
+    "bodies unless allowlisted. test/writable-body-invariants.ts already catches a",
+    "writable property DISAPPEARING. This file covers the other direction: a navigation",
+    "property Microsoft newly publishes would otherwise be dropped silently, because the",
+    "allowlist has no entry for something that did not exist when it was written.",
+    "See EnviroKinetics/ms365-mcp#25.",
+    "",
+    "Every reachable pair must appear here. When a spec refresh introduces one, the test",
+    "fails and asks for a deliberate decision: allowlist it in",
+    "WRITABLE_NAVIGATION_PROPERTIES and add it under \"keep\", or record it under \"drop\".",
+    "Do not add to \"keep\" without also allowlisting it; the test checks both agree."
+  ],
+  "keep": {
+    "microsoft.graph.calendar": ["multiValueExtendedProperties", "singleValueExtendedProperties"],
+    "microsoft.graph.channel": ["members"],
+    "microsoft.graph.chat": ["members"],
+    "microsoft.graph.chatMessage": ["hostedContents"],
+    "microsoft.graph.contact": ["multiValueExtendedProperties", "singleValueExtendedProperties"],
+    "microsoft.graph.contactFolder": [
+      "multiValueExtendedProperties",
+      "singleValueExtendedProperties"
+    ],
+    "microsoft.graph.event": [
+      "attachments",
+      "multiValueExtendedProperties",
+      "singleValueExtendedProperties"
+    ],
+    "microsoft.graph.list": ["columns"],
+    "microsoft.graph.listItem": ["fields"],
+    "microsoft.graph.mailFolder": ["multiValueExtendedProperties", "singleValueExtendedProperties"],
+    "microsoft.graph.message": [
+      "attachments",
+      "multiValueExtendedProperties",
+      "singleValueExtendedProperties"
+    ],
+    "microsoft.graph.post": [
+      "attachments",
+      "extensions",
+      "multiValueExtendedProperties",
+      "singleValueExtendedProperties"
+    ],
+    "microsoft.graph.team": ["members"],
+    "microsoft.graph.todoTask": ["attachments", "checklistItems", "extensions", "linkedResources"],
+    "microsoft.graph.todoTaskList": ["extensions"],
+    "microsoft.graph.workbookRangeFormat": ["borders", "fill", "font", "protection"]
+  },
+  "drop": {
+    "microsoft.graph.calendar": ["calendarPermissions", "calendarView", "events"],
+    "microsoft.graph.channel": [
+      "allMembers",
+      "enabledApps",
+      "filesFolder",
+      "messages",
+      "sharedWithTeams",
+      "tabs"
+    ],
+    "microsoft.graph.chat": [
+      "installedApps",
+      "lastMessagePreview",
+      "messages",
+      "permissionGrants",
+      "pinnedMessages",
+      "tabs",
+      "targetedMessages"
+    ],
+    "microsoft.graph.chatMessage": ["replies"],
+    "microsoft.graph.contactFolder": ["childFolders", "contacts"],
+    "microsoft.graph.contentType": [
+      "base",
+      "baseTypes",
+      "columnLinks",
+      "columnPositions",
+      "columns"
+    ],
+    "microsoft.graph.documentSet": ["sharedColumns", "welcomePageColumns"],
+    "microsoft.graph.documentSetVersion": ["fields"],
+    "microsoft.graph.drive": [
+      "bundles",
+      "createdByUser",
+      "following",
+      "items",
+      "lastModifiedByUser",
+      "list",
+      "root",
+      "special"
+    ],
+    "microsoft.graph.driveItem": ["createdByUser", "lastModifiedByUser"],
+    "microsoft.graph.itemActivity": ["driveItem"],
+    "microsoft.graph.itemActivityStat": ["activities"],
+    "microsoft.graph.itemAnalytics": ["allTime", "itemActivityStats", "lastSevenDays"],
+    "microsoft.graph.list": [
+      "contentTypes",
+      "createdByUser",
+      "drive",
+      "items",
+      "lastModifiedByUser",
+      "operations",
+      "permissions",
+      "subscriptions"
+    ],
+    "microsoft.graph.listItem": [
+      "analytics",
+      "createdByUser",
+      "documentSetVersions",
+      "driveItem",
+      "lastModifiedByUser",
+      "permissions",
+      "versions"
+    ],
+    "microsoft.graph.listItemVersion": ["fields"],
+    "microsoft.graph.mailFolder": ["childFolders", "messageRules", "messages"],
+    "microsoft.graph.notebook": ["sectionGroups", "sections"],
+    "microsoft.graph.onenotePage": ["parentNotebook", "parentSection"],
+    "microsoft.graph.onenoteSection": ["pages", "parentNotebook", "parentSectionGroup"],
+    "microsoft.graph.pinnedChatMessageInfo": ["message"],
+    "microsoft.graph.place": ["checkIns"],
+    "microsoft.graph.plannerBucket": ["tasks"],
+    "microsoft.graph.plannerTask": [
+      "assignedToTaskBoardFormat",
+      "bucketTaskBoardFormat",
+      "details"
+    ],
+    "microsoft.graph.post": ["inReplyTo"],
+    "microsoft.graph.sectionGroup": [
+      "parentNotebook",
+      "parentSectionGroup",
+      "sectionGroups",
+      "sections"
+    ],
+    "microsoft.graph.sharedWithChannelTeamInfo": ["allowedMembers", "team"],
+    "microsoft.graph.targetedChatMessage": ["hostedContents", "replies"],
+    "microsoft.graph.team": [
+      "allChannels",
+      "channels",
+      "group",
+      "incomingChannels",
+      "installedApps",
+      "operations",
+      "permissionGrants"
+    ],
+    "microsoft.graph.teamsApp": ["appDefinitions"],
+    "microsoft.graph.teamsAppDefinition": ["bot"],
+    "microsoft.graph.teamsAppInstallation": ["teamsApp", "teamsAppDefinition"],
+    "microsoft.graph.teamsTab": ["teamsApp"],
+    "microsoft.graph.todoTask": ["attachmentSessions"],
+    "microsoft.graph.todoTaskList": ["tasks"]
+  }
+}

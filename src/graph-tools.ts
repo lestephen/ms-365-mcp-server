@@ -2126,9 +2126,43 @@ export function registerDiscoveryTools(
   accountNames: string[] = [],
   enabledTools?: string,
   allowedScopesValue?: string,
-  blockedToolsPattern?: string
+  blockedToolsPattern?: string,
+  directToolsPattern?: string
 ): void {
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+
+  // Hybrid mode registers some tools by name and leaves the rest reachable only
+  // through execute-tool. Discovery output must say which, per tool: a payload whose
+  // `name` field looks callable leads a model to call it directly and get
+  // "Tool ... not found" (see EnviroKinetics/ms365-mcp#29). An invalid pattern here is
+  // not fatal, unlike the blocklist: the consequence is a wrong hint, not a policy hole.
+  let directToolsRegex: RegExp | undefined;
+  if (directToolsPattern) {
+    try {
+      directToolsRegex = new RegExp(directToolsPattern, 'i');
+    } catch (error) {
+      logger.error(
+        `Invalid --direct-tools regex ${JSON.stringify(directToolsPattern)} for discovery hints; ` +
+          `treating every tool as execute-tool only: ${(error as Error).message}`
+      );
+    }
+  }
+
+  /** Route a caller must use to invoke `name` in this configuration. */
+  const invokeVia = (name: string): 'direct' | 'execute-tool' =>
+    directToolsRegex && directToolsRegex.test(name) ? 'direct' : 'execute-tool';
+
+  const invocationFor = (name: string) =>
+    invokeVia(name) === 'direct'
+      ? {
+          via: 'direct' as const,
+          note: `${name} is registered as a named tool in this configuration; call it directly.`,
+        }
+      : {
+          via: 'execute-tool' as const,
+          note: `${name} is not registered as a named tool here, so it cannot be called directly. Invoke it through execute-tool.`,
+          example: { tool_name: name, parameters: {} as Record<string, unknown> },
+        };
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
     try {
@@ -2200,6 +2234,7 @@ export function registerDiscoveryTools(
           config
         ),
         ...(config?.llmTip ? { llmTip: config.llmTip } : {}),
+        invoke_via: invokeVia(name),
       };
     }
     const utility = utilityByName.get(name);
@@ -2209,6 +2244,7 @@ export function registerDiscoveryTools(
         method: utility.method,
         path: utility.path,
         description: utility.description,
+        invoke_via: invokeVia(utility.name),
       };
     }
     return null;
@@ -2285,14 +2321,24 @@ export function registerDiscoveryTools(
       if (entry) {
         const schema = describeToolSchema(entry.tool, entry.config);
         return {
-          content: [{ type: 'text', text: JSON.stringify(schema, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ...schema, invocation: invocationFor(tool_name) }, null, 2),
+            },
+          ],
         };
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
         const schema = describeUtilityToolSchema(utility, utilityCtx);
         return {
-          content: [{ type: 'text', text: JSON.stringify(schema, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ...schema, invocation: invocationFor(tool_name) }, null, 2),
+            },
+          ],
         };
       }
       return {
