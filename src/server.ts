@@ -132,7 +132,10 @@ class MicrosoftGraphServer {
         this.accountNames,
         this.options.enabledTools,
         this.options.allowedScopes,
-        this.options.blockedTools
+        this.options.blockedTools,
+        // So discovery output can tell a caller whether a tool is callable by name
+        // here or only through execute-tool (#29).
+        this.options.directTools
       );
 
       // Hybrid mode: named tools for the common operations, with the discovery triad
