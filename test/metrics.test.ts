@@ -197,24 +197,55 @@ describe('unknown-tool observation (the #29 signal)', () => {
     expect(text).toMatch(/ms365_mcp_tool_schema_bytes \d+/);
   });
 
-  it('does not grow without bound when responses never arrive', async () => {
+  it('leaves transport.onmessage completely alone', () => {
+    // Regression guard for a real outage. An earlier version intercepted onmessage via
+    // Object.defineProperty to correlate responses back to request ids. That broke
+    // StreamableHTTPServerTransport outright: every HTTP request hung with no response,
+    // while stdio was unaffected, so it passed a stdio-only check and reached
+    // production. Only send() may be wrapped.
+    const onmessage = () => {};
+    const transport = {
+      send: vi.fn(),
+      start: vi.fn(),
+      close: vi.fn(),
+      onmessage,
+    } as unknown as Transport;
+
+    withMetricsObserver(transport);
+
+    expect(transport.onmessage).toBe(onmessage);
+    const descriptor = Object.getOwnPropertyDescriptor(transport, 'onmessage');
+    expect(descriptor?.get, 'onmessage must not become an accessor').toBeUndefined();
+    expect(descriptor?.set, 'onmessage must not become an accessor').toBeUndefined();
+    expect(descriptor?.value).toBe(onmessage);
+  });
+
+  it('counts a not-found whose tool name cannot be parsed, under a sentinel', async () => {
+    // Detection requires "not found" rather than keying on -32602 alone, because
+    // -32602 is invalid-params generally and would over-count ordinary argument errors.
+    // Within that, a name we cannot parse still counts rather than vanishing.
     const { wrapped } = wired();
-    for (let i = 0; i < 600; i += 1) {
-      wrapped.onmessage!({
-        jsonrpc: '2.0',
-        id: i,
-        method: 'tools/call',
-        params: { name: `t${i}` },
-      } as never);
-    }
-    // The oldest entries are evicted, so an abandoned client cannot leak memory. The
-    // most recent id must still correlate.
     await wrapped.send({
       jsonrpc: '2.0',
-      id: 599,
-      error: { code: -32602, message: 'not found' },
+      id: 12,
+      result: {
+        content: [{ type: 'text', text: 'MCP error -32602: tool "odd name" not found' }],
+        isError: true,
+      },
     } as never);
-    expect((await sample('ms365_mcp_unknown_tool_total')).join('\n')).toContain('tool="t599"');
+
+    expect((await sample('ms365_mcp_unknown_tool_total')).join('\n')).toContain('tool="unparsed"');
+  });
+
+  it('does not count an ordinary invalid-params error as an unknown tool', async () => {
+    const { wrapped } = wired();
+    await wrapped.send({
+      jsonrpc: '2.0',
+      id: 13,
+      error: { code: -32602, message: 'Invalid arguments: messageId is required' },
+    } as never);
+
+    expect(await sample('ms365_mcp_unknown_tool_total')).toEqual([]);
   });
 });
 
