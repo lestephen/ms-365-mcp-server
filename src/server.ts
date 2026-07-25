@@ -25,7 +25,6 @@ import {
   toOAuthErrorResponse,
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
-import { withStrictToolSchemas } from './lib/strict-tool-schemas.js';
 import { withToolBlocklist } from './lib/tool-blocklist.js';
 import { withMetricsObserver } from './lib/metrics-transport.js';
 import { contentType, enableMetrics, metricsText } from './metrics.js';
@@ -180,6 +179,13 @@ class MicrosoftGraphServer {
     // inputSchema $refs aren't anchored under #/$defs/. The SDK emits root-relative
     // refs for recursive/shared Microsoft Graph schemas and hard-codes its conversion
     // options, so normalize the emitted schemas here. See issue #571.
+    installToolSchemaRefNormalization(server);
+
+    // Upstream's normalizer replaces our strict-tool-schemas wrapper: it MOVES each
+    // referenced sub-schema into $defs instead of copying it, which is ~17k tokens
+    // smaller over 330 tools, and it is maintained upstream rather than by us.
+    // Must run after registration: it decorates the SDK's tools/list handler, which
+    // does not exist until the first tool is registered.
     installToolSchemaRefNormalization(server);
 
     return server;
@@ -815,7 +821,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(withMetricsObserver(withStrictToolSchemas(transport)));
+            await server.connect(withMetricsObserver(transport));
             await transport.handleRequest(req as any, res as any, undefined);
           };
 
@@ -860,7 +866,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(withMetricsObserver(withStrictToolSchemas(transport)));
+            await server.connect(withMetricsObserver(transport));
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -924,7 +930,7 @@ class MicrosoftGraphServer {
       transport.onerror = (error) => {
         logger.error('Stdio transport error', { error: dumpError(error) });
       };
-      await this.server!.connect(withMetricsObserver(withStrictToolSchemas(transport)));
+      await this.server!.connect(withMetricsObserver(transport));
       logger.info('Server connected to stdio transport');
     }
   }

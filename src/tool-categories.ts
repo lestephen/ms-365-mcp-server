@@ -86,6 +86,11 @@ const UNIVERSAL_UTILITY_TOOLS = ['download-bytes', 'download-bytes-to-file'];
 const SCOPED_UTILITY_TOOLS: Record<string, string[]> = {
   'get-download-url': ['files', 'onedrive', 'personal', 'work', 'search'],
   'parse-teams-url': ['teams', 'work'],
+  // EKI carry: reports whether the signed-in user may draft as a shared mailbox, so it is
+  // only meaningful where mail tools appear. Upstream's preset invariant caught that this
+  // belonged to no preset, meaning any --preset filter stripped it; we only avoided that
+  // by running --preset all.
+  'get-shared-draft-capability': ['mail', 'outlook', 'personal', 'work'],
 };
 
 // Fail fast if a scoped utility references a preset that does not exist (e.g. a typo like

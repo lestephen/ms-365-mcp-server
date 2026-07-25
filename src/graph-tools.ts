@@ -1359,6 +1359,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 // toString/constructor through the prototype
 function hasOwn(obj: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
+}
 
 /**
  * Label each subrequest in a batch with the tool whose operation it matches, so the
