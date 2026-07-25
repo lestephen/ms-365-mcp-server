@@ -42,7 +42,10 @@ const HYBRID_MODE_INSTRUCTIONS_ADDON =
   '(3) call execute-tool with tool_name exactly as returned and parameters shaped per the schema. ' +
   'Skipping get-tool-schema is the leading cause of Graph 400 errors here. ' +
   'If search-tools returns no matches, retry with shorter or different keywords. ' +
-  'A tool missing from your tool list is not unavailable, so search for it before reporting that you cannot do something.';
+  'A tool missing from your tool list is not unavailable, so search for it before reporting that you cannot do something. ' +
+  'Do NOT call a tool by name unless it appears in your tool list: search-tools and get-tool-schema describe tools that are ' +
+  'not registered here, and calling one of those directly fails with "Tool not found". Both report the route per tool, as ' +
+  'invoke_via in search results and as an invocation block in get-tool-schema; follow it.';
 
 /**
  * Full MCP `initialize.instructions` string: general guidance for every mode, plus
