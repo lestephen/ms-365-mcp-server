@@ -6,99 +6,81 @@ import { recordAdvertisedSurface, recordUnknownTool } from '../metrics.js';
  * Observe MCP traffic at the transport to capture two things the tool handlers cannot
  * see for themselves.
  *
- * `unknown_tool_total`: a `tools/call` for a name the server does not register is
- * rejected by the SDK before any handler runs, so the only place to see it is the wire.
- * This is the signal behind #29, where a caller read a schema via get-tool-schema and
- * then called the name directly. Correlating the outgoing error back to the incoming
- * request id gives the tool name without parsing it out of an error string, which would
- * break the moment the SDK reworded the message.
+ * `unknown_tool_total`: a `tools/call` for a name the server does not register never
+ * reaches a handler, so the only place to see it is the wire. This is the signal behind
+ * #29, where a caller read a schema via get-tool-schema and then called the name
+ * directly.
+ *
+ * ONLY `send` is wrapped. An earlier version also intercepted `onmessage` via
+ * Object.defineProperty to correlate the response back to the request id, which avoided
+ * parsing the tool name out of an error string. It also broke
+ * StreamableHTTPServerTransport outright: every HTTP request hung with no response,
+ * while stdio was unaffected. Production runs HTTP. Wrapping `send` alone is the pattern
+ * already proven there by withStrictToolSchemas, so the tool name is parsed from the
+ * message and falls back to an "unparsed" sentinel rather than being lost.
  *
  * `tools_advertised` / `tool_schema_bytes`: the up-front context cost of the current
  * configuration, measured from what actually goes out rather than recomputed.
  */
 
-const MAX_TRACKED = 512;
-
 export function withMetricsObserver<T extends Transport>(transport: T): T {
-  // Request id -> tool name, for calls still in flight.
-  const pending = new Map<string | number, string>();
-
   const originalSend = transport.send.bind(transport);
   transport.send = (message: JSONRPCMessage, options?: Parameters<Transport['send']>[1]) => {
-    observeOutgoing(message, pending);
+    observeOutgoing(message);
     return originalSend(message, options);
   };
-
-  // onmessage is assigned by Server.connect, so wrap it lazily: capture whatever the
-  // SDK sets and chain ours in front of it.
-  let handler: Transport['onmessage'];
-  Object.defineProperty(transport, 'onmessage', {
-    configurable: true,
-    get: () => handler,
-    set: (next: Transport['onmessage']) => {
-      handler = ((message: JSONRPCMessage, extra?: unknown) => {
-        observeIncoming(message, pending);
-        return (next as ((m: JSONRPCMessage, e?: unknown) => void) | undefined)?.(message, extra);
-      }) as Transport['onmessage'];
-    },
-  });
-
   return transport;
 }
 
-function observeIncoming(message: unknown, pending: Map<string | number, string>): void {
-  if (!message || typeof message !== 'object') return;
-  const m = message as { id?: string | number; method?: string; params?: { name?: unknown } };
-  if (m.method !== 'tools/call' || m.id === undefined) return;
-  const name = m.params?.name;
-  if (typeof name !== 'string') return;
-
-  // Bound the map: a client that never gets responses must not leak memory.
-  if (pending.size >= MAX_TRACKED) {
-    const oldest = pending.keys().next();
-    if (!oldest.done) pending.delete(oldest.value);
-  }
-  pending.set(m.id, name);
-}
-
 /**
- * Did this response mean "no such tool"?
+ * Did this response mean "no such tool", and for which tool?
  *
- * The SDK does NOT return a JSON-RPC error object for a tools/call naming an unknown
- * tool. It catches internally and returns a normal result carrying
- * `isError: true` with the text "MCP error -32602: Tool <name> not found". Verified
- * against a running server; an earlier version of this file checked `error.code` and
- * silently never fired.
+ * The SDK does not return a JSON-RPC error object here: it returns a normal result
+ * carrying `isError: true` with the text "MCP error -32602: Tool <name> not found".
+ * Verified against a running server; an earlier version checked `error.code` only and
+ * silently never fired. Both shapes are accepted so a future SDK change either way
+ * still counts.
  *
- * Both shapes are accepted so a future SDK change in either direction still counts. The
- * tool name comes from the correlated request rather than from parsing this string,
- * which would break the moment the wording changed.
+ * The name is parsed from the message. That is fragile to a rewording, which is why an
+ * unrecognised but clearly -32602 failure still counts under an "unparsed" sentinel
+ * rather than vanishing. The alternative, correlating against the incoming request id,
+ * required intercepting `onmessage` and broke the HTTP transport.
  */
-function isUnknownToolFailure(message: { error?: { code?: number }; result?: unknown }): boolean {
-  if (message.error?.code === -32602) return true;
+function unknownToolName(message: {
+  error?: { code?: number; message?: string };
+  result?: unknown;
+}): string | undefined {
+  const texts: string[] = [];
+  if (message.error?.code === -32602 && typeof message.error.message === 'string') {
+    texts.push(message.error.message);
+  }
   const result = message.result as
     | { isError?: boolean; content?: Array<{ text?: unknown }> }
     | undefined;
-  if (!result?.isError || !Array.isArray(result.content)) return false;
-  return result.content.some(
-    (part) =>
-      typeof part?.text === 'string' && part.text.includes('-32602') && /not found/i.test(part.text)
-  );
+  if (result?.isError && Array.isArray(result.content)) {
+    for (const part of result.content) if (typeof part?.text === 'string') texts.push(part.text);
+  }
+  for (const text of texts) {
+    if (!/not found/i.test(text)) continue;
+    const named = /Tool ([A-Za-z0-9._-]+) not found/i.exec(text);
+    if (named) return named[1];
+    // Recognisable as an unknown-tool failure but not parseable: still counted, under a
+    // sentinel, so the signal is not lost silently.
+    if (text.includes('-32602')) return 'unparsed';
+  }
+  return undefined;
 }
 
-function observeOutgoing(message: unknown, pending: Map<string | number, string>): void {
+function observeOutgoing(message: unknown): void {
   if (!message || typeof message !== 'object') return;
   const m = message as {
     id?: string | number;
-    error?: { code?: number };
+    error?: { code?: number; message?: string };
     result?: { tools?: unknown };
   };
 
-  if (m.id !== undefined && pending.has(m.id)) {
-    const tool = pending.get(m.id)!;
-    pending.delete(m.id);
-    if (isUnknownToolFailure(m)) recordUnknownTool(tool);
-  }
+  const unknown = unknownToolName(m);
+  if (unknown) recordUnknownTool(unknown);
 
   if (m.result && Array.isArray((m.result as { tools?: unknown[] }).tools)) {
     const tools = (m.result as { tools: unknown[] }).tools;
