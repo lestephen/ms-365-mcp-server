@@ -613,7 +613,9 @@ class MicrosoftGraphServer {
               : buildScopesFromEndpoints(
                   this.options.orgMode,
                   this.options.enabledTools,
-                  this.options.readOnly
+                  this.options.readOnly,
+                  // Do not request scopes for tools the operator blocked (#24).
+                  this.options.blockedTools
                 );
         const scopeSet = new Set([...baseScopes, 'User.Read', 'offline_access']);
         microsoftAuthUrl.searchParams.set('scope', Array.from(scopeSet).join(' '));
