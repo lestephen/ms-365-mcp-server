@@ -9,7 +9,11 @@ import {
   recordToolCall,
   registry,
 } from '../src/metrics.js';
-import { withMetricsObserver } from '../src/lib/metrics-transport.js';
+import {
+  withMetricsObserver,
+  seedAdvertisedSurface,
+  resetAdvertisedSurfaceSeedForTests,
+} from '../src/lib/metrics-transport.js';
 
 /**
  * Metrics exist so the open questions from the hybrid rollout get answered with data
@@ -255,5 +259,55 @@ describe('metrics are opt-in', () => {
     // contract instead: the helpers are guarded and the registry starts empty.
     const fresh = new (registry.constructor as new () => typeof registry)();
     expect((await fresh.metrics()).trim()).toBe('');
+  });
+});
+
+describe('advertised-surface seed (#34)', () => {
+  beforeEach(() => {
+    resetAdvertisedSurfaceSeedForTests();
+  });
+
+  function fakeServer(tools: Array<Record<string, unknown>>) {
+    return {
+      server: {
+        _requestHandlers: new Map([['tools/list', async () => ({ tools })]]),
+      },
+    };
+  }
+
+  it('records count and bytes without a client ever calling tools/list', async () => {
+    enableMetrics();
+    const tools = [{ name: 'a', inputSchema: { type: 'object' } }];
+    expect(await seedAdvertisedSurface(fakeServer(tools))).toBe('seeded');
+    const text = await metricsText();
+    expect(text).toMatch(/^ms365_mcp_tools_advertised 1$/m);
+    expect(text).toMatch(
+      new RegExp(`^ms365_mcp_tool_schema_bytes ${JSON.stringify(tools).length}$`, 'm')
+    );
+  });
+
+  it('seeds once per process, since HTTP builds a server per request', async () => {
+    expect(await seedAdvertisedSurface(fakeServer([{ name: 'a' }]))).toBe('seeded');
+    expect(await seedAdvertisedSurface(fakeServer([{ name: 'a' }]))).toBe('skipped');
+  });
+
+  it('is never fatal when the SDK internals move', async () => {
+    expect(await seedAdvertisedSurface({ server: {} })).toBe('failed');
+  });
+
+  it('is never fatal when the handler throws', async () => {
+    const server = {
+      server: {
+        _requestHandlers: new Map([
+          [
+            'tools/list',
+            async () => {
+              throw new Error('boom');
+            },
+          ],
+        ]),
+      },
+    };
+    expect(await seedAdvertisedSurface(server)).toBe('failed');
   });
 });

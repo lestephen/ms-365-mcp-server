@@ -1,6 +1,7 @@
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { recordAdvertisedSurface, recordUnknownTool } from '../metrics.js';
+import logger from '../logger.js';
 
 /**
  * Observe MCP traffic at the transport to capture two things the tool handlers cannot
@@ -86,4 +87,61 @@ function observeOutgoing(message: unknown): void {
     const tools = (m.result as { tools: unknown[] }).tools;
     recordAdvertisedSurface(tools.length, JSON.stringify(tools).length);
   }
+}
+
+/**
+ * Populate `tools_advertised` / `tool_schema_bytes` without waiting for a client.
+ *
+ * Both gauges used to be set only by observing an outgoing tools/list, so a pod that
+ * had served real traffic but no listing reported 0, which is indistinguishable from
+ * advertising nothing (#34). They answer "what does this configuration cost a client
+ * before any work happens", which is knowable at startup, so measure it then.
+ *
+ * Calls the SDK's tools/list handler directly, after the $ref normalizer is installed,
+ * so the byte count is what a client actually receives rather than the pre-normalized
+ * form. The transport observer still refines both on every real listing.
+ *
+ * Once per process. In HTTP mode a server is constructed per request, so seeding on
+ * every construction would re-serialize the whole surface on each one; the tool
+ * surface does not vary between them.
+ */
+let surfaceSeeded = false;
+
+export async function seedAdvertisedSurface(server: {
+  server: unknown;
+}): Promise<'seeded' | 'skipped' | 'failed'> {
+  if (surfaceSeeded) return 'skipped';
+  surfaceSeeded = true;
+  const handlers = (
+    server.server as {
+      _requestHandlers?: Map<
+        string,
+        (request: unknown, extra: unknown) => Promise<{ tools?: Array<Record<string, unknown>> }>
+      >;
+    }
+  )._requestHandlers;
+  const list = handlers?.get('tools/list');
+  if (!list) {
+    logger.debug('Skipping advertised-surface seed: tools/list handler not found');
+    return 'failed';
+  }
+  try {
+    const result = await list(
+      { method: 'tools/list', params: {} },
+      { signal: new AbortController().signal }
+    );
+    const tools = result.tools ?? [];
+    recordAdvertisedSurface(tools.length, JSON.stringify(tools).length);
+    return 'seeded';
+  } catch (error) {
+    // Never fatal: the observer path still populates these on the first real listing,
+    // which is exactly the behaviour this replaces.
+    logger.debug('Advertised-surface seed failed', { error: String(error) });
+    return 'failed';
+  }
+}
+
+/** Test seam: the once-guard is process-wide by design. */
+export function resetAdvertisedSurfaceSeedForTests(): void {
+  surfaceSeeded = false;
 }
