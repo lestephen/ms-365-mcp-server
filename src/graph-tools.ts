@@ -8,6 +8,7 @@ import {
   recordDiscoveryStage,
   recordToolCall,
   type ToolRoute,
+  initBlockedOperationSeries,
 } from './metrics.js';
 import {
   buildBlockedOperationMatchers,
@@ -1993,6 +1994,8 @@ export function registerGraphTools(
   // Operations the blocklist prohibits, so graph-batch cannot carry one as a
   // subrequest (#24).
   const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+  // Give those series a zero baseline now, so increase() can see the first refusal.
+  initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
@@ -2489,6 +2492,8 @@ export function registerDiscoveryTools(
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   // execute-tool can dispatch graph-batch, so the same operation check applies here (#24).
   const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+  // Give those series a zero baseline now, so increase() can see the first refusal.
+  initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
 
   // Hybrid mode registers some tools by name and leaves the rest reachable only
   // through execute-tool. Discovery output must say which, per tool: a payload whose

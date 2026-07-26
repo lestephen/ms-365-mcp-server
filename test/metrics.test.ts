@@ -6,6 +6,7 @@ import {
   metricsText,
   recordBatchSubrequest,
   recordBlockedOperation,
+  initBlockedOperationSeries,
   recordToolCall,
   registry,
 } from '../src/metrics.js';
@@ -309,5 +310,35 @@ describe('advertised-surface seed (#34)', () => {
       },
     };
     expect(await seedAdvertisedSurface(server)).toBe('failed');
+  });
+});
+
+describe('blocked-operation series are created at zero', () => {
+  it('exposes the series before anything is refused, so increase() has a baseline', async () => {
+    enableMetrics();
+    initBlockedOperationSeries(['send-mail', 'reply-mail-message']);
+    const text = await metricsText();
+    // Without this, prom-client emits nothing until the first inc, and the first
+    // refusal appears as a series whose first sample is already 1. increase() has no
+    // earlier point to subtract from and reports nothing, so the single most
+    // interesting call is the one the alert cannot see.
+    expect(text).toMatch(
+      /^ms365_mcp_blocked_operations_total\{tool="send-mail",route="direct"\} 0$/m
+    );
+    expect(text).toMatch(
+      /^ms365_mcp_blocked_operations_total\{tool="send-mail",route="batch"\} 0$/m
+    );
+    expect(text).toMatch(
+      /^ms365_mcp_blocked_operations_total\{tool="reply-mail-message",route="batch"\} 0$/m
+    );
+  });
+
+  it('does not clobber a count that already exists', async () => {
+    enableMetrics();
+    recordBlockedOperation('send-mail', 'batch');
+    initBlockedOperationSeries(['send-mail']);
+    expect(await metricsText()).toMatch(
+      /^ms365_mcp_blocked_operations_total\{tool="send-mail",route="batch"\} 1$/m
+    );
   });
 });

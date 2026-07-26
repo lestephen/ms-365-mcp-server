@@ -123,6 +123,34 @@ export function recordBlockedOperation(tool: string, route: ToolRoute): void {
   blockedOperations.inc({ tool, route });
 }
 
+/**
+ * Create the blocked-operation series at zero before anything is refused.
+ *
+ * prom-client only emits a labelled counter once it is incremented, so the first
+ * refusal for a tool/route appears as a series whose first sample is already 1.
+ * increase() has no earlier point to subtract and reports nothing, which makes the
+ * very first refused call, and the first after every restart, invisible to an alert
+ * watching the rate. That is the one call most worth seeing.
+ *
+ * Every workaround for this in PromQL trades away something else: comparing against
+ * an offset loses reset-awareness, and an instant selector drops a terminated pod's
+ * contribution while its samples are still inside the window. Giving the series a
+ * zero baseline removes the need for any of them, and plain increase() is then
+ * correct across resets, restarts and rolling replacements.
+ *
+ * Only possible because this label set is bounded: the tool names come from the
+ * blocklist pattern and route is direct or batch. unknown_tool_total cannot do this,
+ * since its label is whatever name a caller invented.
+ */
+export function initBlockedOperationSeries(toolNames: readonly string[]): void {
+  if (!enabled) return;
+  for (const tool of toolNames) {
+    for (const route of ['direct', 'batch'] as const) {
+      blockedOperations.inc({ tool, route }, 0);
+    }
+  }
+}
+
 export function recordBatchSubrequest(operation: string, method: string): void {
   if (!enabled) return;
   batchSubrequests.inc({ operation, method: method.toUpperCase() });
