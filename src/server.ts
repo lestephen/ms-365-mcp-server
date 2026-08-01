@@ -32,6 +32,7 @@ import { requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
 import crypto from 'node:crypto';
 import OboClient from './obo-client.js';
+import { downloadRouteHandler, isBrokerEnabled } from './attachment-broker.js';
 
 /**
  * Parse HTTP option into host and port components.
@@ -790,6 +791,11 @@ class MicrosoftGraphServer {
           }
         }
       );
+
+      if (isBrokerEnabled()) {
+        app.get('/download/:handle', downloadRouteHandler);
+        logger.info('Attachment broker enabled: GET /download/:handle');
+      }
 
       // Health check endpoint
       app.get('/', (req, res) => {
