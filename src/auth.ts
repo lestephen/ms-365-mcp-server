@@ -539,6 +539,24 @@ function resolveAuthScopes(options: AllowedScopeOptions = {}): string[] {
 }
 
 /**
+ * Drop a leading OAuth resource URI, so `https://graph.microsoft.com/Mail.Send` and
+ * `Mail.Send` compare equal. Entra documents the two as equivalent, and accepts the
+ * fully qualified form on sovereign clouds under a different host, so this matches any
+ * `scheme://host/` prefix rather than an allowlist of Graph hostnames.
+ *
+ * Case is preserved, because the scope-hierarchy rules match on `.ReadWrite`/`.Read.All`
+ * suffixes and would stop firing on a lowercased string.
+ */
+function stripScopeResourceUri(scope: string): string {
+  return scope.trim().replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i, '');
+}
+
+/** Comparison form for a scope: no resource URI, no case, no surrounding space. */
+function canonicalScope(scope: string): string {
+  return stripScopeResourceUri(scope).toLowerCase();
+}
+
+/**
  * Scopes that exist only because a tool the operator blocked would have needed them.
  * The difference between deriving with and without the blocklist IS the prohibited set,
  * so this stays correct as the endpoint catalogue changes.
@@ -603,12 +621,40 @@ function resolveAuthorizeScopes(
     return derived;
   }
 
-  // Reject a requested scope when it IS prohibited or when it IMPLIES something
-  // prohibited, so a broader scope cannot be used to smuggle a blocked one in.
-  const prohibited = blockedToolScopes(options);
-  const granted = requested.filter(
-    (scope) => !collapseScopeHierarchy([scope]).some((implied) => prohibited.has(implied))
+  // Compare canonically. The client controls the spelling, and Entra treats
+  // `mail.send`, `Mail.Send` and `https://graph.microsoft.com/Mail.Send` as the same
+  // permission, so an exact match against bare catalogue names is trivially bypassable.
+  const prohibited = new Set([...blockedToolScopes(options)].map(canonicalScope));
+  if (prohibited.size === 0) {
+    // Nothing is blocked, so there is nothing to subtract and upstream's behaviour of
+    // honouring the client's request applies unchanged.
+    return requested;
+  }
+
+  // Re-express a requested scope in its catalogue spelling before expanding the
+  // hierarchy, because those rules are case-sensitive and the client's casing is not
+  // trustworthy. Falls back to the URI-stripped string for scopes we do not know.
+  const catalogueSpelling = new Map<string, string>(
+    buildScopesFromEndpoints(options.orgMode, options.enabledTools, options.readOnly).map(
+      (scope) => [canonicalScope(scope), scope]
+    )
   );
+
+  const granted = requested.filter((scope) => {
+    const canonical = canonicalScope(scope);
+
+    // `.default` is catalogue-independent: it asks for every statically consented app
+    // permission, which necessarily includes the ones the operator blocked. There is no
+    // narrower reading of it, so it cannot be honoured while a blocklist is in force.
+    if (canonical === '.default') return false;
+
+    const known = catalogueSpelling.get(canonical) ?? stripScopeResourceUri(scope);
+    // Reject when the scope IS prohibited or IMPLIES something prohibited, so a broader
+    // scope cannot smuggle a blocked one in.
+    return !collapseScopeHierarchy([known])
+      .map(canonicalScope)
+      .some((implied) => prohibited.has(implied));
+  });
 
   if (granted.length !== requested.length) {
     const dropped = requested.filter((scope) => !granted.includes(scope));
