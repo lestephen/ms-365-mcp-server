@@ -104,14 +104,12 @@ export function auditLog(evt: AuditEvent): void {
 }
 
 /**
- * Decode a JWT payload (NO signature verification — that is the auth
- * middleware's job) and return a stable identity claim suitable for the
- * audit trail. Returns `undefined` when no usable claim is found or when
- * the token is malformed.
- *
- * Preference order: `upn` → `preferred_username` → `email` → `sub`.
+ * Decode a JWT payload (NO signature verification, intentionally: verifying the
+ * signature is the auth middleware's job; these helpers only read claims the
+ * middleware has already accepted). Returns `undefined` when the token is
+ * missing or malformed.
  */
-export function getUserIdentityForAudit(token?: string): string | undefined {
+function decodeJwtPayload(token?: string): Record<string, unknown> | undefined {
   if (!token) return undefined;
   try {
     const parts = token.split('.');
@@ -119,19 +117,86 @@ export function getUserIdentityForAudit(token?: string): string | undefined {
     let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
     const padNeeded = (4 - (b64.length % 4)) % 4;
     b64 = b64 + '='.repeat(padNeeded);
-    const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8')) as Record<
-      string,
-      unknown
-    >;
-    const candidate =
-      (payload.upn as string | undefined) ||
-      (payload.preferred_username as string | undefined) ||
-      (payload.email as string | undefined) ||
-      (payload.sub as string | undefined);
-    return typeof candidate === 'string' ? candidate : undefined;
+    return JSON.parse(Buffer.from(b64, 'base64').toString('utf-8')) as Record<string, unknown>;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Return a stable identity claim suitable for the audit trail, or `undefined`
+ * when no usable claim is found.
+ *
+ * Preference order: `upn`, then `preferred_username`, then `email`, then `sub`.
+ */
+export function getUserIdentityForAudit(token?: string): string | undefined {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return undefined;
+  const candidate =
+    (payload.upn as string | undefined) ||
+    (payload.preferred_username as string | undefined) ||
+    (payload.email as string | undefined) ||
+    (payload.sub as string | undefined);
+  return typeof candidate === 'string' ? candidate : undefined;
+}
+
+/**
+ * Session-scoped claims decoded from the connecting client's bearer token.
+ * Used by read-only capability probes (e.g. `get-shared-draft-capability`) to
+ * prove what the current delegated session is authorized for WITHOUT issuing a
+ * write call. `scopes` is the `scp` claim split into individual delegated
+ * scopes; the presence of `Mail.ReadWrite` there is the session-authoritative
+ * proof that the draft-write capability is loaded for this connector session.
+ */
+export interface SessionClaims {
+  objectId?: string;
+  tenantId?: string;
+  primaryAddress?: string;
+  /** Auth session id (`sid`) when present; used for session binding. */
+  sessionId?: string;
+  /** JWT id (`jti`) when present; a per-token identifier. */
+  tokenId?: string;
+  /**
+   * Unique token id (`uti`) when present. Microsoft access tokens commonly
+   * carry `uti` rather than `jti`, so it participates in session binding.
+   */
+  uniqueTokenId?: string;
+  /** Individual delegated scopes from the `scp` claim (order preserved). */
+  scopes: string[];
+}
+
+function stringClaim(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Decode the delegated session claims from a bearer token (NO signature
+ * verification; see {@link decodeJwtPayload}). Returns `undefined` when the
+ * token is missing or malformed. `scp` is accepted as either a space-delimited
+ * string (Entra's usual encoding) or an array of strings.
+ */
+export function getSessionClaims(token?: string): SessionClaims | undefined {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return undefined;
+  const scpRaw = payload.scp;
+  let scopes: string[] = [];
+  if (typeof scpRaw === 'string') {
+    scopes = scpRaw.split(' ').filter((scope) => scope.length > 0);
+  } else if (Array.isArray(scpRaw)) {
+    scopes = scpRaw.filter((scope): scope is string => typeof scope === 'string');
+  }
+  return {
+    objectId: stringClaim(payload.oid),
+    tenantId: stringClaim(payload.tid),
+    primaryAddress:
+      stringClaim(payload.upn) ||
+      stringClaim(payload.preferred_username) ||
+      stringClaim(payload.email),
+    sessionId: stringClaim(payload.sid),
+    tokenId: stringClaim(payload.jti),
+    uniqueTokenId: stringClaim(payload.uti),
+    scopes,
+  };
 }
 
 // Exported for tests.
