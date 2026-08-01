@@ -25,6 +25,7 @@ import {
   toOAuthErrorResponse,
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
+import { withToolBlocklist } from './lib/tool-blocklist.js';
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
@@ -100,6 +101,7 @@ class MicrosoftGraphServer {
       {
         instructions: buildMcpServerInstructions({
           discovery: Boolean(this.options.discovery),
+          directTools: Boolean(this.options.discovery && this.options.directTools),
           orgMode: Boolean(this.options.orgMode),
           readOnly: Boolean(this.options.readOnly),
           multiAccount: this.multiAccount,
@@ -107,14 +109,21 @@ class MicrosoftGraphServer {
       }
     );
 
+    // Single registration boundary for the blocklist. Wrapping the server here means
+    // a blocked name cannot be registered by ANY registrar (auth, Graph, utility, the
+    // discovery triad), rather than each one having to remember to filter. The
+    // registry inside registerDiscoveryTools still gets the pattern separately,
+    // because execute-tool/get-tool-schema/search-tools read that, not a registration.
+    const registrar = withToolBlocklist(server, this.options.blockedTools);
+
     const shouldRegisterAuthTools = !this.options.http || this.options.enableAuthTools;
     if (shouldRegisterAuthTools) {
-      registerAuthTools(server, this.authManager);
+      registerAuthTools(registrar, this.authManager);
     }
 
     if (this.options.discovery) {
       registerDiscoveryTools(
-        server,
+        registrar,
         this.graphClient!,
         this.options.readOnly,
         this.options.orgMode,
@@ -123,11 +132,34 @@ class MicrosoftGraphServer {
         this.accountNames,
         this.options.enabledTools,
         this.options.allowedScopes,
-        Boolean(this.options.http)
+        Boolean(this.options.http),
+        this.options.blockedTools,
+        // So discovery output can tell a caller whether a tool is callable by name
+        // here or only through execute-tool (#29).
+        this.options.directTools
       );
+
+      // Hybrid mode: named tools for the common operations, with the discovery triad
+      // still covering everything else. Additive on purpose. Loading every Graph tool
+      // costs roughly 260k tokens of schemas, which does not fit a 256k context, while
+      // trimming to a preset would put the rarely used tools out of reach entirely.
+      if (this.options.directTools) {
+        registerGraphTools(
+          registrar,
+          this.graphClient!,
+          this.options.readOnly,
+          this.options.directTools,
+          this.options.orgMode,
+          this.authManager,
+          this.multiAccount,
+          this.accountNames,
+          this.options.allowedScopes,
+          this.options.blockedTools
+        );
+      }
     } else {
       registerGraphTools(
-        server,
+        registrar,
         this.graphClient!,
         this.options.readOnly,
         this.options.enabledTools,
@@ -136,7 +168,8 @@ class MicrosoftGraphServer {
         this.multiAccount,
         this.accountNames,
         this.options.allowedScopes,
-        Boolean(this.options.http)
+        Boolean(this.options.http),
+        this.options.blockedTools
       );
     }
 
@@ -206,7 +239,33 @@ class MicrosoftGraphServer {
     }
 
     if (this.options.discovery) {
-      logger.info('Discovery mode enabled (experimental) - registering discovery tool only');
+      logger.info(
+        this.options.directTools
+          ? `Hybrid mode enabled (experimental) - discovery tools plus direct tools matching ${this.options.directTools}`
+          : 'Discovery mode enabled (experimental) - registering discovery tool only'
+      );
+    } else if (this.options.directTools) {
+      logger.warn('--direct-tools has no effect without --discovery; ignoring it');
+    }
+
+    // The blocklist matches tool NAMES, so a generic passthrough tool that takes an
+    // arbitrary Graph method and path can still reach a blocked operation: graph-batch
+    // can carry POST /me/sendMail as a subrequest, and the download helpers accept any
+    // Graph path. Enforcing this properly means authorizing normalized method/path
+    // pairs on every request and every batch subrequest, which is tracked separately.
+    // Until then, say so plainly at startup rather than letting an operator believe a
+    // name-based policy is airtight.
+    if (this.options.blockedTools) {
+      const passthrough = ['graph-batch', 'download-bytes', 'get-download-url'].filter(
+        (name) => !new RegExp(this.options.blockedTools!, 'i').test(name)
+      );
+      if (passthrough.length > 0) {
+        logger.warn(
+          `--blocked-tools matches tool names only. These generic passthrough tools are ` +
+            `still registered and can reach a blocked Graph operation by method and path: ` +
+            `${passthrough.join(', ')}. Add them to --blocked-tools if your policy must hold.`
+        );
+      }
     }
   }
 
@@ -553,7 +612,9 @@ class MicrosoftGraphServer {
               : buildScopesFromEndpoints(
                   this.options.orgMode,
                   this.options.enabledTools,
-                  this.options.readOnly
+                  this.options.readOnly,
+                  // Do not request scopes for tools the operator blocked (#24).
+                  this.options.blockedTools
                 );
         const scopeSet = new Set([...baseScopes, 'User.Read', 'offline_access']);
         microsoftAuthUrl.searchParams.set('scope', Array.from(scopeSet).join(' '));

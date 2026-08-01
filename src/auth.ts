@@ -280,6 +280,7 @@ interface AllowedScopeOptions {
   readOnly?: boolean;
   allowedScopes?: string;
   extraScopes?: string;
+  blockedTools?: string;
 }
 
 interface DisabledToolScope {
@@ -434,12 +435,35 @@ function collapseRedundantScopes(scopes: string[]): string[] {
   return Array.from(scopesSet);
 }
 
+/**
+ * Compile a --blocked-tools pattern for scope derivation.
+ *
+ * Deliberately non-fatal, unlike the registration-time guardrail: failing closed here
+ * would request no scopes at all and break sign-in. By the time scopes are built the
+ * pattern has already been validated at startup (parseArgs, and
+ * compileBlockedToolsRegex during registration), so an unparseable value at this point
+ * means a caller passed one directly.
+ */
+function compileBlockedForScopes(pattern?: string): RegExp | undefined {
+  if (!pattern) return undefined;
+  try {
+    return new RegExp(pattern, 'i');
+  } catch {
+    logger.error(
+      `Invalid blocked-tools regex pattern for scope derivation: ${pattern}. Deriving scopes without it.`
+    );
+    return undefined;
+  }
+}
+
 function buildScopesFromEndpoints(
   includeWorkAccountScopes: boolean = false,
   enabledToolsPattern?: string,
-  readOnly: boolean = false
+  readOnly: boolean = false,
+  blockedToolsPattern?: string
 ): string[] {
   const scopesSet = new Set<string>();
+  const blockedToolsRegex = compileBlockedForScopes(blockedToolsPattern);
 
   // Create regex for tool filtering if pattern is provided
   let enabledToolsRegex: RegExp | undefined;
@@ -460,6 +484,12 @@ function buildScopesFromEndpoints(
       if (!(endpoint.method.toUpperCase() === 'POST' && endpoint.readOnly)) {
         return;
       }
+    }
+
+    // A blocked tool is unreachable, so requesting its scopes would grant the token a
+    // capability the operator prohibited (#24).
+    if (blockedToolsRegex && blockedToolsRegex.test(endpoint.toolName)) {
+      return;
     }
 
     // Skip endpoints that don't match the tool filter
@@ -573,6 +603,8 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
     }
   }
 
+  const blockedToolsRegex = compileBlockedForScopes(options.blockedTools);
+
   const normalToolScopes = new Set<string>();
   const effectiveToolScopes = new Set<string>();
   // Union of every group's scopes for passing tools, used only to judge whether an
@@ -581,6 +613,9 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
   const disabledTools: DisabledToolScope[] = [];
 
   for (const endpoint of endpoints.default) {
+    // Same reasoning as buildScopesFromEndpoints: a blocked tool must not pull its
+    // scopes onto the token.
+    if (blockedToolsRegex && blockedToolsRegex.test(endpoint.toolName)) continue;
     if (
       !endpointMatchesNormalToolSurface(
         endpoint,
