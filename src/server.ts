@@ -11,11 +11,7 @@ import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
 import { buildMcpServerInstructions } from './mcp-instructions.js';
 import { installToolSchemaRefNormalization } from './normalize-tool-schema.js';
 import GraphClient from './graph-client.js';
-import AuthManager, {
-  buildScopesFromEndpoints,
-  parseAllowedScopes,
-  resolveAuthScopes,
-} from './auth.js';
+import AuthManager, { resolveAuthScopes, resolveAuthorizeScopes } from './auth.js';
 import { MicrosoftOAuthProvider } from './oauth-provider.js';
 import {
   exchangeCodeForToken,
@@ -668,20 +664,13 @@ class MicrosoftGraphServer {
         //     access to data" consent line that fails in tenants where user
         //     consent for applications is restricted by policy (even when
         //     admin has pre-consented every scope).
-        const explicitAllowedScopes = parseAllowedScopes(this.options.allowedScopes);
+        // A client-supplied `scope` may only narrow what this configuration would
+        // request on its own, never widen it. Forwarding the client's list verbatim
+        // let a caller ask for Mail.Send while every send tool was blocked, and the
+        // resulting token is usable directly against Graph, outside the tool surface
+        // the blocklist guards (#24).
         const clientScope = microsoftAuthUrl.searchParams.get('scope');
-        const baseScopes =
-          explicitAllowedScopes !== undefined
-            ? resolveAuthScopes(this.options)
-            : clientScope
-              ? clientScope.split(/\s+/).filter(Boolean)
-              : buildScopesFromEndpoints(
-                  this.options.orgMode,
-                  this.options.enabledTools,
-                  this.options.readOnly,
-                  // Do not request scopes for tools the operator blocked (#24).
-                  this.options.blockedTools
-                );
+        const baseScopes = resolveAuthorizeScopes(this.options, clientScope);
         const scopeSet = new Set([...baseScopes, 'User.Read', 'offline_access']);
         microsoftAuthUrl.searchParams.set('scope', Array.from(scopeSet).join(' '));
 
