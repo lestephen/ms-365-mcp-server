@@ -1013,21 +1013,6 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           };
         }
 
-        if (!isDriveItemById && !isDriveItemByPath) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  error:
-                    'target must identify a driveItem in OneDrive or SharePoint. Use a drive item metadata path or /content path, such as /drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}, /sites/{site-id}/drive/items/{driveItem-id}, or /me/drive/root:/path/file.ext:/content. Other Graph byte resources must use download-bytes.',
-                }),
-              },
-            ],
-            isError: true,
-          };
-        }
-
         const response = await graphClient.graphRequest(itemPath, {
           accessToken: accountAccessToken,
           // We JSON.parse the metadata below, so force JSON - under --toon it'd be
