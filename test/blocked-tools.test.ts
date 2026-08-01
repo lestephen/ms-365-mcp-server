@@ -54,8 +54,14 @@ describe('blocked tools', () => {
   let server: McpServer;
   let graphClient: GraphClient;
   let toolSpy: ReturnType<typeof vi.spyOn>;
+  // Graph endpoints go through registerTool upstream; utilities and the discovery
+  // triad still go through tool. Both must be observed.
+  let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
-  const registeredNames = () => toolSpy.mock.calls.map((call) => call[0] as string);
+  const registeredNames = () => [
+    ...toolSpy.mock.calls.map((call) => call[0] as string),
+    ...registerToolSpy.mock.calls.map((call) => call[0] as string),
+  ];
 
   function handlerFor(name: string) {
     const call = toolSpy.mock.calls.find((c) => c[0] === name);
@@ -70,6 +76,7 @@ describe('blocked tools', () => {
     server = new McpServer({ name: 'test', version: '0' });
     graphClient = {} as GraphClient;
     toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => ({}) as never);
+    registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation(() => ({}) as never);
   });
 
   it('keeps a blocked tool out of the direct registration', () => {
@@ -83,6 +90,7 @@ describe('blocked tools', () => {
       false,
       [],
       undefined,
+      false,
       BLOCKED
     );
 
@@ -119,6 +127,7 @@ describe('blocked tools', () => {
       [],
       undefined,
       undefined,
+      false,
       BLOCKED
     );
 
@@ -138,6 +147,7 @@ describe('blocked tools', () => {
       [],
       undefined,
       undefined,
+      false,
       BLOCKED
     );
 
@@ -156,6 +166,7 @@ describe('blocked tools', () => {
       [],
       undefined,
       undefined,
+      false,
       BLOCKED
     );
 
@@ -188,6 +199,7 @@ describe('blocked tools', () => {
       [],
       undefined,
       undefined,
+      false,
       BLOCKED
     );
 
@@ -210,6 +222,7 @@ describe('blocked tools', () => {
       false,
       [],
       undefined,
+      false,
       BLOCKED
     );
 
@@ -264,6 +277,7 @@ describe('blocked tools', () => {
         false,
         [],
         undefined,
+        false,
         '([bad'
       )
     ).toThrow(/blocked-tools/i);
