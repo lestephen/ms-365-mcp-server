@@ -113,9 +113,40 @@ export function recordToolCall(
   if (durationSeconds !== undefined) toolDuration.observe({ tool }, durationSeconds);
 }
 
+/**
+ * The unknown-tool name is parsed out of the SDK's "Tool <name> not found" error, so its
+ * value set is whatever a caller invents. prom-client retains every distinct label
+ * combination for the life of the process, which makes an uncapped label an
+ * out-of-memory primitive on a hosted multi-user endpoint: a client looping tools/call
+ * with random names grows the registry without bound and inflates every scrape.
+ *
+ * Cap the distinct names rather than dropping the label. The point of this metric (#29)
+ * is learning WHICH real tool names callers reach for directly, so the name has to
+ * survive in the normal case, and a real deployment stays far below the cap. Past it,
+ * everything folds into one sentinel series that still shows the volume.
+ */
+const UNKNOWN_TOOL_LABEL_CAP = 50;
+const UNKNOWN_TOOL_OVER_CAP = '__over_cap__';
+const seenUnknownTools = new Set<string>();
+
+/** Test seam, mirroring resetAdvertisedSurfaceSeedForTests. */
+export function resetUnknownToolLabelCapForTests(): void {
+  seenUnknownTools.clear();
+}
+
 export function recordUnknownTool(tool: string): void {
   if (!enabled) return;
-  unknownToolCalls.inc({ tool });
+
+  let label = tool;
+  if (!seenUnknownTools.has(tool)) {
+    if (seenUnknownTools.size >= UNKNOWN_TOOL_LABEL_CAP) {
+      label = UNKNOWN_TOOL_OVER_CAP;
+    } else {
+      seenUnknownTools.add(tool);
+    }
+  }
+
+  unknownToolCalls.inc({ tool: label });
 }
 
 export function recordBlockedOperation(tool: string, route: ToolRoute): void {
@@ -151,9 +182,18 @@ export function initBlockedOperationSeries(toolNames: readonly string[]): void {
   }
 }
 
+/**
+ * HTTP methods are a closed set, but this one arrives inside a caller-supplied $batch
+ * subrequest, so an unrecognised value is caller-invented cardinality on the same
+ * unbounded-label footing as the tool name above. `operation` needs no such treatment:
+ * it is resolved against our own endpoint catalogue, or the fixed string "unmatched".
+ */
+const BATCH_METHODS = new Set(['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'HEAD', 'OPTIONS']);
+
 export function recordBatchSubrequest(operation: string, method: string): void {
   if (!enabled) return;
-  batchSubrequests.inc({ operation, method: method.toUpperCase() });
+  const upper = method.toUpperCase();
+  batchSubrequests.inc({ operation, method: BATCH_METHODS.has(upper) ? upper : 'OTHER' });
 }
 
 export function recordDiscoveryStage(stage: DiscoveryStage): void {

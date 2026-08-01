@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildScopesFromEndpoints, resolveAuthScopes, resolveAuthorizeScopes } from '../src/auth.js';
+import {
+  buildScopesFromEndpoints,
+  resolveAuthScopes,
+  resolveAuthorizeScopes,
+} from '../src/auth.js';
 
 /**
  * EnviroKinetics/ms365-mcp#24, the cheaper half.

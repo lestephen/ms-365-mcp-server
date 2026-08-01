@@ -8,7 +8,9 @@ import {
   recordBlockedOperation,
   initBlockedOperationSeries,
   recordToolCall,
+  recordUnknownTool,
   registry,
+  resetUnknownToolLabelCapForTests,
 } from '../src/metrics.js';
 import {
   withMetricsObserver,
@@ -31,7 +33,40 @@ async function sample(name: string): Promise<string[]> {
 describe('metric hygiene', () => {
   beforeEach(() => {
     registry.resetMetrics();
+    resetUnknownToolLabelCapForTests();
     enableMetrics();
+  });
+
+  it('buckets an unrecognised batch method instead of labelling it verbatim', async () => {
+    // The method comes straight out of a caller-supplied $batch subrequest. HTTP methods
+    // are a closed set, so anything else is caller-invented label cardinality.
+    recordBatchSubrequest('unmatched', 'NOT-A-METHOD');
+
+    const lines = (await sample('ms365_mcp_batch_subrequests_total')).join('\n');
+    expect(lines).not.toContain('NOT-A-METHOD');
+    expect(lines).toContain('method="OTHER"');
+  });
+
+  it('caps the number of distinct unknown-tool series a caller can mint', async () => {
+    // The tool name is parsed out of the SDK's "Tool <name> not found" error, so its
+    // value set is whatever a caller invents. prom-client retains every distinct label
+    // combination for the process lifetime, so an uncapped label is an OOM primitive on
+    // a hosted multi-user endpoint.
+    for (let i = 0; i < 500; i++) recordUnknownTool(`invented-${i}`);
+
+    const lines = await sample('ms365_mcp_unknown_tool_total');
+    expect(lines.length).toBeLessThan(100);
+    expect(lines.join('\n')).toContain('__over_cap__');
+  });
+
+  it('still names unknown tools while under the cap', async () => {
+    // The metric has to stay useful: #29 is about finding out which real tool names
+    // callers reach for directly, and that needs the actual name.
+    recordUnknownTool('list-mail-messages');
+
+    expect((await sample('ms365_mcp_unknown_tool_total')).join('\n')).toContain(
+      'tool="list-mail-messages"'
+    );
   });
 
   it('exposes no label that could carry personal data', async () => {
@@ -91,6 +126,7 @@ describe('metric hygiene', () => {
 describe('unknown-tool observation (the #29 signal)', () => {
   beforeEach(() => {
     registry.resetMetrics();
+    resetUnknownToolLabelCapForTests();
     enableMetrics();
   });
 
