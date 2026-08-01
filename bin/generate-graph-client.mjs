@@ -2,7 +2,7 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { downloadGraphOpenAPI, BETA_OPENAPI_URL } from './modules/download-openapi.mjs';
+import { downloadGraphOpenAPI } from './modules/download-openapi.mjs';
 import { generateMcpTools } from './modules/generate-mcp-tools.mjs';
 import { createAndSaveSimplifiedOpenAPI } from './modules/simplified-openapi.mjs';
 
@@ -21,14 +21,12 @@ const generatedDir = path.join(srcDir, 'generated');
 const targets = [
   {
     version: 'v1.0',
-    url: undefined, // download-openapi defaults to the v1.0 spec
     specFile: path.join(openapiDir, 'openapi.yaml'),
     trimmedFile: path.join(openapiDir, 'openapi-trimmed.yaml'),
     clientFile: path.join(generatedDir, 'client.ts'),
   },
   {
     version: 'beta',
-    url: BETA_OPENAPI_URL,
     specFile: path.join(openapiDir, 'openapi-beta.yaml'),
     trimmedFile: path.join(openapiDir, 'openapi-trimmed-beta.yaml'),
     clientFile: path.join(generatedDir, 'client-beta.ts'),
@@ -37,6 +35,9 @@ const targets = [
 
 const args = process.argv.slice(2);
 const forceDownload = args.includes('--force');
+// --refresh-spec deliberately leaves the pin: it fetches master, reports the new digests,
+// and expects a human to update openapi-pin.json and review the generated client diff.
+const refreshSpec = args.includes('--refresh-spec');
 
 async function main() {
   console.log('Microsoft Graph API OpenAPI Processor');
@@ -47,12 +48,11 @@ async function main() {
       console.log(`\n=== Graph ${target.version} ===`);
 
       console.log(`📥 Step 1: Downloading ${target.version} OpenAPI specification`);
-      const downloaded = await downloadGraphOpenAPI(
-        openapiDir,
-        target.specFile,
-        target.url,
-        forceDownload
-      );
+      const downloaded = await downloadGraphOpenAPI(openapiDir, target.specFile, target.version, {
+        repoRoot: rootDir,
+        refreshSpec,
+        forceDownload,
+      });
       console.log(downloaded ? '✅ Downloaded' : '⏭️ Download skipped (file exists)');
 
       console.log('🔧 Step 2: Creating simplified OpenAPI specification');
