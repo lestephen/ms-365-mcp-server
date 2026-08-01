@@ -89,4 +89,30 @@ describe('/authorize cannot be talked into a blocked scope', () => {
     expect(scopes).not.toContain('Mail.Send');
     expect(scopes.length).toBeGreaterThan(0);
   });
+
+  // The first version of the fix compared the client's raw string against bare
+  // catalogue names, so every spelling below reached the redirect while the bare form
+  // was correctly stripped. Asserting only the bare form is what let that ship.
+  it.each([
+    ['lowercased', 'mail.send'],
+    ['fully qualified', 'https://graph.microsoft.com/Mail.Send'],
+    ['.default, which implies every consented permission', '.default'],
+  ])('strips a %s request end to end', async (_label, requested) => {
+    const canonical = (await authorizeScopes(requested)).map((s) =>
+      s.toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i, '')
+    );
+
+    expect(canonical).not.toContain('mail.send');
+    expect(canonical).not.toContain('.default');
+  });
+
+  it('keeps User.Read and offline_access even when every requested scope is refused', async () => {
+    // Both are injected after filtering and are deliberately not blockable: /me access
+    // backs token verification, and without offline_access Entra issues no refresh
+    // token. A filter that swallowed them would break sign-in rather than secure it.
+    const scopes = await authorizeScopes('Mail.Send');
+
+    expect(scopes).toContain('User.Read');
+    expect(scopes).toContain('offline_access');
+  });
 });

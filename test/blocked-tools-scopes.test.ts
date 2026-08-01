@@ -139,4 +139,49 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
     expect(scopes).not.toContain('Mail.Send');
     expect(scopes).toContain('Mail.ReadWrite');
   });
+
+  /**
+   * A first version of this filter compared the client's raw string against bare
+   * catalogue names with an exact, case-sensitive Set.has(). Entra matches permission
+   * names case-insensitively and accepts the fully qualified resource form, so every
+   * spelling below reached the token while looking blocked.
+   */
+  describe('spellings of a blocked scope that must not slip through', () => {
+    const sends = (clientScope: string) =>
+      resolveAuthorizeScopes({ orgMode: true, blockedTools: BLOCKED }, clientScope).map((s) =>
+        s.toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i, '')
+      );
+
+    it.each([
+      ['lowercased', 'mail.send'],
+      ['uppercased', 'MAIL.SEND'],
+      ['fully qualified', 'https://graph.microsoft.com/Mail.Send'],
+      ['fully qualified and lowercased', 'https://graph.microsoft.com/mail.send'],
+      ['sovereign cloud host', 'https://graph.microsoft.us/Mail.Send'],
+    ])('refuses a %s blocked scope', (_label, clientScope) => {
+      expect(sends(clientScope)).not.toContain('mail.send');
+    });
+
+    it('refuses .default, which would grant every consented permission', () => {
+      // .default is catalogue-independent: it yields everything statically consented on
+      // the app registration, which includes every blocked scope at once.
+      expect(sends('.default')).not.toContain('.default');
+      expect(sends('https://graph.microsoft.com/.default')).not.toContain('.default');
+    });
+
+    it('still allows a fully qualified scope that is not blocked', () => {
+      const scopes = resolveAuthorizeScopes(
+        { orgMode: true, blockedTools: BLOCKED },
+        'https://graph.microsoft.com/Calendars.Read'
+      );
+
+      expect(scopes).toContain('https://graph.microsoft.com/Calendars.Read');
+    });
+
+    it('leaves .default alone when the operator blocked nothing', () => {
+      // With no blocklist there is nothing to protect, and upstream lets the client
+      // choose. Refusing here would change behaviour for every unblocked deployment.
+      expect(resolveAuthorizeScopes({ orgMode: true }, '.default')).toContain('.default');
+    });
+  });
 });
