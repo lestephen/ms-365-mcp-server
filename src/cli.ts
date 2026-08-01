@@ -83,6 +83,10 @@ program
     '--blocked-tools <pattern>',
     'Make tools matching this regex unregisterable and undispatchable BY NAME: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --direct-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. LIMITATION: this matches tool names, not Graph operations, so a generic passthrough tool can still reach a blocked operation by method and path (graph-batch can issue POST /me/sendMail in a subrequest; download-bytes and get-download-url take arbitrary Graph paths). Block those tools too if your policy needs to hold. An invalid pattern is fatal rather than ignored.'
   )
+  .option(
+    '--metrics [port]',
+    'Expose Prometheus metrics on a SEPARATE port (default 9464), not on the MCP app. Keeping it off the main listener means operational detail cannot leak through a public ingress route: expose it only on the Service and scrape it in-cluster. Off by default. Metrics are aggregate and carry no personal data; per-identity records stay in the audit log.'
+  )
   .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)')
   .option(
     '--enable-dynamic-registration',
@@ -146,6 +150,7 @@ export interface CommandOptions {
   forceWorkScopes?: boolean;
   toon?: boolean;
   discovery?: boolean;
+  metrics?: string | boolean;
   directTools?: string;
   blockedTools?: string;
   cloud?: string;

@@ -44,6 +44,9 @@ describe('discovery payload states how to invoke each tool', () => {
   let server: McpServer;
   let graphClient: GraphClient;
   let toolSpy: ReturnType<typeof vi.spyOn>;
+  // Graph endpoints go through registerTool upstream; utilities and the discovery
+  // triad still go through tool. Both must be observed.
+  let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
   const DIRECT = '^(get-mail-message)$';
 
@@ -62,6 +65,7 @@ describe('discovery payload states how to invoke each tool', () => {
     server = new McpServer({ name: 'test', version: '0' });
     graphClient = {} as GraphClient;
     toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => ({}) as never);
+    registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation(() => ({}) as never);
   });
 
   it('tells the caller to use execute-tool for a tool that is not registered by name', async () => {
@@ -75,6 +79,7 @@ describe('discovery payload states how to invoke each tool', () => {
       [],
       undefined,
       undefined,
+      false,
       undefined,
       DIRECT
     );
@@ -101,6 +106,7 @@ describe('discovery payload states how to invoke each tool', () => {
       [],
       undefined,
       undefined,
+      false,
       undefined,
       DIRECT
     );
@@ -131,6 +137,7 @@ describe('discovery payload states how to invoke each tool', () => {
       [],
       undefined,
       undefined,
+      false,
       undefined,
       DIRECT
     );
