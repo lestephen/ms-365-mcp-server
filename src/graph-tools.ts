@@ -25,6 +25,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import { getRequestTokens } from './request-context.js';
+import { isBrokerEnabled, mintDownloadUrl } from './attachment-broker.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
@@ -665,6 +666,19 @@ function installDeniedToolAuditHandler(
 
     return original(request, extra);
   });
+const DEFAULT_DOWNLOAD_BYTES_MAX_INLINE = 256 * 1024;
+
+function downloadBytesMaxInline(): number {
+  const raw = process.env.MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE;
+  if (raw === undefined || raw === '') return DEFAULT_DOWNLOAD_BYTES_MAX_INLINE;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(
+      `Ignoring invalid MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=${JSON.stringify(raw)} (use 0 or a positive integer)`
+    );
+    return DEFAULT_DOWNLOAD_BYTES_MAX_INLINE;
+  }
+  return n;
 }
 
 /**
@@ -802,10 +816,52 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         // rawResponse keeps the body byte-faithful: binary stays base64 and a
         // JSON body is returned verbatim instead of being re-serialized lossily
         // through JSON.parse -> JSON.stringify (issue #546).
-        return await graphClient.graphRequest(target, {
+        const response = await graphClient.graphRequest(target, {
           accessToken: accountAccessToken,
           rawResponse: true,
         });
+        if (response?.isError) {
+          return response;
+        }
+        // Size backstop: above the inline limit, refuse to return a huge base64 blob (which
+        // blows up / gets truncated in the agent context) and point to get-download-url for an
+        // out-of-band fetch instead. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to disable.
+        // Only enforced when the broker is configured — otherwise get-download-url has no
+        // out-of-band path for /$value resources and redirecting would be a dead end, so we
+        // fall through and return the bytes as before.
+        const maxInline = isBrokerEnabled() ? downloadBytesMaxInline() : 0;
+        if (maxInline > 0) {
+          const text = response?.content?.[0]?.text;
+          if (typeof text === 'string') {
+            try {
+              const payload = JSON.parse(text) as Record<string, unknown>;
+              const len =
+                typeof payload.contentLength === 'number'
+                  ? payload.contentLength
+                  : typeof payload.contentBytes === 'string'
+                    ? Math.floor((payload.contentBytes.length * 3) / 4)
+                    : undefined;
+              if (typeof len === 'number' && len > maxInline) {
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify({
+                        error: `Content is ${len} bytes, above the inline limit of ${maxInline} (MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE). Use get-download-url to fetch it out-of-band instead of base64 through the agent context.`,
+                        contentLength: len,
+                        contentType: payload.contentType,
+                      }),
+                    },
+                  ],
+                  isError: true,
+                };
+              }
+            } catch {
+              // Not the JSON binary shape — pass the response through unchanged.
+            }
+          }
+        }
+        return response;
       } catch (error) {
         return {
           content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
@@ -981,7 +1037,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     searchKeywords:
       'download file download drive file download onedrive file sharepoint file download large drive file large sharepoint file large file out-of-band download pre-authenticated url',
     description:
-      'Resolve a short-lived, pre-authenticated download URL for Microsoft Graph binary content that exposes one (drive/SharePoint file content). The returned URL streams the bytes with NO Authorization header, so the client can fetch it straight to disk (e.g. curl) without round-tripping base64 through the agent context. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType? }. NOTE: mail file attachments (/messages/{id}/attachments/{id}/$value) and meeting recordings do NOT expose a pre-authenticated URL — Graph offers no such link for them; use download-bytes for small ones.',
+      "Resolve a short-lived download URL for Microsoft Graph binary content. Drive/SharePoint file content returns Graph's native pre-authenticated URL. When the EKI out-of-band broker is configured, mail attachments and other /$value byte endpoints are fetched server-side and served through a short-lived tokenless broker URL. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType?, brokered? }. NOTE: meeting recordings do NOT expose a pre-authenticated URL — Graph offers no such link for them; use download-bytes for small ones or a recording-specific tool where available.",
     readOnlyHint: true,
     openWorldHint: true,
     buildSchema: (ctx) => {
@@ -992,7 +1048,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             'Relative Microsoft Graph path starting with "/". Either a driveItem content path or the item path itself, e.g. ' +
               '/drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}/content, ' +
               'or /sites/{site-id}/drive/items/{driveItem-id}. ' +
-              'A trailing /content is optional and is stripped automatically for drive items. Mail attachment $value paths and meeting recordings are not supported (Graph exposes no pre-authenticated URL for them).'
+              'A trailing /content is optional and is stripped automatically for drive items. Mail attachment $value paths and other /$value byte endpoints require the EKI broker; meeting recordings are not supported because Graph exposes authenticated bytes rather than a pre-authenticated URL.'
           ),
       };
       if (ctx.multiAccount) {
@@ -1051,29 +1107,6 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         };
       }
       const pathPart = target.replace(/\/+$/, '');
-      // Mail/event attachments expose no pre-authenticated download URL in Graph; bytes come
-      // only from base64 contentBytes or the authenticated /$value endpoint (use download-bytes).
-      // Match only real Graph mail/calendar attachment resources so driveItem path addressing
-      // with folders named messages/events/attachments is not falsely rejected.
-      if (
-        /^(\/me|\/users\/[^/]+)\/messages\/[^/]+\/attachments\//.test(pathPart) ||
-        /^(\/me|\/users\/[^/]+)\/events\/[^/]+\/attachments\//.test(pathPart) ||
-        /^\/groups\/[^/]+\/messages\/[^/]+\/attachments\//.test(pathPart) ||
-        /^\/groups\/[^/]+\/events\/[^/]+\/attachments\//.test(pathPart)
-      ) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'Mail and calendar event attachments do not expose a pre-authenticated download URL. Use download-bytes for small attachments.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
       // Recording content endpoints return authenticated bytes, not a pre-authenticated URL.
       if (
         /^(\/me|\/users\/[^/]+)\/onlineMeetings\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(
@@ -1094,21 +1127,17 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      // Other /$value byte endpoints (profile photo, Teams hosted content) likewise have no URL.
-      if (pathPart.endsWith('/$value')) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  '$value byte endpoints do not expose a pre-authenticated download URL. Use download-bytes to read these bytes.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
+      // Match only real Graph mail/calendar attachment resources so driveItem path addressing
+      // with folders named messages/events/attachments is not falsely treated as an attachment.
+      const isAttachmentEndpoint =
+        /^(\/me|\/users\/[^/]+)\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(
+          pathPart
+        ) ||
+        /^(\/me|\/users\/[^/]+)\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+        /^\/groups\/[^/]+\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+        /^\/groups\/[^/]+\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart);
+      const isValueEndpoint = pathPart.endsWith('/$value');
+      const isBrokerableByteEndpoint = isAttachmentEndpoint || isValueEndpoint;
       const isDriveItemById =
         /^\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart) ||
         /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/items\/[^/]+(?:\/content)?$/.test(
@@ -1125,20 +1154,6 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(
           pathPart
         );
-      if (!isDriveItemById && !isDriveItemByPath) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must identify a driveItem in OneDrive or SharePoint. Use a drive item metadata path or /content path, such as /drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}, /sites/{site-id}/drive/items/{driveItem-id}, or /me/drive/root:/path/file.ext:/content. Other Graph byte resources must use download-bytes.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
       // The downloadUrl lives on driveItem metadata, not the /content sub-resource.
       // Only strip true Graph content endpoints: ID-addressed /items/{id}/content
       // and path-addressed root:/path/file:/content. A drive item can itself be
@@ -1159,6 +1174,106 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         if (authManager && !authManager.isOAuthModeEnabled() && !getRequestTokens()) {
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
+
+        if (isBrokerableByteEndpoint) {
+          if (!isBrokerEnabled()) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error:
+                      'This resource does not expose a pre-authenticated download URL and the out-of-band broker is not configured. Use download-bytes to read these bytes.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const fetchPath = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
+          const byteResponse = await graphClient.graphRequest(fetchPath, {
+            accessToken: accountAccessToken,
+          });
+          if (byteResponse?.isError) {
+            return byteResponse;
+          }
+          const byteText = byteResponse?.content?.[0]?.text;
+          let bytePayload: Record<string, unknown> | undefined;
+          if (typeof byteText === 'string') {
+            try {
+              bytePayload = JSON.parse(byteText);
+            } catch {
+              bytePayload = undefined;
+            }
+          }
+          const contentBytes = bytePayload?.contentBytes;
+          if (typeof contentBytes !== 'string') {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'Expected base64 byte content from Microsoft Graph but received none.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const bytes = Buffer.from(contentBytes, 'base64');
+          const contentType =
+            (bytePayload?.contentType as string | undefined) ?? 'application/octet-stream';
+          const downloadUrl = mintDownloadUrl({
+            bytes,
+            contentType,
+            userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
+            resourcePath: fetchPath,
+          });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  downloadUrl,
+                  size: bytes.length,
+                  contentType,
+                  brokered: true,
+                }),
+              },
+            ],
+          };
+        }
+
+        if (!isDriveItemById && !isDriveItemByPath) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'target must identify a driveItem in OneDrive or SharePoint. Use a drive item metadata path or /content path, such as /drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}, /sites/{site-id}/drive/items/{driveItem-id}, or /me/drive/root:/path/file.ext:/content. Other Graph byte resources must use download-bytes.',
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (!isDriveItemById && !isDriveItemByPath) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'target must identify a driveItem in OneDrive or SharePoint. Use a drive item metadata path or /content path, such as /drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}, /sites/{site-id}/drive/items/{driveItem-id}, or /me/drive/root:/path/file.ext:/content. Other Graph byte resources must use download-bytes.',
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
         const response = await graphClient.graphRequest(itemPath, {
           accessToken: accountAccessToken,
           // We JSON.parse the metadata below, so force JSON - under --toon it'd be
