@@ -36,11 +36,18 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  status: 'Login successful',
-                  message: 'Browser authentication completed successfully.',
-                  ...loginResult,
-                }),
+                // Object.assign, not a literal with a trailing spread: loginResult
+                // carries an optional message that is meant to win when present, and
+                // expressing that as a literal is a TS2783 error.
+                text: JSON.stringify(
+                  Object.assign(
+                    {
+                      status: 'Login successful',
+                      message: 'Browser authentication completed successfully.',
+                    },
+                    loginResult
+                  )
+                ),
               },
             ],
           };

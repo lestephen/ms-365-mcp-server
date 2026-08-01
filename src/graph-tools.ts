@@ -3,6 +3,14 @@ import { randomUUID } from 'crypto';
 import logger from './logger.js';
 import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
 import {
+  recordBatchSubrequest,
+  recordBlockedOperation,
+  recordDiscoveryStage,
+  recordToolCall,
+  type ToolRoute,
+  initBlockedOperationSeries,
+} from './metrics.js';
+import {
   buildBlockedOperationMatchers,
   describeBlockedSubrequests,
   findBlockedSubrequests,
@@ -990,22 +998,52 @@ function hasOwn(obj: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
+/**
+ * Label each subrequest in a batch with the tool whose operation it matches, so the
+ * metric shows what batching is used for. Unmatched subrequests are counted as
+ * "unmatched" rather than by path, which would be unbounded cardinality and could carry
+ * resource ids.
+ */
+function recordBatchSubrequestsFor(body: unknown, blocked: BlockedOperationMatcher[]): void {
+  if (!body || typeof body !== 'object') return;
+  const requests = (body as { requests?: unknown }).requests;
+  if (!Array.isArray(requests)) return;
+  const all = buildBlockedOperationMatchers('.*');
+  for (const entry of requests) {
+    if (!entry || typeof entry !== 'object') continue;
+    const sub = entry as { method?: unknown; url?: unknown };
+    if (typeof sub.method !== 'string' || typeof sub.url !== 'string') continue;
+    const hit = findBlockedSubrequests({ requests: [entry] }, all.length > 0 ? all : blocked);
+    recordBatchSubrequest(hit[0]?.toolName ?? 'unmatched', sub.method);
+  }
+}
+
 async function executeGraphTool(
   tool: (typeof api.endpoints)[0],
   config: EndpointConfig | undefined,
   graphClient: GraphClient,
   params: Record<string, unknown>,
   authManager?: AuthManager,
-  blockedOperations: BlockedOperationMatcher[] = []
+  blockedOperations: BlockedOperationMatcher[] = [],
+  route: ToolRoute = 'direct'
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
+  const startedAt = Date.now();
+  const elapsed = () => (Date.now() - startedAt) / 1000;
 
   // A blocked tool is unreachable by name, but graph-batch carries arbitrary
   // method/url subrequests, so the operation itself has to be checked (#24). Without
   // this, POST /me/sendMail inside a batch reaches Graph while send-mail is blocked.
+  if (tool.path === '/$batch') {
+    // Count what batching is actually used for, so the question of whether graph-batch
+    // earns its keep can be answered from data rather than by grepping skill text.
+    recordBatchSubrequestsFor(params.body, blockedOperations);
+  }
   if (blockedOperations.length > 0 && tool.path === '/$batch') {
     const hits = findBlockedSubrequests(params.body, blockedOperations);
     if (hits.length > 0) {
+      for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
+      recordToolCall(tool.alias, route, 'blocked', elapsed());
       logger.warn(
         `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
           hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
@@ -1589,6 +1627,7 @@ async function executeGraphTool(
       duration_ms: Date.now() - startTime,
       ...(targetResource ? { target_resource: targetResource } : {}),
     });
+    recordToolCall(tool.alias, route, response.isError ? 'error' : 'ok', elapsed());
 
     return {
       content,
@@ -1610,6 +1649,7 @@ async function executeGraphTool(
       error_type: err?.name || 'Error',
       error_code: err?.status ?? err?.code,
     });
+    recordToolCall(tool.alias, route, 'error', elapsed());
     return {
       content: [
         {
@@ -1641,6 +1681,8 @@ export function registerGraphTools(
   // Operations the blocklist prohibits, so graph-batch cannot carry one as a
   // subrequest (#24).
   const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+  // Give those series a zero baseline now, so increase() can see the first refusal.
+  initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
@@ -2087,6 +2129,8 @@ export function registerDiscoveryTools(
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   // execute-tool can dispatch graph-batch, so the same operation check applies here (#24).
   const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+  // Give those series a zero baseline now, so increase() can see the first refusal.
+  initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
 
   // Hybrid mode registers some tools by name and leaves the rest reachable only
   // through execute-tool. Discovery output must say which, per tool: a payload whose
@@ -2220,6 +2264,7 @@ export function registerDiscoveryTools(
       openWorldHint: true,
     },
     async ({ query, category, limit = 10 }) => {
+      recordDiscoveryStage('search_tools');
       const maxLimit = Math.min(Math.max(limit, 1), 50);
       const categoryDef = category ? TOOL_CATEGORIES[category] : undefined;
       const categoryFilter = (name: string) => !categoryDef || categoryDef.pattern.test(name);
@@ -2268,6 +2313,7 @@ export function registerDiscoveryTools(
       openWorldHint: false,
     },
     async ({ tool_name }) => {
+      recordDiscoveryStage('get_tool_schema');
       const entry = toolsRegistry.get(tool_name);
       if (entry) {
         const schema = describeToolSchema(entry.tool, entry.config, { multiAccount, accountNames });
@@ -2326,6 +2372,7 @@ export function registerDiscoveryTools(
       openWorldHint: true,
     },
     async ({ tool_name, parameters = {} }) => {
+      recordDiscoveryStage('execute_tool');
       const toolData = toolsRegistry.get(tool_name);
       if (toolData) {
         return executeGraphTool(
@@ -2334,7 +2381,8 @@ export function registerDiscoveryTools(
           graphClient,
           parameters,
           authManager,
-          blockedOperations
+          blockedOperations,
+          'execute_tool'
         );
       }
       const utility = utilityByName.get(tool_name);

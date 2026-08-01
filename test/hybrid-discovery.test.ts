@@ -54,14 +54,21 @@ describe('hybrid discovery mode', () => {
   let server: McpServer;
   let graphClient: GraphClient;
   let toolSpy: ReturnType<typeof vi.spyOn>;
+  // Graph endpoints go through registerTool upstream; utilities and the discovery
+  // triad still go through tool. Both must be observed.
+  let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
-  const registeredNames = () => toolSpy.mock.calls.map((call) => call[0] as string);
+  const registeredNames = () => [
+    ...toolSpy.mock.calls.map((call) => call[0] as string),
+    ...registerToolSpy.mock.calls.map((call) => call[0] as string),
+  ];
   const DISCOVERY_TRIAD = ['search-tools', 'get-tool-schema', 'execute-tool'];
 
   beforeEach(() => {
     server = new McpServer({ name: 'test', version: '0' });
     graphClient = {} as GraphClient;
     toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => ({}) as never);
+    registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation(() => ({}) as never);
   });
 
   it('registers the direct tools matching the pattern alongside the discovery triad', () => {

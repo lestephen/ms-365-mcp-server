@@ -26,6 +26,8 @@ import {
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
 import { withToolBlocklist } from './lib/tool-blocklist.js';
+import { withMetricsObserver, seedAdvertisedSurface } from './lib/metrics-transport.js';
+import { contentType, enableMetrics, metricsEnabled, metricsText } from './metrics.js';
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
@@ -154,6 +156,12 @@ class MicrosoftGraphServer {
           this.multiAccount,
           this.accountNames,
           this.options.allowedScopes,
+          // httpMode. Upstream added this at position 10 in v0.132, where our
+          // blockedTools used to sit. Omitting it silently shifted the blocklist into
+          // the httpMode slot and left blockedToolsPattern undefined, which disabled
+          // the graph-batch subrequest guard (#24) in exactly the mode production
+          // runs. tsc caught it; tsup does not typecheck, so nothing else did.
+          Boolean(this.options.http),
           this.options.blockedTools
         );
       }
@@ -177,6 +185,13 @@ class MicrosoftGraphServer {
     // inputSchema $refs aren't anchored under #/$defs/. The SDK emits root-relative
     // refs for recursive/shared Microsoft Graph schemas and hard-codes its conversion
     // options, so normalize the emitted schemas here. See issue #571.
+    //
+    // This replaced our own strict-tool-schemas wrapper: upstream MOVES each
+    // referenced sub-schema into $defs where ours copied it, which is ~17k tokens
+    // smaller over 330 tools and is maintained upstream rather than by us. Must run
+    // after registration: it decorates the SDK's tools/list handler, which does not
+    // exist until the first tool is registered. Exactly once, because it wraps
+    // whatever handler is already installed, including itself.
     installToolSchemaRefNormalization(server);
 
     return server;
@@ -269,12 +284,63 @@ class MicrosoftGraphServer {
     }
   }
 
+  /**
+   * Serve Prometheus metrics on a dedicated port.
+   *
+   * Deliberately a separate listener rather than a route on the MCP app: the MCP app is
+   * published through a public IngressRoute, and operational detail should not be one
+   * routing mistake away from the internet. Expose this port on the Service only and
+   * scrape it in-cluster.
+   */
+  private startMetricsListener(): void {
+    if (!this.options.metrics) return;
+
+    const port =
+      typeof this.options.metrics === 'string' ? parseInt(this.options.metrics, 10) || 9464 : 9464;
+
+    enableMetrics();
+    const metricsApp = express();
+    metricsApp.get('/metrics', async (_req: Request, res: Response) => {
+      try {
+        res.set('Content-Type', contentType());
+        res.end(await metricsText());
+      } catch (error) {
+        logger.error(`Failed to render metrics: ${(error as Error).message}`);
+        res.status(500).end();
+      }
+    });
+    metricsApp.get('/healthz', (_req: Request, res: Response) => res.status(200).send('ok'));
+
+    metricsApp.listen(port, () => {
+      logger.info(`Metrics listening on :${port}/metrics (not exposed through the MCP ingress)`);
+    });
+  }
+
   async start(): Promise<void> {
     if (this.options.v) {
       enableConsoleLogging();
     }
 
     logger.info('Microsoft 365 MCP Server starting...');
+
+    this.startMetricsListener();
+
+    // Measure the advertised surface at startup rather than waiting for a client to
+    // call tools/list (#34). In HTTP mode no server exists until the first request, so
+    // build a throwaway purely to measure; tool registration does not depend on the
+    // caller's token. Once per process, and never fatal.
+    if (metricsEnabled()) {
+      const probe = this.server ?? this.createMcpServer();
+      void seedAdvertisedSurface(probe).finally(() => {
+        if (probe !== this.server) {
+          try {
+            void probe.close();
+          } catch {
+            // Never connected to a transport, so there is nothing that must succeed here.
+          }
+        }
+      });
+    }
 
     // Debug: Check if secrets are loaded
     logger.info('Secrets Check:', {
@@ -790,7 +856,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(transport);
+            await server.connect(withMetricsObserver(transport));
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -854,7 +920,7 @@ class MicrosoftGraphServer {
       transport.onerror = (error) => {
         logger.error('Stdio transport error', { error: dumpError(error) });
       };
-      await this.server!.connect(transport);
+      await this.server!.connect(withMetricsObserver(transport));
       logger.info('Server connected to stdio transport');
     }
   }
