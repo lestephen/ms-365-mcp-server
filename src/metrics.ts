@@ -127,6 +127,11 @@ export function recordToolCall(
  */
 const UNKNOWN_TOOL_LABEL_CAP = 50;
 const UNKNOWN_TOOL_OVER_CAP = '__over_cap__';
+// Capping the count bounds how many labels exist, not how big each one is: the name is
+// matched with /[A-Za-z0-9._-]+/ and has no length limit of its own, so without this a
+// caller could retain 50 enormous strings and re-serialise them on every scrape. Real
+// tool names are far shorter than this.
+const UNKNOWN_TOOL_LABEL_MAX_CHARS = 64;
 const seenUnknownTools = new Set<string>();
 
 /** Test seam, mirroring resetAdvertisedSurfaceSeedForTests. */
@@ -137,12 +142,12 @@ export function resetUnknownToolLabelCapForTests(): void {
 export function recordUnknownTool(tool: string): void {
   if (!enabled) return;
 
-  let label = tool;
-  if (!seenUnknownTools.has(tool)) {
+  let label = tool.slice(0, UNKNOWN_TOOL_LABEL_MAX_CHARS);
+  if (!seenUnknownTools.has(label)) {
     if (seenUnknownTools.size >= UNKNOWN_TOOL_LABEL_CAP) {
       label = UNKNOWN_TOOL_OVER_CAP;
     } else {
-      seenUnknownTools.add(tool);
+      seenUnknownTools.add(label);
     }
   }
 

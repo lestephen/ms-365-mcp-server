@@ -59,6 +59,16 @@ describe('metric hygiene', () => {
     expect(lines.join('\n')).toContain('__over_cap__');
   });
 
+  it('truncates an absurdly long unknown-tool name', async () => {
+    // Capping the NUMBER of series bounds how many labels exist, not how big each one
+    // is. The name matches /[A-Za-z0-9._-]+/ with no length limit, so without this the
+    // first 50 callers could each retain a megabyte-scale label for the life of the
+    // process and re-serialise it on every scrape.
+    recordUnknownTool('z'.repeat(5000));
+
+    expect((await sample('ms365_mcp_unknown_tool_total')).join('\n').length).toBeLessThan(500);
+  });
+
   it('still names unknown tools while under the cap', async () => {
     // The metric has to stay useful: #29 is about finding out which real tool names
     // callers reach for directly, and that needs the actual name.
