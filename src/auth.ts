@@ -693,6 +693,88 @@ function resolveAuthScopes(options: AllowedScopeOptions = {}): string[] {
   return Array.from(new Set([...toolScopes, ...extraScopes]));
 }
 
+/**
+ * Scopes that exist only because a tool the operator blocked would have needed them.
+ * The difference between deriving with and without the blocklist IS the prohibited set,
+ * so this stays correct as the endpoint catalogue changes.
+ */
+function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
+  if (!options.blockedTools) {
+    return new Set();
+  }
+
+  const permitted = new Set(
+    collapseScopeHierarchy(
+      buildScopesFromEndpoints(
+        options.orgMode,
+        options.enabledTools,
+        options.readOnly,
+        options.blockedTools
+      )
+    )
+  );
+
+  return new Set(
+    buildScopesFromEndpoints(options.orgMode, options.enabledTools, options.readOnly).filter(
+      (scope) => !permitted.has(scope)
+    )
+  );
+}
+
+/**
+ * Resolve the scopes the /authorize redirect may request, given what the client asked
+ * for.
+ *
+ * A client-supplied `scope` is still honoured, which is deliberate upstream behaviour:
+ * an operator who has constrained nothing lets the client choose. What a client may NOT
+ * do is name a scope that exists only to serve a tool the operator blocked. Forwarding
+ * the list verbatim let a caller ask for Mail.Send while every send tool was blocked,
+ * and the bearer token the client receives is usable directly against Graph, outside
+ * the tool surface the blocklist guards (#24).
+ *
+ * So the filter is narrow on purpose: it subtracts exactly the blocked-tool scopes and
+ * leaves every other client request alone.
+ */
+function resolveAuthorizeScopes(
+  options: AllowedScopeOptions = {},
+  clientScope?: string | null
+): string[] {
+  // An explicit --allowed-scopes already pins the surface, and that path never consulted
+  // the client's request. Unchanged.
+  if (parseAllowedScopes(options.allowedScopes) !== undefined) {
+    return resolveAuthScopes(options);
+  }
+
+  const derived = buildScopesFromEndpoints(
+    options.orgMode,
+    options.enabledTools,
+    options.readOnly,
+    // Do not request scopes for tools the operator blocked (#24).
+    options.blockedTools
+  );
+
+  const requested = parseAllowedScopes(clientScope ?? undefined);
+  if (!requested || requested.length === 0) {
+    return derived;
+  }
+
+  // Reject a requested scope when it IS prohibited or when it IMPLIES something
+  // prohibited, so a broader scope cannot be used to smuggle a blocked one in.
+  const prohibited = blockedToolScopes(options);
+  const granted = requested.filter(
+    (scope) => !collapseScopeHierarchy([scope]).some((implied) => prohibited.has(implied))
+  );
+
+  if (granted.length !== requested.length) {
+    const dropped = requested.filter((scope) => !granted.includes(scope));
+    logger.warn(`Ignoring client-requested scope(s) for blocked tools: ${dropped.join(', ')}`);
+  }
+
+  // Falling back keeps sign-in working when a client asks only for prohibited scopes,
+  // rather than requesting an empty scope list.
+  return granted.length > 0 ? granted : derived;
+}
+
 function buildScopeDiagnostics(
   toolScopes: string[],
   allowedScopesInput: string[]
@@ -1742,6 +1824,7 @@ export {
   getSelectedAccountPath,
   parseAllowedScopes,
   resolveAuthScopes,
+  resolveAuthorizeScopes,
   wrapCache,
   unwrapCache,
   pickNewest,
