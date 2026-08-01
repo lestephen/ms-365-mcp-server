@@ -31,13 +31,36 @@ const DISCOVERY_MODE_INSTRUCTIONS_ADDON =
   'Skipping get-tool-schema is the leading cause of Graph 400 errors here. ' +
   'If search-tools returns no matches, retry with shorter or different keywords.';
 
+const HYBRID_MODE_INSTRUCTIONS_ADDON =
+  'HYBRID MODE ADD-ON: the most common Graph operations are already registered directly as named tools, ' +
+  'and you can see them in your tool list. Prefer a named tool whenever one fits and call it straight away, ' +
+  'with no search-tools or get-tool-schema step. ' +
+  'Everything else Graph offers is still reachable, it is just not loaded up front: ' +
+  'reach it via search-tools → get-tool-schema → execute-tool. ' +
+  'Workflow for those: (1) call search-tools with short natural-language keywords (BM25-ranked); ' +
+  '(2) call get-tool-schema(tool_name) to see the parameters, required fields, and enum values; ' +
+  '(3) call execute-tool with tool_name exactly as returned and parameters shaped per the schema. ' +
+  'Skipping get-tool-schema is the leading cause of Graph 400 errors here. ' +
+  'If search-tools returns no matches, retry with shorter or different keywords. ' +
+  'A tool missing from your tool list is not unavailable, so search for it before reporting that you cannot do something. ' +
+  'Do NOT call a tool by name unless it appears in your tool list: search-tools and get-tool-schema describe tools that are ' +
+  'not registered here, and calling one of those directly fails with "Tool not found". Both report the route per tool, as ' +
+  'invoke_via in search results and as an invocation block in get-tool-schema; follow it.';
+
 /**
- * Full MCP `initialize.instructions` string: general guidance for every mode, plus a discovery-only suffix when applicable.
+ * Full MCP `initialize.instructions` string: general guidance for every mode, plus
+ * a suffix describing how Graph is reached in this configuration.
+ *
+ * Three shapes: direct tools only (no suffix), discovery only, and hybrid (named
+ * tools plus the discovery triad). The hybrid suffix has to say both paths exist,
+ * otherwise the model routes everything through execute-tool and ignores the named
+ * tools sitting in front of it.
  */
 export function buildMcpServerInstructions(
-  opts: McpInstructionsContext & { discovery: boolean }
+  opts: McpInstructionsContext & { discovery: boolean; directTools?: boolean }
 ): string {
   const general = buildGeneralMcpInstructions(opts);
   if (!opts.discovery) return general;
+  if (opts.directTools) return `${general} ${HYBRID_MODE_INSTRUCTIONS_ADDON}`;
   return `${general} ${DISCOVERY_MODE_INSTRUCTIONS_ADDON}`;
 }

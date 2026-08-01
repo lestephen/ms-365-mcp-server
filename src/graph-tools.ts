@@ -1,6 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'crypto';
 import logger from './logger.js';
+import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
+import {
+  buildBlockedOperationMatchers,
+  describeBlockedSubrequests,
+  findBlockedSubrequests,
+  type BlockedOperationMatcher,
+} from './lib/batch-guard.js';
 import { auditLog, getUserIdentityForAudit } from './audit-log.js';
 import GraphClient from './graph-client.js';
 import { isDestructiveOperation } from './lib/destructive-ops.js';
@@ -988,9 +995,36 @@ async function executeGraphTool(
   config: EndpointConfig | undefined,
   graphClient: GraphClient,
   params: Record<string, unknown>,
-  authManager?: AuthManager
+  authManager?: AuthManager,
+  blockedOperations: BlockedOperationMatcher[] = []
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
+
+  // A blocked tool is unreachable by name, but graph-batch carries arbitrary
+  // method/url subrequests, so the operation itself has to be checked (#24). Without
+  // this, POST /me/sendMail inside a batch reaches Graph while send-mail is blocked.
+  if (blockedOperations.length > 0 && tool.path === '/$batch') {
+    const hits = findBlockedSubrequests(params.body, blockedOperations);
+    if (hits.length > 0) {
+      logger.warn(
+        `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
+          hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
+      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              error: 'blocked_operation',
+              message: describeBlockedSubrequests(hits),
+              blocked: hits,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
 
   if (
     isConfirmGateEnabled() &&
@@ -1600,8 +1634,13 @@ export function registerGraphTools(
   multiAccount: boolean = false,
   accountNames: string[] = [],
   allowedScopesValue?: string,
-  httpMode: boolean = false
+  httpMode: boolean = false,
+  blockedToolsPattern?: string
 ): number {
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+  // Operations the blocklist prohibits, so graph-batch cannot carry one as a
+  // subrequest (#24).
+  const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
@@ -1640,6 +1679,14 @@ export function registerGraphTools(
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
       logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
+      skippedCount++;
+      continue;
+    }
+
+    // The blocklist wins over any enable pattern, including an explicit --direct-tools
+    // selection, so a blocked tool is unreachable by every path.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
+      logger.info(`Blocking tool ${tool.alias} - matches blocklist pattern`);
       skippedCount++;
       continue;
     }
@@ -1814,7 +1861,14 @@ export function registerGraphTools(
           },
         },
         async (params: Record<string, unknown>) =>
-          executeGraphTool(tool, endpointConfig, graphClient, params, authManager)
+          executeGraphTool(
+            tool,
+            endpointConfig,
+            graphClient,
+            params,
+            authManager,
+            blockedOperations
+          )
       );
       registeredCount++;
     } catch (error) {
@@ -1843,6 +1897,7 @@ export function registerGraphTools(
     if (readOnly && !utility.readOnlyHint) continue;
     if (httpMode && utility.stdioOnly) continue;
     if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
+    if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
     try {
       registerUtilityToolWithMcp(server, utility, utilityCtx);
       registeredCount++;
@@ -1866,7 +1921,8 @@ export function buildToolsRegistry(
   orgMode: boolean,
   enabledToolsRegex?: RegExp,
   allowedScopesValue?: string,
-  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = []
+  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [],
+  blockedToolsRegex?: RegExp
 ): Map<string, { tool: (typeof api.endpoints)[0]; config: EndpointConfig | undefined }> {
   const toolsMap = new Map<
     string,
@@ -1889,6 +1945,12 @@ export function buildToolsRegistry(
     }
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+      continue;
+    }
+
+    // A blocked tool is unreachable by every path: direct registration, the
+    // discovery registry, search-tools, get-tool-schema and execute-tool.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
       continue;
     }
 
@@ -2018,8 +2080,46 @@ export function registerDiscoveryTools(
   accountNames: string[] = [],
   enabledTools?: string,
   allowedScopesValue?: string,
-  httpMode: boolean = false
+  httpMode: boolean = false,
+  blockedToolsPattern?: string,
+  directToolsPattern?: string
 ): void {
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+  // execute-tool can dispatch graph-batch, so the same operation check applies here (#24).
+  const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+
+  // Hybrid mode registers some tools by name and leaves the rest reachable only
+  // through execute-tool. Discovery output must say which, per tool: a payload whose
+  // `name` field looks callable leads a model to call it directly and get
+  // "Tool ... not found" (see EnviroKinetics/ms365-mcp#29). An invalid pattern here is
+  // not fatal, unlike the blocklist: the consequence is a wrong hint, not a policy hole.
+  let directToolsRegex: RegExp | undefined;
+  if (directToolsPattern) {
+    try {
+      directToolsRegex = new RegExp(directToolsPattern, 'i');
+    } catch (error) {
+      logger.error(
+        `Invalid --direct-tools regex ${JSON.stringify(directToolsPattern)} for discovery hints; ` +
+          `treating every tool as execute-tool only: ${(error as Error).message}`
+      );
+    }
+  }
+
+  /** Route a caller must use to invoke `name` in this configuration. */
+  const invokeVia = (name: string): 'direct' | 'execute-tool' =>
+    directToolsRegex && directToolsRegex.test(name) ? 'direct' : 'execute-tool';
+
+  const invocationFor = (name: string) =>
+    invokeVia(name) === 'direct'
+      ? {
+          via: 'direct' as const,
+          note: `${name} is registered as a named tool in this configuration; call it directly.`,
+        }
+      : {
+          via: 'execute-tool' as const,
+          note: `${name} is not registered as a named tool here, so it cannot be called directly. Invoke it through execute-tool.`,
+          example: { tool_name: name, parameters: {} as Record<string, unknown> },
+        };
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
     try {
@@ -2038,7 +2138,10 @@ export function registerDiscoveryTools(
     orgMode,
     enabledToolsRegex,
     allowedScopesValue,
-    disabledByAllowedScopes
+    disabledByAllowedScopes,
+    // Keeps blocked tools out of the registry itself, which is what execute-tool,
+    // get-tool-schema and search-tools all read from.
+    blockedToolsRegex
   );
   if (disabledByAllowedScopes.length > 0) {
     logger.info(
@@ -2049,6 +2152,7 @@ export function registerDiscoveryTools(
     if (readOnly && !u.readOnlyHint) return false;
     if (httpMode && u.stdioOnly) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
+    if (blockedToolsRegex && blockedToolsRegex.test(u.name)) return false;
     return true;
   });
   const searchIndex = buildDiscoverySearchIndex(toolsRegistry, utilityTools);
@@ -2081,6 +2185,7 @@ export function registerDiscoveryTools(
           config
         ),
         ...(config?.llmTip ? { llmTip: config.llmTip } : {}),
+        invoke_via: invokeVia(name),
       };
     }
     const utility = utilityByName.get(name);
@@ -2090,6 +2195,7 @@ export function registerDiscoveryTools(
         method: utility.method,
         path: utility.path,
         description: utility.description,
+        invoke_via: invokeVia(utility.name),
       };
     }
     return null;
@@ -2166,14 +2272,24 @@ export function registerDiscoveryTools(
       if (entry) {
         const schema = describeToolSchema(entry.tool, entry.config, { multiAccount, accountNames });
         return {
-          content: [{ type: 'text', text: JSON.stringify(schema, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ...schema, invocation: invocationFor(tool_name) }, null, 2),
+            },
+          ],
         };
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
         const schema = describeUtilityToolSchema(utility, utilityCtx);
         return {
-          content: [{ type: 'text', text: JSON.stringify(schema, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ...schema, invocation: invocationFor(tool_name) }, null, 2),
+            },
+          ],
         };
       }
       return {
@@ -2217,7 +2333,8 @@ export function registerDiscoveryTools(
           toolData.config,
           graphClient,
           parameters,
-          authManager
+          authManager,
+          blockedOperations
         );
       }
       const utility = utilityByName.get(tool_name);
@@ -2241,3 +2358,6 @@ export function registerDiscoveryTools(
 
   // Layer 3 (list-accounts) is registered by registerAuthTools — no duplicate here.
 }
+
+// Re-exported so existing importers keep working after the helper moved to lib/.
+export { compileBlockedToolsRegex };
