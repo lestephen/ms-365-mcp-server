@@ -253,6 +253,19 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
       );
     });
 
+    it('does not let a non-overlapping --enabled-tools preset empty the filter', () => {
+      // The blocklist names mail tools while the loaded preset is files, so both sides
+      // of the difference iterated the same endpoints and the delta came out empty.
+      // resolveAuthorizeScopes then treated "nothing prohibited" as "no policy" and
+      // forwarded everything, .default included, while --blocked-tools was in force.
+      // Every send tool, so Mail.Send is genuinely prohibited rather than still needed
+      // by an unblocked sibling: send-draft-message alone keeps Mail.Send legitimate.
+      const options = { orgMode: true, enabledTools: 'files', blockedTools: BLOCKED };
+
+      expect(resolveAuthorizeScopes(options, 'Mail.Send')).not.toContain('Mail.Send');
+      expect(resolveAuthorizeScopes(options, '.default')).not.toContain('.default');
+    });
+
     it('does not let --read-only weaken the blocklist', () => {
       // Read-only strips write scopes from BOTH sides of the difference, cancelling the
       // delta: Mail.Send was refused with the blocklist alone and granted once
