@@ -709,7 +709,10 @@ function resolveAuthScopes(options: AllowedScopeOptions = {}): string[] {
  * Case is preserved here; canonicalScope lowercases for comparison.
  */
 function stripScopeResourceUri(scope: string): string {
-  const trimmed = scope.trim();
+  // Trailing slashes come off first. Without this, `Mail.Send/` puts the last slash at
+  // the end and reduces to an empty permission name, which matches nothing prohibited
+  // and sails through.
+  const trimmed = scope.trim().replace(/\/+$/, '');
   const lastSlash = trimmed.lastIndexOf('/');
   return lastSlash === -1 ? trimmed : trimmed.slice(lastSlash + 1);
 }
@@ -763,30 +766,52 @@ function canonicalImpliedScopes(canonical: string): Set<string> {
 }
 
 /**
- * Scopes that exist only because a tool the operator blocked would have needed them.
- * The difference between deriving with and without the blocklist IS the prohibited set,
- * so this stays correct as the endpoint catalogue changes.
+ * Canonical scopes that exist only because a tool the operator blocked would have
+ * needed them. The difference between deriving with and without the blocklist IS the
+ * prohibited set, so this stays correct as the endpoint catalogue changes.
+ *
+ * Two things this got wrong, both of which quietly emptied the difference:
+ *
+ * `--read-only` was applied to BOTH sides. Read-only already strips write scopes from
+ * the unblocked side, so the delta cancelled and a tightening flag made the filter
+ * LOOSER: Mail.Send was refused under `--blocked-tools` alone and granted once
+ * `--read-only` was added. Both sides are now derived with read-only off, so the
+ * blocklist delta is whatever the blocklist itself removes, independent of it.
+ *
+ * Only the permitted side was hierarchy-expanded. buildScopesFromEndpoints emits the
+ * collapsed higher form (`Mail.ReadWrite`) and never the bare lower one, so `Mail.Read`
+ * was never in the unblocked side and never came out prohibited: with the entire
+ * catalogue blocked a client could still be granted Mail.Read, Files.Read and
+ * Calendars.Read. Both sides are expanded now.
+ *
+ * `--enabled-tools` stays on both sides deliberately. It selects which tools to load
+ * rather than expressing a prohibition, and upstream's allowed-scopes test pins that a
+ * client may request a scope outside the loaded preset.
  */
 function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
   if (!options.blockedTools) {
     return new Set();
   }
 
+  const READ_ONLY_OFF = false;
+
   const permitted = new Set(
     collapseScopeHierarchy(
       buildScopesFromEndpoints(
         options.orgMode,
         options.enabledTools,
-        options.readOnly,
+        READ_ONLY_OFF,
         options.blockedTools
       )
-    )
+    ).map(canonicalScope)
   );
 
   return new Set(
-    buildScopesFromEndpoints(options.orgMode, options.enabledTools, options.readOnly).filter(
-      (scope) => !permitted.has(scope)
+    collapseScopeHierarchy(
+      buildScopesFromEndpoints(options.orgMode, options.enabledTools, READ_ONLY_OFF)
     )
+      .map(canonicalScope)
+      .filter((scope) => !permitted.has(scope))
   );
 }
 
@@ -830,7 +855,7 @@ function resolveAuthorizeScopes(
   // Compare canonically. The client controls the spelling, and Entra treats
   // `mail.send`, `Mail.Send` and `https://graph.microsoft.com/Mail.Send` as the same
   // permission, so an exact match against bare catalogue names is trivially bypassable.
-  const prohibited = new Set([...blockedToolScopes(options)].map(canonicalScope));
+  const prohibited = blockedToolScopes(options);
   if (prohibited.size === 0) {
     // Nothing is blocked, so there is nothing to subtract and upstream's behaviour of
     // honouring the client's request applies unchanged.
