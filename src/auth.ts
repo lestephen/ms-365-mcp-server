@@ -805,19 +805,27 @@ function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
     return new Set();
   }
 
-  // Both sides derive from the whole catalogue: the blocklist must be the ONLY
-  // difference, or an unrelated restriction can cancel it out.
+  // Both sides derive from the WIDEST possible surface: the blocklist must be the only
+  // difference, or an unrelated restriction cancels it out. That has now bitten once per
+  // flag, so all three are pinned here rather than forwarded from options.
+  //
+  // org mode was the third. buildScopesFromEndpoints skips endpoints declaring only
+  // workScopes when it is off, so those scopes appeared on neither side and cancelled: a
+  // non-org deployment with the whole catalogue blocked still handed out Sites.Read.All
+  // and Group.Read.All. Widening cannot over-reject, because any scope an unblocked tool
+  // still needs appears on both sides and cancels.
+  const ORG_MODE_ON = true;
   const FULL_CATALOGUE = undefined;
   const READ_ONLY_OFF = false;
 
   const permitted = new Set(
     collapseScopeHierarchy(
-      buildScopesFromEndpoints(options.orgMode, FULL_CATALOGUE, READ_ONLY_OFF, options.blockedTools)
+      buildScopesFromEndpoints(ORG_MODE_ON, FULL_CATALOGUE, READ_ONLY_OFF, options.blockedTools)
     ).map(canonicalScope)
   );
 
   return new Set(
-    collapseScopeHierarchy(buildScopesFromEndpoints(options.orgMode, FULL_CATALOGUE, READ_ONLY_OFF))
+    collapseScopeHierarchy(buildScopesFromEndpoints(ORG_MODE_ON, FULL_CATALOGUE, READ_ONLY_OFF))
       .map(canonicalScope)
       .filter((scope) => !permitted.has(scope))
   );
