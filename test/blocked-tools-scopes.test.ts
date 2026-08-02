@@ -266,6 +266,19 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
       expect(resolveAuthorizeScopes(options, '.default')).not.toContain('.default');
     });
 
+    it.each([['Sites.Read.All'], ['Group.Read.All']])(
+      'refuses the work-account scope %s without --org-mode',
+      (clientScope) => {
+        // buildScopesFromEndpoints skips endpoints that only declare workScopes when
+        // org mode is off, so those scopes appeared on neither side of the difference
+        // and cancelled. With the whole catalogue blocked, a non-org deployment still
+        // handed out Sites.Read.All and Group.Read.All.
+        expect(resolveAuthorizeScopes({ blockedTools: '.*' }, clientScope)).not.toContain(
+          clientScope
+        );
+      }
+    );
+
     it('does not let --read-only weaken the blocklist', () => {
       // Read-only strips write scopes from BOTH sides of the difference, cancelling the
       // delta: Mail.Send was refused with the blocklist alone and granted once
