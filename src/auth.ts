@@ -588,7 +588,13 @@ function canonicalImpliedScopes(canonical: string): Set<string> {
     const scope = pending.pop()!;
     const lower: string[] = [];
 
-    if (scope.endsWith('.readwrite.all')) {
+    if (scope.endsWith('.fullcontrol.all')) {
+      // Not one of lowerScopesFor's rules, and deliberately so: this function feeds a
+      // security filter, where missing an implication grants capability. FullControl.All
+      // subsumes Manage.All and ReadWrite.All, which then cascade through the rules below.
+      const stem = scope.slice(0, -'.fullcontrol.all'.length);
+      lower.push(`${stem}.manage.all`, `${stem}.readwrite.all`, `${stem}.read.all`);
+    } else if (scope.endsWith('.readwrite.all')) {
       const stem = scope.slice(0, -'.readwrite.all'.length);
       lower.push(`${stem}.read.all`, `${stem}.readwrite`, `${stem}.read`);
     } else if (scope.endsWith('.readwrite.shared')) {
@@ -738,6 +744,17 @@ function resolveAuthorizeScopes(
     for (const s of implied) {
       if (prohibited.has(s)) return false;
     }
+
+    // Graph appends qualifiers rather than renaming, so a scope that extends a
+    // prohibited one with a further dotted segment is at least as broad:
+    // Mail.Send.Shared covers Mail.Send, Files.ReadWrite.AppFolder sits under
+    // Files.ReadWrite. Enumerating those suffixes one at a time is a losing game, and
+    // each one missed is granted capability, so treat the extension itself as the
+    // signal. The trailing dot matters: Mail.ReadWrite must not match Mail.Read.
+    for (const blocked of prohibited) {
+      if (canonical.startsWith(`${blocked}.`)) return false;
+    }
+
     return true;
   });
 

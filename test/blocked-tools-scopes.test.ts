@@ -232,6 +232,27 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
       }
     );
 
+    it.each([
+      ['Contacts.ReadWrite.Shared'],
+      ['Tasks.ReadWrite.Shared'],
+      ['Sites.FullControl.All'],
+      ['Files.ReadWrite.AppFolder'],
+    ])('refuses the qualifier super-scope %s when every tool is blocked', (clientScope) => {
+      // Graph appends qualifiers rather than renaming: X.Shared covers the user's own
+      // items as well as shared ones, and FullControl.All subsumes ReadWrite.All. These
+      // are not in endpoints.json, so neither a catalogue lookup nor the ReadWrite/Read
+      // suffix rules reached them, and they were granted with the catalogue blocked.
+      expect(
+        resolveAuthorizeScopes({ orgMode: true, blockedTools: '.*' }, clientScope)
+      ).not.toContain(clientScope);
+    });
+
+    it('refuses Mail.Send.Shared without --org-mode', () => {
+      expect(resolveAuthorizeScopes({ blockedTools: '.*' }, 'Mail.Send.Shared')).not.toContain(
+        'Mail.Send.Shared'
+      );
+    });
+
     it('does not let --read-only weaken the blocklist', () => {
       // Read-only strips write scopes from BOTH sides of the difference, cancelling the
       // delta: Mail.Send was refused with the blocklist alone and granted once
