@@ -204,6 +204,47 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
     });
   });
 
+  it.each([
+    ['a blocked scope', 'Mail.Send/'],
+    ['.default', '.default/'],
+  ])('refuses %s with a trailing slash', (_label, clientScope) => {
+    // Canonicalising on the last '/' turns a trailing slash into an empty permission
+    // name, which matched nothing prohibited and was granted verbatim.
+    expect(
+      resolveAuthorizeScopes({ orgMode: true, blockedTools: BLOCKED }, clientScope)
+    ).not.toContain(clientScope);
+  });
+
+  /**
+   * The prohibited set is a set difference, and both sides have to be expanded and
+   * derived from a comparable baseline or the difference silently comes out empty.
+   */
+  describe('the prohibited set is derived soundly', () => {
+    it.each([['Mail.Read'], ['Files.Read'], ['Calendars.Read']])(
+      'refuses %s when every tool is blocked',
+      (clientScope) => {
+        // buildScopesFromEndpoints emits the collapsed higher form (Mail.ReadWrite) and
+        // never the bare lower one, so an unexpanded unblocked side never marked
+        // Mail.Read prohibited even with the whole catalogue blocked.
+        expect(
+          resolveAuthorizeScopes({ orgMode: true, blockedTools: '.*' }, clientScope)
+        ).not.toContain(clientScope);
+      }
+    );
+
+    it('does not let --read-only weaken the blocklist', () => {
+      // Read-only strips write scopes from BOTH sides of the difference, cancelling the
+      // delta: Mail.Send was refused with the blocklist alone and granted once
+      // --read-only was added. A tightening flag must never loosen the filter.
+      const withBlocklist = { orgMode: true, blockedTools: BLOCKED };
+
+      expect(resolveAuthorizeScopes(withBlocklist, 'Mail.Send')).not.toContain('Mail.Send');
+      expect(
+        resolveAuthorizeScopes({ ...withBlocklist, readOnly: true }, 'Mail.Send')
+      ).not.toContain('Mail.Send');
+    });
+  });
+
   /**
    * Case normalisation must not depend on the scope being in our endpoint catalogue.
    * Files.ReadWrite.All is a real delegated permission that endpoints.json does not
