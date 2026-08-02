@@ -535,6 +535,20 @@ class MicrosoftGraphServer {
         });
       }
 
+      // OAuth 2.0 requires GET on the authorization endpoint and leaves POST optional.
+      // We implement GET only, and refuse POST explicitly rather than letting it fall
+      // through to the SDK's mcpAuthRouter further down, whose own authorization handler
+      // never sees the blocked-scope filter applied on the GET route below. That made
+      // POST a second door into the same endpoint with different policy. It happens to
+      // fail closed today inside the SDK on a redirect_uri check, but that is the SDK's
+      // behaviour to change, not ours to depend on.
+      app.post('/authorize', (_req, res) => {
+        res.status(405).set('Allow', 'GET').json({
+          error: 'invalid_request',
+          error_description: 'The authorization endpoint accepts GET only.',
+        });
+      });
+
       // Authorization endpoint - redirects to Microsoft
       // Implements two-leg PKCE: client↔server and server↔Microsoft are independent
       app.get('/authorize', async (req, res) => {

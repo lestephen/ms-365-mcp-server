@@ -106,6 +106,30 @@ describe('/authorize cannot be talked into a blocked scope', () => {
     expect(canonical).not.toContain('.default');
   });
 
+  it('refuses POST /authorize rather than letting it reach an unfiltered handler', async () => {
+    // The scope filter lives on the GET route. OAuth makes POST optional for the
+    // authorization endpoint, and the SDK's mcpAuthRouter mounts its own handler that
+    // never sees the filter, so a POST was structurally a second door into the same
+    // endpoint. It happens to fail closed today on a redirect_uri check inside the SDK,
+    // which is not a guarantee this server controls. Close the door explicitly.
+    const res = await fetch(`${BASE}/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        scope: 'Mail.Send',
+        redirect_uri: 'http://localhost',
+        state: 'x',
+        response_type: 'code',
+        client_id: 'test-client',
+      }).toString(),
+      redirect: 'manual',
+    });
+
+    expect(res.status).toBe(405);
+    // Above all, it must never turn into an authorization redirect.
+    expect(res.headers.get('location')).toBeNull();
+  });
+
   it('keeps User.Read and offline_access even when every requested scope is refused', async () => {
     // Both are injected after filtering and are deliberately not blockable: /me access
     // backs token verification, and without offline_access Entra issues no refresh
