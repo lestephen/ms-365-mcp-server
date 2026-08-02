@@ -694,21 +694,72 @@ function resolveAuthScopes(options: AllowedScopeOptions = {}): string[] {
 }
 
 /**
- * Drop a leading OAuth resource URI, so `https://graph.microsoft.com/Mail.Send` and
- * `Mail.Send` compare equal. Entra documents the two as equivalent, and accepts the
- * fully qualified form on sovereign clouds under a different host, so this matches any
- * `scheme://host/` prefix rather than an allowlist of Graph hostnames.
+ * Reduce a scope to the permission name Entra will actually read.
  *
- * Case is preserved, because the scope-hierarchy rules match on `.ReadWrite`/`.Read.All`
- * suffixes and would stop firing on a lowercased string.
+ * A scope may name its resource in several ways: `Mail.Send`,
+ * `https://graph.microsoft.com/Mail.Send`, the same on a sovereign-cloud host, or the
+ * resource app-id GUID form `00000003-0000-0000-c000-000000000000/Mail.Send`. In every
+ * case the permission is the segment after the LAST '/', and no Graph permission name
+ * contains a slash. Taking that segment therefore handles the resource URI, the GUID
+ * form, a doubled prefix and a stray double slash uniformly.
+ *
+ * Stripping a single `scheme://host/` prefix instead, which is what this did first, let
+ * the GUID form and `https://graph.microsoft.com//Mail.Send` straight through.
+ *
+ * Case is preserved here; canonicalScope lowercases for comparison.
  */
 function stripScopeResourceUri(scope: string): string {
-  return scope.trim().replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i, '');
+  const trimmed = scope.trim();
+  const lastSlash = trimmed.lastIndexOf('/');
+  return lastSlash === -1 ? trimmed : trimmed.slice(lastSlash + 1);
 }
 
-/** Comparison form for a scope: no resource URI, no case, no surrounding space. */
+/** Comparison form for a scope: no resource, no case, no surrounding space. */
 function canonicalScope(scope: string): string {
   return stripScopeResourceUri(scope).toLowerCase();
+}
+
+/**
+ * Expand a canonical (lowercased) scope to everything it implies.
+ *
+ * `lowerScopesFor` matches `.ReadWrite`/`.Read.All` suffixes case-sensitively and reads
+ * SCOPE_HIERARCHY by exact key, so it silently expands to nothing on a lowercased
+ * string. Re-casing via the endpoint catalogue only helps for scopes the catalogue
+ * carries: `Files.ReadWrite.All` is a real delegated permission that is not in
+ * endpoints.json, so `files.readwrite.all` expanded to nothing, matched nothing
+ * prohibited, and was granted while the correctly-cased spelling was refused.
+ *
+ * These rules mirror lowerScopesFor, applied to canonical strings so casing cannot
+ * defeat them.
+ */
+function canonicalImpliedScopes(canonical: string): Set<string> {
+  const seen = new Set<string>([canonical]);
+  const pending = [canonical];
+
+  while (pending.length > 0) {
+    const scope = pending.pop()!;
+    const lower: string[] = [];
+
+    if (scope.endsWith('.readwrite.all')) {
+      const stem = scope.slice(0, -'.readwrite.all'.length);
+      lower.push(`${stem}.read.all`, `${stem}.readwrite`, `${stem}.read`);
+    } else if (scope.endsWith('.readwrite.shared')) {
+      lower.push(`${scope.slice(0, -'.readwrite.shared'.length)}.read.shared`);
+    } else if (scope.endsWith('.readwrite')) {
+      lower.push(`${scope.slice(0, -'.readwrite'.length)}.read`);
+    } else if (scope.endsWith('.read.all')) {
+      lower.push(`${scope.slice(0, -'.read.all'.length)}.read`);
+    }
+
+    for (const implied of lower) {
+      if (!seen.has(implied)) {
+        seen.add(implied);
+        pending.push(implied);
+      }
+    }
+  }
+
+  return seen;
 }
 
 /**
@@ -786,9 +837,10 @@ function resolveAuthorizeScopes(
     return requested;
   }
 
-  // Re-express a requested scope in its catalogue spelling before expanding the
-  // hierarchy, because those rules are case-sensitive and the client's casing is not
-  // trustworthy. Falls back to the URI-stripped string for scopes we do not know.
+  // Catalogue spelling still matters for SCOPE_HIERARCHY, which is keyed on exact
+  // names and expresses relationships the suffix rules cannot derive. It is a
+  // supplement to the canonical expansion below, never the only line of defence:
+  // a scope absent from the catalogue must still be checked.
   const catalogueSpelling = new Map<string, string>(
     buildScopesFromEndpoints(options.orgMode, options.enabledTools, options.readOnly).map(
       (scope) => [canonicalScope(scope), scope]
@@ -803,12 +855,20 @@ function resolveAuthorizeScopes(
     // narrower reading of it, so it cannot be honoured while a blocklist is in force.
     if (canonical === '.default') return false;
 
-    const known = catalogueSpelling.get(canonical) ?? stripScopeResourceUri(scope);
     // Reject when the scope IS prohibited or IMPLIES something prohibited, so a broader
-    // scope cannot smuggle a blocked one in.
-    return !collapseScopeHierarchy([known])
-      .map(canonicalScope)
-      .some((implied) => prohibited.has(implied));
+    // scope cannot smuggle a blocked one in. Union of the case-insensitive suffix
+    // expansion (works for any scope, catalogued or not) and the catalogue's own
+    // hierarchy map (catches relationships the suffix rules do not encode).
+    const implied = canonicalImpliedScopes(canonical);
+    const catalogued = catalogueSpelling.get(canonical);
+    if (catalogued) {
+      for (const s of collapseScopeHierarchy([catalogued])) implied.add(canonicalScope(s));
+    }
+
+    for (const s of implied) {
+      if (prohibited.has(s)) return false;
+    }
+    return true;
   });
 
   if (granted.length !== requested.length) {
