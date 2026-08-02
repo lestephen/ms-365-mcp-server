@@ -635,32 +635,34 @@ function canonicalImpliedScopes(canonical: string): Set<string> {
  * catalogue blocked a client could still be granted Mail.Read, Files.Read and
  * Calendars.Read. Both sides are expanded now.
  *
- * `--enabled-tools` stays on both sides deliberately. It selects which tools to load
- * rather than expressing a prohibition, and upstream's allowed-scopes test pins that a
- * client may request a scope outside the loaded preset.
+ * `--enabled-tools` was on both sides for the same reason, and had the same effect: with
+ * a preset that does not overlap the blocklist (say `--preset files` while blocking mail
+ * tools) both runs iterate an identical endpoint set, the delta is empty, and the whole
+ * filter degrades to a pass-through while the operator believes a blocklist is in force.
+ *
+ * So the delta is now measured over the FULL catalogue and reflects exactly what the
+ * blocklist removes. Dropping the preset here does not make out-of-preset scopes
+ * prohibited: they appear on both sides of the difference and cancel, so a client may
+ * still request them, which is the upstream behaviour test/allowed-scopes.test.ts pins.
  */
 function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
   if (!options.blockedTools) {
     return new Set();
   }
 
+  // Both sides derive from the whole catalogue: the blocklist must be the ONLY
+  // difference, or an unrelated restriction can cancel it out.
+  const FULL_CATALOGUE = undefined;
   const READ_ONLY_OFF = false;
 
   const permitted = new Set(
     collapseScopeHierarchy(
-      buildScopesFromEndpoints(
-        options.orgMode,
-        options.enabledTools,
-        READ_ONLY_OFF,
-        options.blockedTools
-      )
+      buildScopesFromEndpoints(options.orgMode, FULL_CATALOGUE, READ_ONLY_OFF, options.blockedTools)
     ).map(canonicalScope)
   );
 
   return new Set(
-    collapseScopeHierarchy(
-      buildScopesFromEndpoints(options.orgMode, options.enabledTools, READ_ONLY_OFF)
-    )
+    collapseScopeHierarchy(buildScopesFromEndpoints(options.orgMode, FULL_CATALOGUE, READ_ONLY_OFF))
       .map(canonicalScope)
       .filter((scope) => !permitted.has(scope))
   );
@@ -707,9 +709,14 @@ function resolveAuthorizeScopes(
   // `mail.send`, `Mail.Send` and `https://graph.microsoft.com/Mail.Send` as the same
   // permission, so an exact match against bare catalogue names is trivially bypassable.
   const prohibited = blockedToolScopes(options);
-  if (prohibited.size === 0) {
-    // Nothing is blocked, so there is nothing to subtract and upstream's behaviour of
-    // honouring the client's request applies unchanged.
+  if (!options.blockedTools) {
+    // The operator prohibited nothing, so there is nothing to subtract and upstream's
+    // behaviour of honouring the client's request applies unchanged.
+    //
+    // Gate on the FLAG, not on the delta being non-empty. An empty delta means the
+    // blocklist happened to remove no scope, not that policy is absent, and `.default`
+    // below must still be refused: it ignores the catalogue entirely and asks for every
+    // consented permission, so no amount of delta reasoning bounds it.
     return requested;
   }
 
