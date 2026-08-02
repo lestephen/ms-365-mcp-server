@@ -147,9 +147,14 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
    * spelling below reached the token while looking blocked.
    */
   describe('spellings of a blocked scope that must not slip through', () => {
+    // Normalise the way Entra parses a scope: the permission is whatever follows the
+    // LAST '/', so this sees through a resource URI, a doubled URI, a double slash and
+    // the resource app-id GUID form alike. Deliberately not the same expression the
+    // implementation uses; a helper that shares the implementation's blind spot cannot
+    // detect a bypass, which is exactly what happened on the first pass here.
     const sends = (clientScope: string) =>
       resolveAuthorizeScopes({ orgMode: true, blockedTools: BLOCKED }, clientScope).map((s) =>
-        s.toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i, '')
+        s.trim().toLowerCase().split('/').pop()
       );
 
     it.each([
@@ -178,10 +183,43 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
       expect(scopes).toContain('https://graph.microsoft.com/Calendars.Read');
     });
 
+    // Round two of review found the first canonicalisation still had four holes. Each
+    // of these was verified GRANTED against the previous implementation.
+    it.each([
+      ['double slash after the host', 'https://graph.microsoft.com//Mail.Send'],
+      ['resource app-id GUID form', '00000003-0000-0000-c000-000000000000/Mail.Send'],
+      ['doubled resource URI', 'https://graph.microsoft.com/https://graph.microsoft.com/Mail.Send'],
+    ])('refuses the %s', (_label, clientScope) => {
+      expect(sends(clientScope)).not.toContain('mail.send');
+    });
+
+    it('refuses .default behind a resource app-id GUID', () => {
+      expect(sends('00000003-0000-0000-c000-000000000000/.default')).not.toContain('.default');
+    });
+
     it('leaves .default alone when the operator blocked nothing', () => {
       // With no blocklist there is nothing to protect, and upstream lets the client
       // choose. Refusing here would change behaviour for every unblocked deployment.
       expect(resolveAuthorizeScopes({ orgMode: true }, '.default')).toContain('.default');
+    });
+  });
+
+  /**
+   * Case normalisation must not depend on the scope being in our endpoint catalogue.
+   * Files.ReadWrite.All is a real delegated permission that endpoints.json does not
+   * carry, so re-casing via a catalogue lookup misses it: the correctly-cased form was
+   * refused while the lowercased form was granted, because the hierarchy suffix rules
+   * are case-sensitive and never fired.
+   */
+  describe('super-scopes outside the endpoint catalogue', () => {
+    const everything = { orgMode: true, blockedTools: '.*' };
+
+    it.each([
+      ['canonical casing', 'Files.ReadWrite.All'],
+      ['lowercased', 'files.readwrite.all'],
+      ['uppercased', 'FILES.READWRITE.ALL'],
+    ])('refuses a %s super-scope of a prohibited permission', (_label, clientScope) => {
+      expect(resolveAuthorizeScopes(everything, clientScope)).not.toContain(clientScope);
     });
   });
 });
