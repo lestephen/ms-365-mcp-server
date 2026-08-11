@@ -68,6 +68,20 @@ export function resolvePublicBaseUrl(options: CommandOptions): string | undefine
   return raw ? new URL(raw).href.replace(/\/$/, '') : undefined;
 }
 
+/** Return a regex source that matches a tool name only when both inputs would match it. */
+function intersectToolPatterns(
+  enabledTools: string | undefined,
+  directTools: string | undefined
+): string | undefined {
+  if (!directTools) return undefined;
+  if (!enabledTools) return directTools;
+
+  // RegExp.test searches for a match anywhere unless the caller anchors its expression.
+  // Each lookahead preserves that behavior independently, including existing ^ and $
+  // anchors, while the outer expression requires both to succeed for the same tool name.
+  return `^(?=[\\s\\S]*(?:${enabledTools}))(?=[\\s\\S]*(?:${directTools}))[\\s\\S]*$`;
+}
+
 class MicrosoftGraphServer {
   private authManager: AuthManager;
   private options: CommandOptions;
@@ -130,6 +144,13 @@ class MicrosoftGraphServer {
     }
 
     if (this.options.discovery) {
+      // Hybrid named tools must stay inside the same enabled surface as discovery. A
+      // preset is resolved to enabledTools before the server is built, so intersecting
+      // here covers both --enabled-tools and --preset without duplicating preset logic.
+      const effectiveDirectTools = intersectToolPatterns(
+        this.options.enabledTools,
+        this.options.directTools
+      );
       registerDiscoveryTools(
         registrar,
         this.graphClient!,
@@ -144,7 +165,7 @@ class MicrosoftGraphServer {
         this.options.blockedTools,
         // So discovery output can tell a caller whether a tool is callable by name
         // here or only through execute-tool (#29).
-        this.options.directTools,
+        effectiveDirectTools,
         publicBaseUrl
       );
 
@@ -152,12 +173,12 @@ class MicrosoftGraphServer {
       // still covering everything else. Additive on purpose. Loading every Graph tool
       // costs roughly 260k tokens of schemas, which does not fit a 256k context, while
       // trimming to a preset would put the rarely used tools out of reach entirely.
-      if (this.options.directTools) {
+      if (effectiveDirectTools) {
         registerGraphTools(
           registrar,
           this.graphClient!,
           this.options.readOnly,
-          this.options.directTools,
+          effectiveDirectTools,
           this.options.orgMode,
           this.authManager,
           this.multiAccount,

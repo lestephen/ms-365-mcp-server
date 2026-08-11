@@ -1043,39 +1043,6 @@ async function executeGraphTool(
   const startedAt = Date.now();
   const elapsed = () => (Date.now() - startedAt) / 1000;
 
-  // A blocked tool is unreachable by name, but graph-batch carries arbitrary
-  // method/url subrequests, so the operation itself has to be checked (#24). Without
-  // this, POST /me/sendMail inside a batch reaches Graph while send-mail is blocked.
-  if (tool.path === '/$batch') {
-    // Count what batching is actually used for, so the question of whether graph-batch
-    // earns its keep can be answered from data rather than by grepping skill text.
-    recordBatchSubrequestsFor(params.body, blockedOperations);
-  }
-  if (blockedOperations.length > 0 && tool.path === '/$batch') {
-    const hits = findBlockedSubrequests(params.body, blockedOperations);
-    if (hits.length > 0) {
-      for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
-      recordToolCall(tool.alias, route, 'blocked', elapsed());
-      logger.warn(
-        `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
-          hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
-      );
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              error: 'blocked_operation',
-              message: describeBlockedSubrequests(hits),
-              blocked: hits,
-            }),
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-
   if (
     isConfirmGateEnabled() &&
     isDestructiveOperation(tool.method, config) &&
@@ -1280,6 +1247,13 @@ async function executeGraphTool(
         // list — forward it as a query param rather than silently dropping it.
         queryParams[fixedParamName] = `${paramValue}`;
         logger.info(`OData param fallback: forwarded ${fixedParamName}=${paramValue}`);
+      } else if (tool.path === '/$batch' && paramName === 'requests') {
+        // The generated graph-batch Body schema is an empty passthrough object, so its
+        // shape cannot identify `requests` for the generic flattened-body fallback below.
+        // Preserve the advertised top-level calling convention, then let the normalized
+        // body guard inspect exactly what will be sent to Graph.
+        strayBodyFields.requests = paramValue;
+        logger.info("Body field fallback: merging top-level param 'requests' into graph-batch");
       } else if (
         bodyShape &&
         (hasOwn(bodyShape, paramName) || hasOwn(bodyShape, camelCaseParamName)) &&
@@ -1361,6 +1335,41 @@ async function executeGraphTool(
         logger.warn(
           `Cannot merge flattened body fields (${Object.keys(strayBodyFields).join(', ')}) into non-object request body; dropping them`
         );
+      }
+    }
+
+    // A blocked tool is unreachable by name, but graph-batch carries arbitrary
+    // method/url subrequests, so the operation itself has to be checked (#24). Inspect
+    // the normalized body, not params.body: passthrough clients may flatten requests to
+    // the top level, and the fallback above is what turns that shape into the payload
+    // Graph will actually receive.
+    if (tool.path === '/$batch') {
+      // Count what batching is actually used for, so the question of whether graph-batch
+      // earns its keep can be answered from data rather than by grepping skill text.
+      recordBatchSubrequestsFor(body, blockedOperations);
+    }
+    if (blockedOperations.length > 0 && tool.path === '/$batch') {
+      const hits = findBlockedSubrequests(body, blockedOperations);
+      if (hits.length > 0) {
+        for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
+        recordToolCall(tool.alias, route, 'blocked', elapsed());
+        logger.warn(
+          `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
+            hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'blocked_operation',
+                message: describeBlockedSubrequests(hits),
+                blocked: hits,
+              }),
+            },
+          ],
+          isError: true,
+        };
       }
     }
 

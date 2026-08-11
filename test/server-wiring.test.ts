@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import MicrosoftGraphServer from '../src/server.js';
 import type AuthManager from '../src/auth.js';
 import GraphClient from '../src/graph-client.js';
+import { getCombinedPresetPattern } from '../src/tool-categories.js';
 
 /**
  * Guards the WIRING of registerGraphTools, not its behaviour.
@@ -47,6 +48,7 @@ const DIRECT = '^(graph-batch|create-draft-email|get-current-user)$';
 //                    multiAccount, accountNames, allowedScopes, httpMode, blockedTools,
 //                    publicBaseUrl)
 const HTTP_MODE = 9;
+const ENABLED_TOOLS = 3;
 const BLOCKED_TOOLS = 10;
 const PUBLIC_BASE_URL = 11;
 const ARITY = 12;
@@ -80,6 +82,28 @@ describe('registerGraphTools wiring', () => {
     expect(args).toHaveLength(ARITY);
     expect(args[BLOCKED_TOOLS]).toBe(BLOCKED);
     expect(args[HTTP_MODE]).toBe(true);
+  });
+
+  it('intersects hybrid direct tools with the preset-enabled surface', () => {
+    const mailPreset = getCombinedPresetPattern(['mail']);
+    buildServer({
+      discovery: true,
+      enabledTools: mailPreset,
+      directTools: '^get-',
+      orgMode: true,
+    });
+
+    expect(registerGraphTools).toHaveBeenCalledTimes(1);
+    const effectiveDirectTools = registerGraphTools.mock.calls[0][ENABLED_TOOLS];
+    expect(typeof effectiveDirectTools).toBe('string');
+    const effective = new RegExp(effectiveDirectTools, 'i');
+    expect(effective.test('get-mail-message')).toBe(true);
+    expect(effective.test('get-calendar-event')).toBe(false);
+    expect(effective.test('get-drive-item')).toBe(false);
+
+    // Discovery uses the same intersection for its invocation hints, so it cannot
+    // advertise a tool outside the preset as directly callable.
+    expect(registerDiscoveryTools.mock.calls[0][11]).toBe(effectiveDirectTools);
   });
 
   it('passes the blocklist in non-hybrid mode', () => {
