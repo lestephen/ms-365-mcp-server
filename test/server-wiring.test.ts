@@ -44,10 +44,12 @@ const BLOCKED = '^(send-mail|send-draft-message|reply-mail-message)$';
 const DIRECT = '^(graph-batch|create-draft-email|get-current-user)$';
 
 // registerGraphTools(server, graphClient, readOnly, enabledTools, orgMode, authManager,
-//                    multiAccount, accountNames, allowedScopes, httpMode, blockedTools)
+//                    multiAccount, accountNames, allowedScopes, httpMode, blockedTools,
+//                    publicBaseUrl)
 const HTTP_MODE = 9;
 const BLOCKED_TOOLS = 10;
-const ARITY = 11;
+const PUBLIC_BASE_URL = 11;
+const ARITY = 12;
 
 function buildServer(options: Record<string, unknown>) {
   const authManager = { getToken: vi.fn() } as unknown as AuthManager;
@@ -98,5 +100,32 @@ describe('registerGraphTools wiring', () => {
     const args = registerGraphTools.mock.calls[0];
     expect(args[HTTP_MODE]).toBe(false);
     expect(typeof args[HTTP_MODE]).toBe('boolean');
+  });
+
+  it('passes the CLI public URL into broker-aware tools', () => {
+    buildServer({
+      http: '3000',
+      publicUrl: 'https://cli.example.com/',
+      enabledTools: DIRECT,
+    });
+
+    const args = registerGraphTools.mock.calls[0];
+    expect(args).toHaveLength(ARITY);
+    expect(args[PUBLIC_BASE_URL]).toBe('https://cli.example.com');
+  });
+
+  it('passes the environment public URL when the CLI option is absent', () => {
+    const previous = process.env.MS365_MCP_PUBLIC_URL;
+    process.env.MS365_MCP_PUBLIC_URL = 'https://env.example.com/';
+    try {
+      buildServer({ http: '3000', enabledTools: DIRECT });
+
+      const args = registerGraphTools.mock.calls[0];
+      expect(args).toHaveLength(ARITY);
+      expect(args[PUBLIC_BASE_URL]).toBe('https://env.example.com');
+    } finally {
+      if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+      else process.env.MS365_MCP_PUBLIC_URL = previous;
+    }
   });
 });

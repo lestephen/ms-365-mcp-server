@@ -212,8 +212,9 @@ describe('allowed scope HTTP behavior', () => {
       false,
       [],
       'Mail.Read',
-      // httpMode (upstream), then --blocked-tools, not set in this configuration
+      // httpMode, then unset --blocked-tools and effective public URL
       true,
+      undefined,
       undefined
     );
   });

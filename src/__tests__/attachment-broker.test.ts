@@ -100,6 +100,18 @@ describe('attachment-broker', () => {
       expect(url).toMatch(/^https:\/\/mcp\.example\.com\/download\/[A-Za-z0-9_-]+$/);
     });
 
+    it('mints from an explicit CLI-resolved public URL without the environment variable', () => {
+      delete process.env.MS365_MCP_PUBLIC_URL;
+
+      const url = mintDownloadUrl(
+        { bytes: Buffer.from('hello'), contentType: 'text/plain', resourcePath: '/x' },
+        true,
+        'https://cli.example.com/'
+      );
+
+      expect(url).toMatch(/^https:\/\/cli\.example\.com\/download\/[A-Za-z0-9_-]+$/);
+    });
+
     it('throws when content exceeds the per-item byte cap', () => {
       process.env.MS365_MCP_BROKER_MAX_BYTES = '4';
       expect(() =>

@@ -180,6 +180,17 @@ export interface GraphBufferResult extends GraphDownloadResult {
   bytes: Buffer;
 }
 
+export class GraphDownloadSizeLimitError extends Error {
+  constructor(
+    message: string,
+    readonly maximumBytes: number,
+    readonly actualBytes?: number
+  ) {
+    super(message);
+    this.name = 'GraphDownloadSizeLimitError';
+  }
+}
+
 class GraphClient {
   private authManager: AuthManager;
   private secrets: AppSecrets;
@@ -417,8 +428,10 @@ class GraphClient {
         const declaredLength = Number(contentLengthHeader);
         if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
           await response.body?.cancel().catch(() => undefined);
-          throw new Error(
-            `Microsoft Graph content is ${declaredLength} bytes, exceeding the configured limit of ${maximumBytes} bytes.`
+          throw new GraphDownloadSizeLimitError(
+            `Microsoft Graph content is ${declaredLength} bytes, exceeding the configured limit of ${maximumBytes} bytes.`,
+            maximumBytes,
+            declaredLength
           );
         }
       }
@@ -436,8 +449,10 @@ class GraphClient {
           contentLength += value.byteLength;
           if (contentLength > maximumBytes) {
             await reader.cancel().catch(() => undefined);
-            throw new Error(
-              `Microsoft Graph content exceeded the configured limit of ${maximumBytes} bytes while streaming.`
+            throw new GraphDownloadSizeLimitError(
+              `Microsoft Graph content exceeded the configured limit of ${maximumBytes} bytes while streaming.`,
+              maximumBytes,
+              contentLength
             );
           }
           chunks.push(Buffer.from(value));
