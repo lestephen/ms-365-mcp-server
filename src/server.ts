@@ -7,7 +7,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import logger, { enableConsoleLogging } from './logger.js';
 import { registerAuthTools } from './auth-tools.js';
-import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
+import { registerGraphTools, registerDiscoveryTools, type ToolNameMatcher } from './graph-tools.js';
 import { buildMcpServerInstructions } from './mcp-instructions.js';
 import { installToolSchemaRefNormalization } from './normalize-tool-schema.js';
 import GraphClient from './graph-client.js';
@@ -68,18 +68,24 @@ export function resolvePublicBaseUrl(options: CommandOptions): string | undefine
   return raw ? new URL(raw).href.replace(/\/$/, '') : undefined;
 }
 
-/** Return a regex source that matches a tool name only when both inputs would match it. */
+/** Compile independent filters and require both, without concatenating regex sources. */
 function intersectToolPatterns(
   enabledTools: string | undefined,
   directTools: string | undefined
-): string | undefined {
+): ToolNameMatcher | undefined {
   if (!directTools) return undefined;
-  if (!enabledTools) return directTools;
-
-  // RegExp.test searches for a match anywhere unless the caller anchors its expression.
-  // Each lookahead preserves that behavior independently, including existing ^ and $
-  // anchors, while the outer expression requires both to succeed for the same tool name.
-  return `^(?=[\\s\\S]*(?:${enabledTools}))(?=[\\s\\S]*(?:${directTools}))[\\s\\S]*$`;
+  try {
+    const direct = new RegExp(directTools, 'i');
+    const enabled = enabledTools ? new RegExp(enabledTools, 'i') : undefined;
+    return (name: string) => direct.test(name) && (enabled?.test(name) ?? true);
+  } catch (error) {
+    // CLI validation normally catches this. If options reach the server by another
+    // path, direct registration must fail closed rather than exposing the full catalog.
+    logger.error(
+      `Invalid hybrid tool filter; registering no direct Graph tools: ${(error as Error).message}`
+    );
+    return () => false;
+  }
 }
 
 class MicrosoftGraphServer {
