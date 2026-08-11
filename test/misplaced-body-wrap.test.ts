@@ -25,8 +25,20 @@ describe('Misplaced request body wrapping (issue #620)', () => {
     } as unknown as GraphClient;
   });
 
-  function getToolHandler(toolName: string) {
-    registerGraphTools(mockServer, mockGraphClient, false, undefined, true);
+  function getToolHandler(toolName: string, blockedToolsPattern?: string) {
+    registerGraphTools(
+      mockServer,
+      mockGraphClient,
+      false,
+      undefined,
+      true,
+      undefined,
+      false,
+      [],
+      undefined,
+      false,
+      blockedToolsPattern
+    );
     const call = mockServer.registerTool.mock.calls.find((c: unknown[]) => c[0] === toolName);
     expect(call).toBeDefined();
     return call![call!.length - 1] as (params: Record<string, unknown>) => Promise<unknown>;
@@ -86,6 +98,29 @@ describe('Misplaced request body wrapping (issue #620)', () => {
     await handler({ body: requests });
 
     expect(sentBody()).toEqual(requests);
+  });
+
+  it.each([
+    ['nested body', (requests: unknown[]) => ({ body: { requests } })],
+    ['flattened body fallback', (requests: unknown[]) => ({ requests })],
+  ])('blocks sendMail in a graph-batch %s', async (_shape, buildParams) => {
+    const handler = getToolHandler('graph-batch', '^send-mail$');
+    const requests = [
+      { id: 'send', method: 'POST', url: '/me/sendMail', body: { message: {} } },
+      { id: 'read', method: 'GET', url: '/me/messages' },
+    ];
+
+    const result = (await handler(buildParams(requests))) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      error: 'blocked_operation',
+      blocked: [{ id: 'send', toolName: 'send-mail' }],
+    });
+    expect(mockGraphClient.graphRequest).not.toHaveBeenCalled();
   });
 
   it('leaves a correctly shaped message body untouched', async () => {
