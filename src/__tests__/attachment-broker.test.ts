@@ -40,6 +40,10 @@ function handleFromUrl(url: string): string {
   return url.slice(url.lastIndexOf('/') + 1);
 }
 
+function mintHttp(input: Parameters<typeof mintDownloadUrl>[0]): string | undefined {
+  return mintDownloadUrl(input, true);
+}
+
 describe('attachment-broker', () => {
   beforeEach(() => {
     __testing.reset();
@@ -70,14 +74,25 @@ describe('attachment-broker', () => {
   describe('mintDownloadUrl', () => {
     it('returns undefined when no public base URL is configured', () => {
       delete process.env.MS365_MCP_PUBLIC_URL;
-      expect(isBrokerEnabled()).toBe(false);
+      expect(isBrokerEnabled(true)).toBe(false);
       expect(
-        mintDownloadUrl({ bytes: Buffer.from('x'), contentType: 'text/plain', resourcePath: '/x' })
+        mintHttp({ bytes: Buffer.from('x'), contentType: 'text/plain', resourcePath: '/x' })
       ).toBeUndefined();
     });
 
+    it('stays disabled in stdio even when a public URL remains configured', () => {
+      expect(isBrokerEnabled(false)).toBe(false);
+      expect(
+        mintDownloadUrl(
+          { bytes: Buffer.from('x'), contentType: 'text/plain', resourcePath: '/x' },
+          false
+        )
+      ).toBeUndefined();
+      expect(__testing.store.size).toBe(0);
+    });
+
     it('mints a tokenless URL on the public origin', () => {
-      const url = mintDownloadUrl({
+      const url = mintHttp({
         bytes: Buffer.from('hello'),
         contentType: 'text/plain',
         resourcePath: '/me/messages/m1/attachments/a1/$value',
@@ -88,7 +103,7 @@ describe('attachment-broker', () => {
     it('throws when content exceeds the per-item byte cap', () => {
       process.env.MS365_MCP_BROKER_MAX_BYTES = '4';
       expect(() =>
-        mintDownloadUrl({
+        mintHttp({
           bytes: Buffer.from('toolong'),
           contentType: 'text/plain',
           resourcePath: '/x',
@@ -98,7 +113,7 @@ describe('attachment-broker', () => {
 
     it('enforces an aggregate memory budget across live items', () => {
       process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '10';
-      const first = mintDownloadUrl({
+      const first = mintHttp({
         bytes: Buffer.from('123456'),
         contentType: 'text/plain',
         resourcePath: '/a',
@@ -107,7 +122,7 @@ describe('attachment-broker', () => {
       expect(__testing.totalBytes()).toBe(6);
       // 6 + 6 > 10 -> rejected
       expect(() =>
-        mintDownloadUrl({
+        mintHttp({
           bytes: Buffer.from('789012'),
           contentType: 'text/plain',
           resourcePath: '/b',
@@ -118,14 +133,14 @@ describe('attachment-broker', () => {
     it('frees budget when an entry is consumed/expired before minting', () => {
       process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '10';
       process.env.MS365_MCP_BROKER_TTL_MS = '1';
-      const url = mintDownloadUrl({
+      const url = mintHttp({
         bytes: Buffer.from('123456'),
         contentType: 'text/plain',
         resourcePath: '/a',
       })!;
       // Expire the first entry so the sweep at next mint frees its budget.
       __testing.store.get(handleFromUrl(url))!.expiresAt = Date.now() - 1;
-      const second = mintDownloadUrl({
+      const second = mintHttp({
         bytes: Buffer.from('789012'),
         contentType: 'text/plain',
         resourcePath: '/b',
@@ -137,7 +152,7 @@ describe('attachment-broker', () => {
 
   describe('downloadRouteHandler', () => {
     it('serves the full bytes (200) for a valid handle', () => {
-      const url = mintDownloadUrl({
+      const url = mintHttp({
         bytes: Buffer.from('hello world'),
         contentType: 'text/plain',
         name: 'greeting.txt',
@@ -154,7 +169,7 @@ describe('attachment-broker', () => {
     });
 
     it('serves a partial range (206) with Content-Range', () => {
-      const url = mintDownloadUrl({
+      const url = mintHttp({
         bytes: Buffer.from('hello world'),
         contentType: 'text/plain',
         resourcePath: '/x',
@@ -171,7 +186,7 @@ describe('attachment-broker', () => {
     });
 
     it('returns 416 for an unsatisfiable range', () => {
-      const url = mintDownloadUrl({
+      const url = mintHttp({
         bytes: Buffer.from('hello'),
         contentType: 'text/plain',
         resourcePath: '/x',
@@ -194,7 +209,7 @@ describe('attachment-broker', () => {
 
     it('returns 404 once the capability has expired', () => {
       process.env.MS365_MCP_BROKER_TTL_MS = '1';
-      const url = mintDownloadUrl({
+      const url = mintHttp({
         bytes: Buffer.from('x'),
         contentType: 'text/plain',
         resourcePath: '/x',

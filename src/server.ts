@@ -889,7 +889,7 @@ class MicrosoftGraphServer {
         }
       );
 
-      if (isBrokerEnabled()) {
+      if (isBrokerEnabled(true)) {
         app.get('/download/:handle', downloadRouteHandler);
         logger.info('Attachment broker enabled: GET /download/:handle');
       }

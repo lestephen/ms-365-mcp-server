@@ -43,6 +43,38 @@ describe('findBlockedSubrequests', () => {
     expect(hits[0].id).toBe('1');
   });
 
+  it('canonicalizes percent-encoded path characters before matching', () => {
+    const hits = check([{ id: 'encoded', method: 'POST', url: '/me/%73endMail' }]);
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ id: 'encoded', toolName: 'send-mail' });
+  });
+
+  it('canonicalizes dot segments before matching', () => {
+    const hits = check([
+      { id: 'dot-segment', method: 'POST', url: '/me/temporary/%2e%2e/sendMail' },
+    ]);
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ id: 'dot-segment', toolName: 'send-mail' });
+  });
+
+  it.each([
+    ['/me%2FsendMail', 'encoded path separator'],
+    ['/me%5CsendMail', 'encoded path separator'],
+    ['/me/%2573endMail', 'nested percent-encoding'],
+    ['/me/%73endMail%', 'malformed percent-encoding'],
+  ])('refuses unsafe encoded batch path %s', (url, reason) => {
+    const hits = check([{ id: 'unsafe', method: 'POST', url }]);
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      id: 'unsafe',
+      toolName: 'invalid-batch-url',
+      reason: expect.stringContaining(reason),
+    });
+  });
+
   it('catches a shared-mailbox send, where the path carries an id segment', () => {
     const hits = check([{ id: '1', method: 'POST', url: '/users/ab12-cd34/sendMail', body: {} }]);
     expect(hits.map((h) => h.toolName)).toContain('send-shared-mailbox-mail');
