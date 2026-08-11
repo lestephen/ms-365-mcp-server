@@ -58,8 +58,8 @@ export function getPublicBaseUrl(): string | undefined {
 }
 
 /** The broker only works in HTTP mode with a public base URL configured. */
-export function isBrokerEnabled(): boolean {
-  return !!getPublicBaseUrl();
+export function isBrokerEnabled(httpMode: boolean): boolean {
+  return httpMode && !!getPublicBaseUrl();
 }
 
 interface Capability {
@@ -117,7 +117,8 @@ export interface MintInput {
  * Returns undefined if the broker is not configured. Throws if the content
  * exceeds the configured per-item limit.
  */
-export function mintDownloadUrl(input: MintInput): string | undefined {
+export function mintDownloadUrl(input: MintInput, httpMode: boolean): string | undefined {
+  if (!httpMode) return undefined;
   const base = getPublicBaseUrl();
   if (!base) return undefined;
 

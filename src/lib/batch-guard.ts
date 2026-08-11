@@ -40,6 +40,7 @@ export interface BlockedSubrequest {
   method: string;
   url: string;
   toolName: string;
+  reason?: string;
 }
 
 const endpointsData = JSON.parse(
@@ -101,13 +102,54 @@ export function buildBlockedOperationMatchers(
     }));
 }
 
-/** Strip an absolute Graph prefix and any query string, leaving the resource path. */
-function normalizeSubrequestUrl(url: string): string {
-  let out = url.trim();
-  out = out.replace(/^https?:\/\/[^/]+\/(v1\.0|beta)/i, '');
-  out = out.split(/[?#]/)[0];
-  if (!out.startsWith('/')) out = `/${out}`;
-  return out.replace(/\/+$/, '') || '/';
+type NormalizedSubrequestUrl = { resource: string } | { error: string };
+
+/** Decode and normalize a batch path without letting encoded separators change its structure. */
+function normalizeSubrequestUrl(url: string): NormalizedSubrequestUrl {
+  let path: string;
+  let absolute = false;
+  const trimmed = url.trim();
+  try {
+    if (/^https?:\/\//i.test(trimmed)) {
+      path = new URL(trimmed).pathname;
+      absolute = true;
+    } else {
+      path = trimmed.split(/[?#]/)[0];
+    }
+  } catch {
+    return { error: 'the batch URL is malformed' };
+  }
+
+  if (!path.startsWith('/')) path = `/${path}`;
+  const canonicalSegments: string[] = [];
+  for (const rawSegment of path.split('/')) {
+    if (rawSegment === '') continue;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSegment);
+    } catch {
+      return { error: 'the batch URL contains malformed percent-encoding' };
+    }
+    if (decoded.includes('/') || decoded.includes('\\')) {
+      return { error: 'the batch URL contains an encoded path separator' };
+    }
+    // Fail closed on a second encoded layer. Graph and intermediaries have not always agreed on
+    // decode count, so matching a partially decoded path would recreate the same bypass.
+    if (/%[0-9a-f]{2}/i.test(decoded)) {
+      return { error: 'the batch URL contains nested percent-encoding' };
+    }
+    if (decoded === '.') continue;
+    if (decoded === '..') {
+      canonicalSegments.pop();
+      continue;
+    }
+    canonicalSegments.push(decoded);
+  }
+
+  if (absolute && /^(v1\.0|beta)$/i.test(canonicalSegments[0] ?? '')) {
+    canonicalSegments.shift();
+  }
+  return { resource: canonicalSegments.length > 0 ? `/${canonicalSegments.join('/')}` : '/' };
 }
 
 /**
@@ -130,7 +172,18 @@ export function findBlockedSubrequests(
     if (typeof sub.url !== 'string' || typeof sub.method !== 'string') continue;
 
     const method = sub.method.toUpperCase();
-    const resource = normalizeSubrequestUrl(sub.url);
+    const normalized = normalizeSubrequestUrl(sub.url);
+    if ('error' in normalized) {
+      hits.push({
+        id: typeof sub.id === 'string' ? sub.id : String(sub.id ?? index),
+        method,
+        url: sub.url,
+        toolName: 'invalid-batch-url',
+        reason: normalized.error,
+      });
+      continue;
+    }
+    const resource = normalized.resource;
     const match = matchers.find((m) => m.method === method && m.pattern.test(resource));
     if (match) {
       hits.push({
@@ -147,7 +200,11 @@ export function findBlockedSubrequests(
 /** Operator-facing message naming each offending subrequest and why it was refused. */
 export function describeBlockedSubrequests(hits: BlockedSubrequest[]): string {
   const detail = hits
-    .map((h) => `  request ${h.id}: ${h.method} ${h.url} matches blocked tool ${h.toolName}`)
+    .map((h) =>
+      h.reason
+        ? `  request ${h.id}: ${h.method} ${h.url} refused because ${h.reason}`
+        : `  request ${h.id}: ${h.method} ${h.url} matches blocked tool ${h.toolName}`
+    )
     .join('\n');
   return (
     'Refused: this batch contains subrequests for operations the server blocks.\n' +

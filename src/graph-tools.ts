@@ -516,6 +516,7 @@ interface UtilityToolContext {
   authManager?: AuthManager;
   multiAccount: boolean;
   accountNames: string[];
+  httpMode: boolean;
 }
 
 interface UtilityTool {
@@ -788,7 +789,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       return schema;
     },
-    execute: async (params, { graphClient, authManager }) => {
+    execute: async (params, { graphClient, authManager, httpMode }) => {
       const target = params.target;
       const accountParam = params.account as string | undefined;
       if (typeof target !== 'string' || target.length === 0) {
@@ -844,7 +845,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         // Only enforced when the broker is configured — otherwise get-download-url has no
         // out-of-band path for /$value resources and redirecting would be a dead end, so we
         // fall through and return the bytes as before.
-        const maxInline = isBrokerEnabled() ? downloadBytesMaxInline() : 0;
+        const maxInline = isBrokerEnabled(httpMode) ? downloadBytesMaxInline() : 0;
         if (maxInline > 0) {
           const text = response?.content?.[0]?.text;
           if (typeof text === 'string') {
@@ -1076,7 +1077,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       return schema;
     },
-    execute: async (params, { graphClient, authManager }) => {
+    execute: async (params, { graphClient, authManager, httpMode }) => {
       const target = params.target;
       const accountParam = params.account as string | undefined;
       if (typeof target !== 'string' || target.length === 0) {
@@ -1191,7 +1192,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
 
         if (isBrokerableByteEndpoint) {
-          if (!isBrokerEnabled()) {
+          if (!isBrokerEnabled(httpMode)) {
             return {
               content: [
                 {
@@ -1211,12 +1212,15 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             getBrokerMaxBytes(),
             { accessToken: accountAccessToken }
           );
-          const downloadUrl = mintDownloadUrl({
-            bytes,
-            contentType,
-            userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
-            resourcePath: fetchPath,
-          });
+          const downloadUrl = mintDownloadUrl(
+            {
+              bytes,
+              contentType,
+              userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
+              resourcePath: fetchPath,
+            },
+            httpMode
+          );
           return {
             content: [
               {
@@ -2357,6 +2361,7 @@ export function registerGraphTools(
     authManager,
     multiAccount,
     accountNames,
+    httpMode,
   };
   for (const utility of UTILITY_TOOLS) {
     if (readOnly && !utility.readOnlyHint) continue;
@@ -2641,6 +2646,7 @@ export function registerDiscoveryTools(
     authManager,
     multiAccount,
     accountNames,
+    httpMode,
   };
   const utilityByName = new Map(utilityTools.map((u) => [u.name, u]));
 

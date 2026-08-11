@@ -1336,7 +1336,18 @@ describe('graph-tools', () => {
         const graphClient = createMockGraphClient(paginatingResponses(5));
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(server as any, graphClient as any);
+        registerGraphTools(
+          server as any,
+          graphClient as any,
+          false,
+          undefined,
+          false,
+          undefined,
+          false,
+          [],
+          undefined,
+          true
+        );
 
         await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
 
@@ -1976,7 +1987,18 @@ describe('graph-tools', () => {
 
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(server as any, graphClient as any);
+        registerGraphTools(
+          server as any,
+          graphClient as any,
+          false,
+          undefined,
+          false,
+          undefined,
+          false,
+          [],
+          undefined,
+          true
+        );
 
         const tool = server.tools.get('download-bytes');
         const result = await tool!.handler({ target: '/drives/d1/items/i1/content' });
@@ -1988,6 +2010,44 @@ describe('graph-tools', () => {
       } finally {
         if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
         else process.env.MS365_MCP_PUBLIC_URL = prev;
+      }
+    });
+
+    it('passes oversized content through in stdio even when a public URL is configured', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const previousPublicUrl = process.env.MS365_MCP_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      try {
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  contentType: 'application/pdf',
+                  encoding: 'base64',
+                  contentLength: 5 * 1024 * 1024,
+                  contentBytes: 'eA==',
+                }),
+              },
+            ],
+          }),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const result = await server.tools
+          .get('download-bytes')!
+          .handler({ target: '/drives/d1/items/i1/content' });
+
+        expect(result.isError).toBeFalsy();
+        expect(JSON.parse(result.content[0].text).contentBytes).toBe('eA==');
+      } finally {
+        if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = previousPublicUrl;
       }
     });
 
@@ -2589,7 +2649,18 @@ describe('graph-tools', () => {
 
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(server as any, graphClient as any);
+        registerGraphTools(
+          server as any,
+          graphClient as any,
+          false,
+          undefined,
+          false,
+          undefined,
+          false,
+          [],
+          undefined,
+          true
+        );
 
         const tool = server.tools.get('get-download-url');
         const result = await tool!.handler({
@@ -2614,6 +2685,31 @@ describe('graph-tools', () => {
         else process.env.MS365_MCP_PUBLIC_URL = prev;
         if (previousMaxBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_BYTES;
         else process.env.MS365_MCP_BROKER_MAX_BYTES = previousMaxBytes;
+      }
+    });
+
+    it('does not mint broker URLs in stdio when a public URL remains configured', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const previousPublicUrl = process.env.MS365_MCP_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      try {
+        const graphClient = { downloadToBuffer: vi.fn() };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const result = await server.tools.get('get-download-url')!.handler({
+          target: '/me/messages/m1/attachments/a1/$value',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(JSON.parse(result.content[0].text).error).toMatch(/broker is not configured/);
+        expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
+      } finally {
+        if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = previousPublicUrl;
       }
     });
 
