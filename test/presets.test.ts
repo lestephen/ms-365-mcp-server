@@ -147,19 +147,28 @@ describe('utility tools in presets', () => {
     }
   );
 
-  // Pin the full get-download-url membership so a regression dropping any drive-backed preset
-  // is caught. download-bytes membership is covered by the every-preset test above.
-  it('get-download-url is in every drive-backed preset it declares', () => {
-    for (const preset of ['files', 'onedrive', 'personal', 'work', 'search']) {
+  // Pin the full get-download-url membership so every preset exposing a native-download or
+  // brokerable attachment resource keeps an out-of-band path in HTTP mode.
+  it('get-download-url is in every file and attachment preset it declares', () => {
+    for (const preset of [
+      'mail',
+      'calendar',
+      'files',
+      'personal',
+      'work',
+      'search',
+      'outlook',
+      'onedrive',
+    ]) {
       expect(inPreset(preset, 'get-download-url'), `get-download-url missing from ${preset}`).toBe(
         true
       );
     }
   });
 
-  it('mail preset has download-bytes but not the drive-only download-url helper', () => {
+  it('mail preset exposes both inline and brokered attachment downloads', () => {
     expect(inPreset('mail', 'download-bytes')).toBe(true);
-    expect(inPreset('mail', 'get-download-url')).toBe(false);
+    expect(inPreset('mail', 'get-download-url')).toBe(true);
   });
 
   it('parse-teams-url stays scoped to teams/work', () => {
@@ -170,7 +179,6 @@ describe('utility tools in presets', () => {
 
   it('scoped utilities do not leak into unrelated presets', () => {
     // download-bytes is universal, so only the scoped helpers should be absent here.
-    expect(inPreset('calendar', 'get-download-url')).toBe(false);
     expect(inPreset('contacts', 'get-download-url')).toBe(false);
     expect(inPreset('onenote', 'parse-teams-url')).toBe(false);
   });

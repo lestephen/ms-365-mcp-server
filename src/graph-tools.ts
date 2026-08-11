@@ -40,7 +40,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import { getRequestTokens } from './request-context.js';
-import { isBrokerEnabled, mintDownloadUrl } from './attachment-broker.js';
+import { getBrokerMaxBytes, isBrokerEnabled, mintDownloadUrl } from './attachment-broker.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
@@ -761,7 +761,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     method: 'GET',
     path: 'tool:download-bytes',
     description:
-      'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large drive/SharePoint file content, prefer get-download-url, which returns a pre-authenticated URL to stream bytes out-of-band instead of base64 through the agent context.',
+      'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large content, prefer get-download-url, which returns native pre-authenticated URLs for drive/SharePoint files and brokered URLs for supported attachments when the broker is configured.',
     readOnlyHint: true,
     openWorldHint: true,
     buildSchema: (ctx) => {
@@ -896,7 +896,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     // sits past the cap. That keeps the hint for the reading LLM while letting
     // get-download-url own the high-signal "drive"/"sharepoint" search terms.
     description:
-      'Write authenticated Microsoft Graph byte content to a local file on the server, returning { path, contentType, bytesWritten } instead of base64. The only out-of-band way to save mail attachments and meeting recordings, whose bytes are exposed solely through authenticated endpoints. Also handles profile photos and Teams hosted content. Writes to an absolute outputPath and never overwrites an existing file. stdio mode only: not available over HTTP. For OneDrive or SharePoint file content, get-download-url is preferred — it returns a pre-authenticated URL for fully out-of-band download without the server fetching the bytes.',
+      'Write authenticated Microsoft Graph byte content to a local file on the server, returning { path, contentType, bytesWritten } instead of base64. Handles mail attachments, meeting recordings, profile photos, and Teams hosted content. Writes to an absolute outputPath and never overwrites an existing file. Stdio mode only, not available over HTTP. Prefer get-download-url when available because it returns native or brokered URLs for fully out-of-band download; download-bytes-to-file remains the out-of-band path for meeting recordings.',
     readOnlyHint: true,
     openWorldHint: true,
     stdioOnly: true,
@@ -1206,38 +1206,11 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             };
           }
           const fetchPath = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
-          const byteResponse = await graphClient.graphRequest(fetchPath, {
-            accessToken: accountAccessToken,
-          });
-          if (byteResponse?.isError) {
-            return byteResponse;
-          }
-          const byteText = byteResponse?.content?.[0]?.text;
-          let bytePayload: Record<string, unknown> | undefined;
-          if (typeof byteText === 'string') {
-            try {
-              bytePayload = JSON.parse(byteText);
-            } catch {
-              bytePayload = undefined;
-            }
-          }
-          const contentBytes = bytePayload?.contentBytes;
-          if (typeof contentBytes !== 'string') {
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'Expected base64 byte content from Microsoft Graph but received none.',
-                  }),
-                },
-              ],
-              isError: true,
-            };
-          }
-          const bytes = Buffer.from(contentBytes, 'base64');
-          const contentType =
-            (bytePayload?.contentType as string | undefined) ?? 'application/octet-stream';
+          const { bytes, contentType } = await graphClient.downloadToBuffer(
+            fetchPath,
+            getBrokerMaxBytes(),
+            { accessToken: accountAccessToken }
+          );
           const downloadUrl = mintDownloadUrl({
             bytes,
             contentType,

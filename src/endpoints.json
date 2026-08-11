@@ -260,7 +260,7 @@
     "toolName": "list-mail-attachments",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Read"],
-    "llmTip": "Lists attachments on a message: id, name, contentType, size, isInline. To download the bytes, call download-bytes with target=/me/messages/{message-id}/attachments/{attachment-id}/$value (the /$value suffix returns raw bytes; the bare attachment URL embeds contentBytes in JSON which can truncate large files)."
+    "llmTip": "Lists attachments on a message: id, name, contentType, size, isInline. For large attachments, call get-download-url with target=/me/messages/{message-id}/attachments/{attachment-id}/$value to use the configured out-of-band broker. For small inline reads, call download-bytes with the same target. The /$value suffix returns raw bytes; the bare attachment URL embeds contentBytes in JSON, which can truncate large files."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments/{attachment-id}",

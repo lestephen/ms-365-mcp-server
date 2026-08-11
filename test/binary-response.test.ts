@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -217,6 +217,127 @@ describe('GraphClient binary response handling', () => {
 
       expect(result.value).toBe(42);
       expect(result.rawResponse).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
+describe('GraphClient bounded memory downloads', () => {
+  it('rejects an oversized Content-Length before acquiring a stream reader', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const body = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      getReader: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/octet-stream',
+          'content-length': '100',
+        }),
+        body,
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      await expect(client.downloadToBuffer('/me/photo/$value', 4)).rejects.toThrow(
+        /100 bytes, exceeding the configured limit of 4 bytes/
+      );
+      expect(body.cancel).toHaveBeenCalledOnce();
+      expect(body.getReader).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('cancels a stream as soon as bytes exceed the limit without a useful header', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([1, 2, 3]) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([4, 5, 6]) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([7]) }),
+      cancel: vi.fn().mockResolvedValue(undefined),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      await expect(client.downloadToBuffer('/me/photo/$value', 4)).rejects.toThrow(
+        /exceeded the configured limit of 4 bytes while streaming/
+      );
+      expect(reader.read).toHaveBeenCalledTimes(2);
+      expect(reader.cancel).toHaveBeenCalledOnce();
+      expect(reader.releaseLock).toHaveBeenCalledOnce();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('returns exact bytes and metadata when the bounded stream completes', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const bytes = new Uint8Array([0xff, 0x00, 0x7f, 0x42]);
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response(bytes, {
+        status: 200,
+        headers: {
+          'content-type': 'application/pdf',
+          'content-length': String(bytes.byteLength),
+        },
+      })) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      const result = await client.downloadToBuffer('/me/photo/$value', 4);
+
+      expect(result).toEqual({
+        bytes: Buffer.from(bytes),
+        contentType: 'application/pdf',
+        contentLength: 4,
+      });
     } finally {
       global.fetch = originalFetch;
     }
