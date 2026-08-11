@@ -29,14 +29,12 @@ describe('buildMcpServerInstructions', () => {
     expect(s).not.toContain('account parameter');
   });
 
-  it('routes drive file downloads to get-download-url and authenticated byte reads to download-bytes', () => {
+  it('routes large files and brokered attachments to get-download-url', () => {
     const s = buildMcpServerInstructions({ ...baseCtx, discovery: false });
-    expect(s).toContain('large drive/SharePoint file content');
-    expect(s).toContain('prefer get-download-url');
-    expect(s).toContain('download-bytes for authenticated byte reads');
-    expect(s).toContain(
-      'mail attachments, profile photos, Teams hosted content, and meeting recordings'
-    );
+    expect(s).toContain('prefer get-download-url for large content');
+    expect(s).toContain('brokered URLs for mail and calendar attachments');
+    expect(s).toContain('download-bytes for small authenticated byte reads');
+    expect(s).toContain('out-of-band option for meeting recordings');
     expect(s).toContain('relative Microsoft Graph paths, not absolute URLs');
   });
 });

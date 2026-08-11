@@ -86,6 +86,10 @@ export interface GraphDownloadResult {
   contentLength: number;
 }
 
+export interface GraphBufferResult extends GraphDownloadResult {
+  bytes: Buffer;
+}
+
 class GraphClient {
   private authManager: AuthManager;
   private secrets: AppSecrets;
@@ -258,6 +262,91 @@ class GraphClient {
       if (!completed) {
         await unlink(destinationPath).catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Read Graph byte content into memory without allowing the response to exceed a caller-owned
+   * bound. The Content-Length check rejects known oversized payloads before reading the body;
+   * the streaming count is the authoritative backstop for missing or dishonest headers.
+   */
+  async downloadToBuffer(
+    endpoint: string,
+    maximumBytes: number,
+    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion'> = {}
+  ): Promise<GraphBufferResult> {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
+      throw new Error('Maximum download size must be a positive integer');
+    }
+
+    const contextTokens = getRequestTokens();
+    const accessToken =
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    if (!accessToken) {
+      throw new Error('No access token available');
+    }
+
+    try {
+      const response = await this.performRequest(endpoint, accessToken, options);
+      if (response.status === 403) {
+        const errorText = await response.text();
+        if (errorText.includes('scope') || errorText.includes('permission')) {
+          throw new Error(
+            `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
+          );
+        }
+        throw new Error(
+          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
+        );
+      }
+      if (!response.ok) {
+        throw new Error(
+          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+        );
+      }
+
+      const contentLengthHeader = response.headers.get('content-length');
+      if (contentLengthHeader !== null && contentLengthHeader.trim() !== '') {
+        const declaredLength = Number(contentLengthHeader);
+        if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error(
+            `Microsoft Graph content is ${declaredLength} bytes, exceeding the configured limit of ${maximumBytes} bytes.`
+          );
+        }
+      }
+      if (!response.body) {
+        throw new Error('Microsoft Graph returned an empty response body');
+      }
+
+      const reader = response.body.getReader();
+      const chunks: Buffer[] = [];
+      let contentLength = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          contentLength += value.byteLength;
+          if (contentLength > maximumBytes) {
+            await reader.cancel().catch(() => undefined);
+            throw new Error(
+              `Microsoft Graph content exceeded the configured limit of ${maximumBytes} bytes while streaming.`
+            );
+          }
+          chunks.push(Buffer.from(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      return {
+        bytes: Buffer.concat(chunks, contentLength),
+        contentType: response.headers.get('content-type') || 'application/octet-stream',
+        contentLength,
+      };
+    } catch (error) {
+      logger.error('Microsoft Graph bounded download failed:', error);
+      throw error;
     }
   }
 

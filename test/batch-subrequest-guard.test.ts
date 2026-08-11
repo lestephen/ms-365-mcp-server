@@ -53,6 +53,25 @@ describe('findBlockedSubrequests', () => {
     expect(hits.map((h) => h.toolName)).toContain('reply-mail-message');
   });
 
+  it('expands placeholders embedded in Excel function-style path segments', () => {
+    const excelMatchers = buildBlockedOperationMatchers('^delete-excel-range$');
+    const hits = findBlockedSubrequests(
+      {
+        requests: [
+          {
+            id: 'excel-1',
+            method: 'POST',
+            url: "/drives/d/items/i/workbook/worksheets/w/range(address='A1:B2')/delete",
+          },
+        ],
+      },
+      excelMatchers
+    );
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ id: 'excel-1', toolName: 'delete-excel-range' });
+  });
+
   it('ignores the query string when matching', () => {
     const hits = check([{ id: '1', method: 'POST', url: '/me/sendMail?foo=bar' }]);
     expect(hits).toHaveLength(1);

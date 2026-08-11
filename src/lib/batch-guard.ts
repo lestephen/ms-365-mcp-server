@@ -46,14 +46,27 @@ const endpointsData = JSON.parse(
   readFileSync(path.join(__dirname, '..', 'endpoints.json'), 'utf8')
 ) as EndpointRecord[];
 
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Expand placeholders whether they fill a segment or sit inside a Graph function segment. */
+function pathSegmentToRegex(segment: string): string {
+  const placeholder = /\{[^{}]+\}/g;
+  let cursor = 0;
+  let expanded = '';
+  for (const match of segment.matchAll(placeholder)) {
+    const index = match.index ?? 0;
+    expanded += escapeRegexLiteral(segment.slice(cursor, index));
+    expanded += '[^/]+';
+    cursor = index + match[0].length;
+  }
+  return expanded + escapeRegexLiteral(segment.slice(cursor));
+}
+
 /** `/me/messages/{message-id}/reply` -> anchored regex with one segment per parameter. */
 function pathPatternToRegex(pathPattern: string): RegExp {
-  const escaped = pathPattern
-    .split('/')
-    .map((segment) =>
-      /^\{.+\}$/.test(segment) ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    )
-    .join('/');
+  const escaped = pathPattern.split('/').map(pathSegmentToRegex).join('/');
   // Anchored at both ends so a deeper path under a blocked one is not mistaken for it.
   return new RegExp(`^${escaped}$`, 'i');
 }

@@ -1864,21 +1864,16 @@ describe('graph-tools', () => {
       mockEndpointsJson = [];
 
       const prev = process.env.MS365_MCP_PUBLIC_URL;
+      const previousMaxBytes = process.env.MS365_MCP_BROKER_MAX_BYTES;
       process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      process.env.MS365_MCP_BROKER_MAX_BYTES = '4';
       try {
         const graphClient = {
-          graphRequest: vi.fn().mockResolvedValue({
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  contentType: 'application/pdf',
-                  encoding: 'base64',
-                  contentLength: 3,
-                  contentBytes: Buffer.from('PDF').toString('base64'),
-                }),
-              },
-            ],
+          graphRequest: vi.fn(),
+          downloadToBuffer: vi.fn().mockResolvedValue({
+            bytes: Buffer.from('PDF'),
+            contentType: 'application/pdf',
+            contentLength: 3,
           }),
         };
 
@@ -1891,8 +1886,12 @@ describe('graph-tools', () => {
           target: '/me/messages/m1/attachments/a1/$value',
         });
 
-        const [fetchPath] = graphClient.graphRequest.mock.calls[0];
-        expect(fetchPath).toBe('/me/messages/m1/attachments/a1/$value');
+        expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(
+          '/me/messages/m1/attachments/a1/$value',
+          4,
+          { accessToken: undefined }
+        );
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
 
         const payload = JSON.parse(result.content[0].text);
         expect(payload.brokered).toBe(true);
@@ -1903,6 +1902,8 @@ describe('graph-tools', () => {
       } finally {
         if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
         else process.env.MS365_MCP_PUBLIC_URL = prev;
+        if (previousMaxBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_BYTES;
+        else process.env.MS365_MCP_BROKER_MAX_BYTES = previousMaxBytes;
       }
     });
 
@@ -2176,7 +2177,8 @@ describe('graph-tools', () => {
       expect(targetParam.required).toBe(true);
       expect(targetParam.description).toContain('authenticated recording bytes');
       expect(targetParam.description).not.toContain('returns a URL');
-      expect(schema.description).toContain('For large drive/SharePoint file content');
+      expect(schema.description).toContain('For large content, prefer get-download-url');
+      expect(schema.description).toContain('brokered URLs for supported attachments');
     });
 
     it('execute-tool dispatches to download-bytes for a Graph path', async () => {

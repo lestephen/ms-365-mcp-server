@@ -43,7 +43,7 @@ function ttlMs(): number {
   return readPositiveEnv('MS365_MCP_BROKER_TTL_MS', DEFAULT_TTL_MS);
 }
 
-function maxBytes(): number {
+export function getBrokerMaxBytes(): number {
   return readPositiveEnv('MS365_MCP_BROKER_MAX_BYTES', DEFAULT_MAX_BYTES);
 }
 
@@ -121,7 +121,7 @@ export function mintDownloadUrl(input: MintInput): string | undefined {
   const base = getPublicBaseUrl();
   if (!base) return undefined;
 
-  const limit = maxBytes();
+  const limit = getBrokerMaxBytes();
   if (input.bytes.length > limit) {
     throw new Error(
       `Content is ${input.bytes.length} bytes, exceeding the per-item broker limit of ${limit} bytes (set MS365_MCP_BROKER_MAX_BYTES to raise it).`
