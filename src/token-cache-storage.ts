@@ -48,6 +48,10 @@ const CACHE_KEY_ACCOUNT = 'cache-key';
 const TOKEN_CACHE_FILE = '.token-cache.json';
 const SELECTED_ACCOUNT_FILE = '.selected-account.json';
 const CACHE_KEY_FILE = '.cache-key';
+const CACHE_KEY_LOCK_FILE = '.cache-key.lock';
+const CACHE_KEY_LOCK_POLL_MS = 25;
+const CACHE_KEY_LOCK_TIMEOUT_MS = 30_000;
+const CACHE_KEY_LOCK_STALE_MS = 10 * 60_000;
 
 // Where the cache used to live: inside the installed package. Kept only so an upgrade
 // can move the file out instead of silently forcing a fresh device-code login.
@@ -409,11 +413,88 @@ async function resolveEncryptionKey(): Promise<Buffer> {
   const preferred = state.keys[state.fileKeyIndex ?? 0];
   if (preferred) return preferred;
 
-  const minted = await persistCacheKey(generateCacheKey(), state.canUseKeychain);
+  const minted = await withCacheKeyElectionLock(async () => {
+    // The state above was read before the lock. A sibling may have elected a key while
+    // this process waited, so the winner must be established from a fresh read inside
+    // the critical section. Keychain APIs offer replace, not compare-and-set; without
+    // this lock two processes can each read back their own setPassword result and later
+    // leave a cache encrypted under the key that was replaced.
+    const current = await readCacheKeys();
+    const elected = current.keys[current.fileKeyIndex ?? 0];
+    if (elected) {
+      logger.info('Another process elected the auth cache key first, adopting it');
+      return elected;
+    }
+    return persistCacheKey(generateCacheKey(), current.canUseKeychain);
+  });
   // Share it with any later load, which may be looking at a cache this key just wrote.
   state.keys.unshift(minted);
   if (state.fileKeyIndex !== undefined) state.fileKeyIndex += 1;
   return minted;
+}
+
+/**
+ * Serialize the one-time key election across server processes sharing a config dir.
+ *
+ * The keychain has no atomic create operation, so setPassword followed by getPassword
+ * cannot elect a winner. A small file lock supplies the missing compare-and-set around
+ * the fresh read and mint. Normal reads and writes never take this lock once a key exists.
+ */
+async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise<T> {
+  const lockPath = path.join(path.dirname(getCacheKeyPath()), CACHE_KEY_LOCK_FILE);
+  const owner = `${process.pid}:${Date.now()}:${randomBytes(8).toString('hex')}`;
+  const deadline = Date.now() + CACHE_KEY_LOCK_TIMEOUT_MS;
+
+  ensureParentDir(lockPath);
+  while (true) {
+    try {
+      fs.writeFileSync(lockPath, owner, { flag: 'wx', mode: 0o600 });
+      break;
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'EEXIST') throw error;
+      if (removeStaleCacheKeyLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for auth cache key election lock at ${lockPath}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, CACHE_KEY_LOCK_POLL_MS));
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    // Only remove the lock if it is still ours. A very long keychain prompt can outlive
+    // the stale threshold and let another process recover the lock; its replacement must
+    // not be removed when this operation finally returns.
+    try {
+      if (readFileSync(lockPath, 'utf8') === owner) fs.unlinkSync(lockPath);
+    } catch {
+      // Already recovered or removed. There is no lock left for this owner to release.
+    }
+  }
+}
+
+/** Recover a lock whose owner almost certainly exited during initial key creation. */
+function removeStaleCacheKeyLock(lockPath: string): boolean {
+  let owner: string;
+  try {
+    const stats = fs.statSync(lockPath);
+    if (Date.now() - stats.mtimeMs < CACHE_KEY_LOCK_STALE_MS) return false;
+    owner = readFileSync(lockPath, 'utf8');
+  } catch {
+    return false;
+  }
+
+  try {
+    // Recheck the owner immediately before removal so a recovered replacement is not
+    // mistaken for the stale file observed above.
+    if (readFileSync(lockPath, 'utf8') !== owner) return false;
+    fs.unlinkSync(lockPath);
+    logger.warn(`Recovered stale auth cache key election lock at ${lockPath}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
