@@ -1374,6 +1374,68 @@ describe('graph-tools', () => {
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
     });
 
+    it.each([
+      [
+        'meeting recording',
+        '/me/onlineMeetings/meeting1/recordings/recording1/content',
+        'video/mp4',
+      ],
+      [
+        'unsupported authenticated content',
+        '/me/onlineMeetings/meeting1/transcripts/transcript1/content',
+        'text/vtt',
+      ],
+    ])(
+      'retains the reachable HTTP response path for %s targets',
+      async (_label, target, contentType) => {
+        mockEndpoints.length = 0;
+        mockEndpointsJson = [];
+
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  contentType,
+                  encoding: 'base64',
+                  contentLength: 5 * 1024 * 1024,
+                  contentBytes: 'eA==',
+                }),
+              },
+            ],
+          }),
+          downloadToBuffer: vi.fn(),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(
+          server as any,
+          graphClient as any,
+          false,
+          undefined,
+          false,
+          undefined,
+          false,
+          [],
+          undefined,
+          true,
+          undefined,
+          'https://cli.example.com'
+        );
+
+        const result = await server.tools.get('download-bytes')!.handler({ target });
+
+        expect(result.isError).toBeFalsy();
+        expect(JSON.parse(result.content[0].text).contentBytes).toBe('eA==');
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
+          accessToken: undefined,
+          rawResponse: true,
+        });
+        expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
+      }
+    );
+
     it('passes oversized content through in stdio even when a public URL is configured', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];

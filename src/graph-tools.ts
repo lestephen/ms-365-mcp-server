@@ -278,6 +278,61 @@ function downloadBytesMaxInline(): number {
   return n;
 }
 
+type DownloadUrlTargetKind = 'meeting-recording' | 'brokerable' | 'drive-item' | 'unsupported';
+
+interface DownloadUrlTargetClassification {
+  kind: DownloadUrlTargetKind;
+  pathPart: string;
+  isDriveContentEndpoint: boolean;
+}
+
+/**
+ * Classify the exact target shapes get-download-url can serve. This is shared with
+ * download-bytes so its HTTP inline cutoff is only applied when the suggested
+ * out-of-band route really exists.
+ */
+function classifyDownloadUrlTarget(target: string): DownloadUrlTargetClassification {
+  const pathPart = target.replace(/\/+$/, '');
+  const isMeetingRecording =
+    /^(\/me|\/users\/[^/]+)\/onlineMeetings\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(
+      pathPart
+    ) || /^\/communications\/calls\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(pathPart);
+  if (isMeetingRecording) {
+    return { kind: 'meeting-recording', pathPart, isDriveContentEndpoint: false };
+  }
+
+  // Match only real Graph mail/calendar attachment resources so driveItem path addressing
+  // with folders named messages/events/attachments is not falsely treated as an attachment.
+  const isAttachmentEndpoint =
+    /^(\/me|\/users\/[^/]+)\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+    /^(\/me|\/users\/[^/]+)\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+    /^\/groups\/[^/]+\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+    /^\/groups\/[^/]+\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart);
+  if (isAttachmentEndpoint || pathPart.endsWith('/$value')) {
+    return { kind: 'brokerable', pathPart, isDriveContentEndpoint: false };
+  }
+
+  const isDriveItemById =
+    /^\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart) ||
+    /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/items\/[^/]+(?:\/content)?$/.test(
+      pathPart
+    ) ||
+    /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart);
+  const isDriveItemByPath =
+    /^\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(pathPart) ||
+    /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/root:\/.+:(?:\/content)?$/.test(
+      pathPart
+    ) ||
+    /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(pathPart);
+  const isDriveContentEndpoint =
+    /\/items\/[^/]+\/content$/.test(pathPart) || pathPart.endsWith(':/content');
+  return {
+    kind: isDriveItemById || isDriveItemByPath ? 'drive-item' : 'unsupported',
+    pathPart,
+    isDriveContentEndpoint,
+  };
+}
+
 /**
  * In OAuth/HTTP bearer mode the `account` parameter cannot switch identities —
  * every Graph call uses the connecting client's bearer token. Previously a
@@ -411,9 +466,20 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
         // Enforce the inline limit while Graph is streaming, before constructing a base64
-        // payload. This path is active only when the broker can provide an out-of-band
-        // alternative. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to disable it.
-        const maxInline = isBrokerEnabled(httpMode, publicBaseUrl) ? downloadBytesMaxInline() : 0;
+        // payload. Only do so when get-download-url can actually provide the out-of-band
+        // alternative named by the error. Meeting recordings and other authenticated
+        // /content targets retain the historical response path because HTTP mode does not
+        // expose download-bytes-to-file. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to
+        // disable the cutoff even for supported targets.
+        const downloadUrlKind = target.includes('?')
+          ? 'unsupported'
+          : classifyDownloadUrlTarget(target).kind;
+        const hasOutOfBandAlternative =
+          downloadUrlKind === 'brokerable' || downloadUrlKind === 'drive-item';
+        const maxInline =
+          isBrokerEnabled(httpMode, publicBaseUrl) && hasOutOfBandAlternative
+            ? downloadBytesMaxInline()
+            : 0;
         if (maxInline > 0) {
           try {
             const download = await graphClient.downloadToBuffer(target, maxInline, {
@@ -700,14 +766,10 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      const pathPart = target.replace(/\/+$/, '');
+      const classification = classifyDownloadUrlTarget(target);
+      const { pathPart } = classification;
       // Recording content endpoints return authenticated bytes, not a pre-authenticated URL.
-      if (
-        /^(\/me|\/users\/[^/]+)\/onlineMeetings\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(
-          pathPart
-        ) ||
-        /^\/communications\/calls\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(pathPart)
-      ) {
+      if (classification.kind === 'meeting-recording') {
         return {
           content: [
             {
@@ -721,40 +783,13 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      // Match only real Graph mail/calendar attachment resources so driveItem path addressing
-      // with folders named messages/events/attachments is not falsely treated as an attachment.
-      const isAttachmentEndpoint =
-        /^(\/me|\/users\/[^/]+)\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(
-          pathPart
-        ) ||
-        /^(\/me|\/users\/[^/]+)\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
-        /^\/groups\/[^/]+\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
-        /^\/groups\/[^/]+\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart);
-      const isValueEndpoint = pathPart.endsWith('/$value');
-      const isBrokerableByteEndpoint = isAttachmentEndpoint || isValueEndpoint;
-      const isDriveItemById =
-        /^\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart) ||
-        /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/items\/[^/]+(?:\/content)?$/.test(
-          pathPart
-        ) ||
-        /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(
-          pathPart
-        );
-      const isDriveItemByPath =
-        /^\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(pathPart) ||
-        /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/root:\/.+:(?:\/content)?$/.test(
-          pathPart
-        ) ||
-        /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(
-          pathPart
-        );
       // The downloadUrl lives on driveItem metadata, not the /content sub-resource.
       // Only strip true Graph content endpoints: ID-addressed /items/{id}/content
       // and path-addressed root:/path/file:/content. A drive item can itself be
       // named "content", so a plain trailing /content is not enough.
-      const isDriveContentEndpoint =
-        /\/items\/[^/]+\/content$/.test(pathPart) || pathPart.endsWith(':/content');
-      const itemPath = isDriveContentEndpoint ? pathPart.slice(0, -'/content'.length) : pathPart;
+      const itemPath = classification.isDriveContentEndpoint
+        ? pathPart.slice(0, -'/content'.length)
+        : pathPart;
       try {
         const accountModeError = await checkAccountParamInBearerMode(accountParam, authManager);
         if (accountModeError) {
@@ -769,7 +804,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
 
-        if (isBrokerableByteEndpoint) {
+        if (classification.kind === 'brokerable') {
           if (!isBrokerEnabled(httpMode, publicBaseUrl)) {
             return {
               content: [
@@ -822,7 +857,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           }
         }
 
-        if (!isDriveItemById && !isDriveItemByPath) {
+        if (classification.kind !== 'drive-item') {
           return {
             content: [
               {
