@@ -1280,23 +1280,20 @@ describe('graph-tools', () => {
       process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
       try {
         const graphClient = {
-          graphRequest: vi.fn().mockResolvedValue({
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  contentType: 'application/pdf',
-                  encoding: 'base64',
-                  contentLength: 5 * 1024 * 1024,
-                  contentBytes: 'eA==',
-                }),
-              },
-            ],
-          }),
+          graphRequest: vi.fn(),
+          downloadToBuffer: vi.fn(),
         };
 
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
+        const { GraphDownloadSizeLimitError } = await import('../graph-client.js');
+        graphClient.downloadToBuffer.mockRejectedValue(
+          new GraphDownloadSizeLimitError(
+            'declared content is too large',
+            256 * 1024,
+            5 * 1024 * 1024
+          )
+        );
         registerGraphTools(
           server as any,
           graphClient as any,
@@ -1317,10 +1314,64 @@ describe('graph-tools', () => {
         const payload = JSON.parse(result.content[0].text);
         expect(payload.error).toMatch(/get-download-url/);
         expect(payload.contentLength).toBe(5 * 1024 * 1024);
+        expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(
+          '/drives/d1/items/i1/content',
+          256 * 1024,
+          { accessToken: undefined }
+        );
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
       } finally {
         if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
         else process.env.MS365_MCP_PUBLIC_URL = prev;
       }
+    });
+
+    it('streams bounded bytes before constructing an HTTP inline response', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn().mockResolvedValue({
+          bytes: Buffer.from('hello'),
+          contentType: 'text/plain',
+          contentLength: 5,
+        }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as any,
+        graphClient as any,
+        false,
+        undefined,
+        false,
+        undefined,
+        false,
+        [],
+        undefined,
+        true,
+        undefined,
+        'https://cli.example.com'
+      );
+
+      const result = await server.tools
+        .get('download-bytes')!
+        .handler({ target: '/me/messages/m1/attachments/a1/$value' });
+
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        contentType: 'text/plain',
+        encoding: 'base64',
+        contentLength: 5,
+        contentBytes: 'aGVsbG8=',
+      });
+      expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(
+        '/me/messages/m1/attachments/a1/$value',
+        256 * 1024,
+        { accessToken: undefined }
+      );
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
     });
 
     it('passes oversized content through in stdio even when a public URL is configured', async () => {

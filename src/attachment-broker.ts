@@ -11,7 +11,7 @@ import logger from './logger.js';
  *  1. Mint — inside an authenticated MCP tool call (which carries the user's
  *     delegated bearer server-side), the bytes are fetched from Graph and held
  *     here under a high-entropy, unguessable handle with a short TTL.
- *  2. Redeem — the client pulls `${MS365_MCP_PUBLIC_URL}/download/{handle}`
+ *  2. Redeem — the client pulls `${publicBaseUrl}/download/{handle}`
  *     with NO Authorization header (the handle is the capability), so bytes
  *     reach local disk without round-tripping base64 through the agent context.
  *
@@ -52,14 +52,14 @@ function maxTotalBytes(): number {
 }
 
 /** The externally routable origin clients use to pull brokered bytes. */
-export function getPublicBaseUrl(): string | undefined {
-  const url = process.env.MS365_MCP_PUBLIC_URL;
+export function getPublicBaseUrl(configuredPublicUrl?: string | null): string | undefined {
+  const url = configuredPublicUrl || process.env.MS365_MCP_PUBLIC_URL;
   return url && url.trim() ? url.trim().replace(/\/+$/, '') : undefined;
 }
 
 /** The broker only works in HTTP mode with a public base URL configured. */
-export function isBrokerEnabled(httpMode: boolean): boolean {
-  return httpMode && !!getPublicBaseUrl();
+export function isBrokerEnabled(httpMode: boolean, publicBaseUrl?: string | null): boolean {
+  return httpMode && !!getPublicBaseUrl(publicBaseUrl);
 }
 
 interface Capability {
@@ -117,9 +117,13 @@ export interface MintInput {
  * Returns undefined if the broker is not configured. Throws if the content
  * exceeds the configured per-item limit.
  */
-export function mintDownloadUrl(input: MintInput, httpMode: boolean): string | undefined {
+export function mintDownloadUrl(
+  input: MintInput,
+  httpMode: boolean,
+  publicBaseUrl?: string | null
+): string | undefined {
   if (!httpMode) return undefined;
-  const base = getPublicBaseUrl();
+  const base = getPublicBaseUrl(publicBaseUrl);
   if (!base) return undefined;
 
   const limit = getBrokerMaxBytes();

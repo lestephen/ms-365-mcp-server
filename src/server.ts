@@ -59,6 +59,15 @@ function parseHttpOption(httpOption: string | boolean): { host: string | undefin
   return { host: undefined, port };
 }
 
+export function resolvePublicBaseUrl(options: CommandOptions): string | undefined {
+  const raw =
+    options.publicUrl ||
+    process.env.MS365_MCP_PUBLIC_URL ||
+    options.baseUrl ||
+    process.env.MS365_MCP_BASE_URL;
+  return raw ? new URL(raw).href.replace(/\/$/, '') : undefined;
+}
+
 class MicrosoftGraphServer {
   private authManager: AuthManager;
   private options: CommandOptions;
@@ -91,6 +100,7 @@ class MicrosoftGraphServer {
   }
 
   private createMcpServer(): McpServer {
+    const publicBaseUrl = resolvePublicBaseUrl(this.options);
     const server = new McpServer(
       {
         name: 'Microsoft365MCP',
@@ -134,7 +144,8 @@ class MicrosoftGraphServer {
         this.options.blockedTools,
         // So discovery output can tell a caller whether a tool is callable by name
         // here or only through execute-tool (#29).
-        this.options.directTools
+        this.options.directTools,
+        publicBaseUrl
       );
 
       // Hybrid mode: named tools for the common operations, with the discovery triad
@@ -158,7 +169,8 @@ class MicrosoftGraphServer {
           // the graph-batch subrequest guard (#24) in exactly the mode production
           // runs. tsc caught it; tsup does not typecheck, so nothing else did.
           Boolean(this.options.http),
-          this.options.blockedTools
+          this.options.blockedTools,
+          publicBaseUrl
         );
       }
     } else {
@@ -173,7 +185,8 @@ class MicrosoftGraphServer {
         this.accountNames,
         this.options.allowedScopes,
         Boolean(this.options.http),
-        this.options.blockedTools
+        this.options.blockedTools,
+        publicBaseUrl
       );
     }
 
@@ -450,13 +463,7 @@ class MicrosoftGraphServer {
       // through the SDK's mcpAuthRouter, whose metadata endpoint is
       // shadowed by the custom handler below, so no deployment relied
       // on its actual semantics.
-      const publicUrlRaw =
-        this.options.publicUrl ||
-        process.env.MS365_MCP_PUBLIC_URL ||
-        this.options.baseUrl ||
-        process.env.MS365_MCP_BASE_URL ||
-        null;
-      const publicBase = publicUrlRaw ? new URL(publicUrlRaw).href.replace(/\/$/, '') : null;
+      const publicBase = resolvePublicBaseUrl(this.options) ?? null;
 
       // OAuth Authorization Server Discovery
       app.get('/.well-known/oauth-authorization-server', async (req, res) => {
@@ -889,7 +896,7 @@ class MicrosoftGraphServer {
         }
       );
 
-      if (isBrokerEnabled(true)) {
+      if (isBrokerEnabled(true, publicBase)) {
         app.get('/download/:handle', downloadRouteHandler);
         logger.info('Attachment broker enabled: GET /download/:handle');
       }

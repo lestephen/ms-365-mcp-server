@@ -17,7 +17,7 @@ import {
   type BlockedOperationMatcher,
 } from './lib/batch-guard.js';
 import { auditLog, getUserIdentityForAudit } from './audit-log.js';
-import GraphClient from './graph-client.js';
+import GraphClient, { GraphDownloadSizeLimitError } from './graph-client.js';
 import { isDestructiveOperation } from './lib/destructive-ops.js';
 import { describePathParam } from './lib/path-params.js';
 import AuthManager, {
@@ -222,6 +222,7 @@ interface UtilityToolContext {
   multiAccount: boolean;
   accountNames: string[];
   httpMode: boolean;
+  publicBaseUrl?: string;
 }
 
 interface UtilityTool {
@@ -363,7 +364,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       return schema;
     },
-    execute: async (params, { graphClient, authManager, httpMode }) => {
+    execute: async (params, { graphClient, authManager, httpMode, publicBaseUrl }) => {
       const target = params.target;
       const accountParam = params.account as string | undefined;
       if (typeof target !== 'string' || target.length === 0) {
@@ -403,54 +404,54 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         if (authManager && !authManager.isOAuthModeEnabled() && !getRequestTokens()) {
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
-        // rawResponse keeps the body byte-faithful: binary stays base64 and a
-        // JSON body is returned verbatim instead of being re-serialized lossily
-        // through JSON.parse -> JSON.stringify (issue #546).
+        // Enforce the inline limit while Graph is streaming, before constructing a base64
+        // payload. This path is active only when the broker can provide an out-of-band
+        // alternative. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to disable it.
+        const maxInline = isBrokerEnabled(httpMode, publicBaseUrl) ? downloadBytesMaxInline() : 0;
+        if (maxInline > 0) {
+          try {
+            const download = await graphClient.downloadToBuffer(target, maxInline, {
+              accessToken: accountAccessToken,
+            });
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    contentType: download.contentType,
+                    encoding: 'base64',
+                    contentLength: download.contentLength,
+                    contentBytes: download.bytes.toString('base64'),
+                  }),
+                },
+              ],
+            };
+          } catch (error) {
+            if (error instanceof GraphDownloadSizeLimitError) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: `Content exceeds the inline limit of ${maxInline} bytes (MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE). Use get-download-url to fetch it out-of-band instead of base64 through the agent context.`,
+                      ...(error.actualBytes === undefined
+                        ? {}
+                        : { contentLength: error.actualBytes }),
+                    }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+            throw error;
+          }
+        }
+
+        // Without a usable broker, retain the historical byte-faithful response path.
         const response = await graphClient.graphRequest(target, {
           accessToken: accountAccessToken,
           rawResponse: true,
         });
-        if (response?.isError) {
-          return response;
-        }
-        // Size backstop: above the inline limit, refuse to return a huge base64 blob (which
-        // blows up / gets truncated in the agent context) and point to get-download-url for an
-        // out-of-band fetch instead. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to disable.
-        // Only enforced when the broker is configured — otherwise get-download-url has no
-        // out-of-band path for /$value resources and redirecting would be a dead end, so we
-        // fall through and return the bytes as before.
-        const maxInline = isBrokerEnabled(httpMode) ? downloadBytesMaxInline() : 0;
-        if (maxInline > 0) {
-          const text = response?.content?.[0]?.text;
-          if (typeof text === 'string') {
-            try {
-              const payload = JSON.parse(text) as Record<string, unknown>;
-              const len =
-                typeof payload.contentLength === 'number'
-                  ? payload.contentLength
-                  : typeof payload.contentBytes === 'string'
-                    ? Math.floor((payload.contentBytes.length * 3) / 4)
-                    : undefined;
-              if (typeof len === 'number' && len > maxInline) {
-                return {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify({
-                        error: `Content is ${len} bytes, above the inline limit of ${maxInline} (MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE). Use get-download-url to fetch it out-of-band instead of base64 through the agent context.`,
-                        contentLength: len,
-                        contentType: payload.contentType,
-                      }),
-                    },
-                  ],
-                  isError: true,
-                };
-              }
-            } catch {
-              // Not the JSON binary shape — pass the response through unchanged.
-            }
-          }
-        }
         return response;
       } catch (error) {
         return {
@@ -648,7 +649,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       return schema;
     },
-    execute: async (params, { graphClient, authManager, httpMode }) => {
+    execute: async (params, { graphClient, authManager, httpMode, publicBaseUrl }) => {
       const target = params.target;
       const accountParam = params.account as string | undefined;
       if (typeof target !== 'string' || target.length === 0) {
@@ -763,7 +764,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
 
         if (isBrokerableByteEndpoint) {
-          if (!isBrokerEnabled(httpMode)) {
+          if (!isBrokerEnabled(httpMode, publicBaseUrl)) {
             return {
               content: [
                 {
@@ -790,7 +791,8 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
               userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
               resourcePath: fetchPath,
             },
-            httpMode
+            httpMode,
+            publicBaseUrl
           );
           return {
             content: [
@@ -1637,7 +1639,8 @@ export function registerGraphTools(
   accountNames: string[] = [],
   allowedScopesValue?: string,
   httpMode: boolean = false,
-  blockedToolsPattern?: string
+  blockedToolsPattern?: string,
+  publicBaseUrl?: string
 ): number {
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   // Operations the blocklist prohibits, so graph-batch cannot carry one as a
@@ -1897,6 +1900,7 @@ export function registerGraphTools(
     multiAccount,
     accountNames,
     httpMode,
+    publicBaseUrl,
   };
   for (const utility of UTILITY_TOOLS) {
     if (readOnly && !utility.readOnlyHint) continue;
@@ -2087,7 +2091,8 @@ export function registerDiscoveryTools(
   allowedScopesValue?: string,
   httpMode: boolean = false,
   blockedToolsPattern?: string,
-  directToolsPattern?: string
+  directToolsPattern?: string,
+  publicBaseUrl?: string
 ): void {
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
   // execute-tool can dispatch graph-batch, so the same operation check applies here (#24).
@@ -2174,6 +2179,7 @@ export function registerDiscoveryTools(
     multiAccount,
     accountNames,
     httpMode,
+    publicBaseUrl,
   };
   const utilityByName = new Map(utilityTools.map((u) => [u.name, u]));
 
