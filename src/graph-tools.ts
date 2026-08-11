@@ -544,6 +544,13 @@ interface UtilityTool {
   stdioOnly?: boolean;
 }
 
+export type ToolNameMatcher = string | ((name: string) => boolean);
+type CompiledToolNameMatcher = RegExp | ((name: string) => boolean);
+
+function toolNameMatches(matcher: CompiledToolNameMatcher, name: string): boolean {
+  return typeof matcher === 'function' ? matcher(name) : matcher.test(name);
+}
+
 interface DisabledToolScope {
   toolName: string;
   missingScopes: string[];
@@ -1379,8 +1386,26 @@ function registerUtilityToolWithMcp(
       readOnlyHint: utility.readOnlyHint ?? true,
       openWorldHint: utility.openWorldHint ?? true,
     },
-    async (params) => executeUtilityTool(utility, ctx, params)
+    async (params) => executeUtilityTool(utility, params, ctx, 'direct')
   );
+}
+
+async function executeUtilityTool(
+  utility: UtilityTool,
+  params: Record<string, unknown>,
+  ctx: UtilityToolContext,
+  route: ToolRoute
+): Promise<CallToolResult> {
+  const startedAt = Date.now();
+  const elapsed = () => (Date.now() - startedAt) / 1000;
+  try {
+    const response = await utility.execute(params, ctx);
+    recordToolCall(utility.name, route, response.isError ? 'error' : 'ok', elapsed());
+    return response;
+  } catch (error) {
+    recordToolCall(utility.name, route, 'error', elapsed());
+    throw error;
+  }
 }
 
 // Every nested `body` field in the generated clients is an itemBody, so an @odata.type
@@ -2147,7 +2172,7 @@ export function registerGraphTools(
   server: McpServer,
   graphClient: GraphClient,
   readOnly: boolean = false,
-  enabledToolsPattern?: string,
+  enabledToolsPattern?: ToolNameMatcher,
   orgMode: boolean = false,
   authManager?: AuthManager,
   multiAccount: boolean = false,
@@ -2163,10 +2188,13 @@ export function registerGraphTools(
   const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
   // Give those series a zero baseline now, so increase() can see the first refusal.
   initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
-  let enabledToolsRegex: RegExp | undefined;
-  if (enabledToolsPattern) {
+  let enabledToolsMatches: ((name: string) => boolean) | undefined;
+  if (typeof enabledToolsPattern === 'function') {
+    enabledToolsMatches = enabledToolsPattern;
+  } else if (enabledToolsPattern) {
     try {
-      enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
+      const enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
+      enabledToolsMatches = (name) => enabledToolsRegex.test(name);
       logger.info(`Tool filtering enabled with pattern: ${enabledToolsPattern}`);
     } catch {
       logger.error(`Invalid tool filter regex pattern: ${enabledToolsPattern}. Ignoring filter.`);
@@ -2206,7 +2234,7 @@ export function registerGraphTools(
       }
     }
 
-    if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+    if (enabledToolsMatches && !enabledToolsMatches(tool.alias)) {
       logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
       skippedCount++;
       continue;
@@ -2427,7 +2455,7 @@ export function registerGraphTools(
   for (const utility of UTILITY_TOOLS) {
     if (readOnly && !utility.readOnlyHint) continue;
     if (httpMode && utility.stdioOnly) continue;
-    if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
+    if (enabledToolsMatches && !enabledToolsMatches(utility.name)) continue;
     if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
     try {
       registerUtilityToolWithMcp(server, utility, utilityCtx);
@@ -2451,7 +2479,7 @@ export function registerGraphTools(
 export function buildToolsRegistry(
   readOnly: boolean,
   orgMode: boolean,
-  enabledToolsRegex?: RegExp,
+  enabledToolsMatches?: CompiledToolNameMatcher,
   allowedScopesValue?: string,
   disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [],
   blockedToolsRegex?: RegExp
@@ -2476,7 +2504,7 @@ export function buildToolsRegistry(
       }
     }
 
-    if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+    if (enabledToolsMatches && !toolNameMatches(enabledToolsMatches, tool.alias)) {
       continue;
     }
 
@@ -2614,7 +2642,7 @@ export function registerDiscoveryTools(
   allowedScopesValue?: string,
   httpMode: boolean = false,
   blockedToolsPattern?: string,
-  directToolsPattern?: string,
+  directToolsPattern?: ToolNameMatcher,
   publicBaseUrl?: string
 ): void {
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
@@ -2628,10 +2656,13 @@ export function registerDiscoveryTools(
   // `name` field looks callable leads a model to call it directly and get
   // "Tool ... not found" (see EnviroKinetics/ms365-mcp#29). An invalid pattern here is
   // not fatal, unlike the blocklist: the consequence is a wrong hint, not a policy hole.
-  let directToolsRegex: RegExp | undefined;
-  if (directToolsPattern) {
+  let directToolsMatches: ((name: string) => boolean) | undefined;
+  if (typeof directToolsPattern === 'function') {
+    directToolsMatches = directToolsPattern;
+  } else if (directToolsPattern) {
     try {
-      directToolsRegex = new RegExp(directToolsPattern, 'i');
+      const directToolsRegex = new RegExp(directToolsPattern, 'i');
+      directToolsMatches = (name) => directToolsRegex.test(name);
     } catch (error) {
       logger.error(
         `Invalid --direct-tools regex ${JSON.stringify(directToolsPattern)} for discovery hints; ` +
@@ -2642,7 +2673,7 @@ export function registerDiscoveryTools(
 
   /** Route a caller must use to invoke `name` in this configuration. */
   const invokeVia = (name: string): 'direct' | 'execute-tool' =>
-    directToolsRegex && directToolsRegex.test(name) ? 'direct' : 'execute-tool';
+    directToolsMatches?.(name) ? 'direct' : 'execute-tool';
 
   const invocationFor = (name: string) =>
     invokeVia(name) === 'direct'
@@ -2678,7 +2709,7 @@ export function registerDiscoveryTools(
   const toolsRegistry = buildToolsRegistry(
     readOnly,
     orgMode,
-    enabledToolsRegex,
+    enabledToolsRegex ? (name) => enabledToolsRegex.test(name) : undefined,
     allowedScopesValue,
     disabledByAllowedScopes,
     // Keeps blocked tools out of the registry itself, which is what execute-tool,
@@ -2887,7 +2918,7 @@ export function registerDiscoveryTools(
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
-        return executeUtilityTool(utility, utilityCtx, parameters);
+        return executeUtilityTool(utility, parameters, utilityCtx, 'execute_tool');
       }
       const deniedPolicy = deniedTools.get(tool_name);
       if (deniedPolicy) {

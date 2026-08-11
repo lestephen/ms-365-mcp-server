@@ -95,15 +95,29 @@ describe('registerGraphTools wiring', () => {
 
     expect(registerGraphTools).toHaveBeenCalledTimes(1);
     const effectiveDirectTools = registerGraphTools.mock.calls[0][ENABLED_TOOLS];
-    expect(typeof effectiveDirectTools).toBe('string');
-    const effective = new RegExp(effectiveDirectTools, 'i');
-    expect(effective.test('get-mail-message')).toBe(true);
-    expect(effective.test('get-calendar-event')).toBe(false);
-    expect(effective.test('get-drive-item')).toBe(false);
+    expect(typeof effectiveDirectTools).toBe('function');
+    expect(effectiveDirectTools('get-mail-message')).toBe(true);
+    expect(effectiveDirectTools('get-calendar-event')).toBe(false);
+    expect(effectiveDirectTools('get-drive-item')).toBe(false);
 
     // Discovery uses the same intersection for its invocation hints, so it cannot
     // advertise a tool outside the preset as directly callable.
     expect(registerDiscoveryTools.mock.calls[0][11]).toBe(effectiveDirectTools);
+  });
+
+  it('intersects independently valid regexes with duplicate named captures', () => {
+    buildServer({
+      discovery: true,
+      enabledTools: '^(?<kind>get)-mail',
+      directTools: '^(?<kind>get)-',
+      orgMode: true,
+    });
+
+    const effective = registerGraphTools.mock.calls[0][ENABLED_TOOLS];
+    expect(typeof effective).toBe('function');
+    expect(effective('get-mail-message')).toBe(true);
+    expect(effective('get-calendar-event')).toBe(false);
+    expect(registerDiscoveryTools.mock.calls[0][11]).toBe(effective);
   });
 
   it('passes the blocklist in non-hybrid mode', () => {

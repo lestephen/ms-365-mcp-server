@@ -820,6 +820,46 @@ describe('graph-tools', () => {
     });
   });
 
+  describe('utility metrics', () => {
+    it('records counters and durations for direct and execute-tool routes', async () => {
+      const { registerGraphTools, registerDiscoveryTools } = await loadModule();
+      const { enableMetrics, metricsText, registry } = await import('../metrics.js');
+      enableMetrics();
+      registry.resetMetrics();
+
+      const directGraphClient = {
+        graphRequest: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: JSON.stringify({ contentBytes: 'b2s=' }) }],
+        }),
+      };
+      const directServer = createMockServer();
+      registerGraphTools(directServer as any, directGraphClient as any);
+      await directServer.tools.get('download-bytes')!.handler({ target: '/me/photo/$value' });
+
+      const discoveryGraphClient = {
+        graphRequest: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: JSON.stringify({ error: 'Graph denied the read' }) }],
+          isError: true,
+        }),
+      };
+      const discoveryServer = createMockServer();
+      registerDiscoveryTools(discoveryServer as any, discoveryGraphClient as any);
+      await discoveryServer.tools.get('execute-tool')!.handler({
+        tool_name: 'download-bytes',
+        parameters: { target: '/me/photo/$value' },
+      });
+
+      const text = await metricsText();
+      expect(text).toMatch(
+        /ms365_mcp_tool_calls_total\{tool="download-bytes",route="direct",outcome="ok"\} 1/
+      );
+      expect(text).toMatch(
+        /ms365_mcp_tool_calls_total\{tool="download-bytes",route="execute_tool",outcome="error"\} 1/
+      );
+      expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="download-bytes"\} 2/);
+    });
+  });
+
   // ---- 1. $count advanced query mode ----
   describe('$count advanced query mode', () => {
     it('should set ConsistencyLevel: eventual header when $count=true', async () => {
