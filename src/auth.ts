@@ -305,7 +305,8 @@ function buildScopesFromEndpoints(
   includeWorkAccountScopes: boolean = false,
   enabledToolsPattern?: string,
   readOnly: boolean = false,
-  blockedToolsPattern?: string
+  blockedToolsPattern?: string,
+  includeAlternativeGroups: boolean = false
 ): string[] {
   const scopesSet = new Set<string>();
   const blockedToolsRegex = compileBlockedForScopes(blockedToolsPattern);
@@ -347,9 +348,10 @@ function buildScopesFromEndpoints(
       return;
     }
 
-    getEndpointLoginScopes(endpoint, includeWorkAccountScopes).forEach((scope) =>
-      scopesSet.add(scope)
-    );
+    const endpointScopes = includeAlternativeGroups
+      ? getEndpointScopeGroups(endpoint, includeWorkAccountScopes).flat()
+      : getEndpointLoginScopes(endpoint, includeWorkAccountScopes);
+    endpointScopes.forEach((scope) => scopesSet.add(scope));
   });
 
   const scopes = collapseRedundantScopes(Array.from(scopesSet));
@@ -665,12 +667,20 @@ function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
 
   const permitted = new Set(
     collapseScopeHierarchy(
-      buildScopesFromEndpoints(ORG_MODE_ON, FULL_CATALOGUE, READ_ONLY_OFF, options.blockedTools)
+      buildScopesFromEndpoints(
+        ORG_MODE_ON,
+        FULL_CATALOGUE,
+        READ_ONLY_OFF,
+        options.blockedTools,
+        true
+      )
     ).map(canonicalScope)
   );
 
   return new Set(
-    collapseScopeHierarchy(buildScopesFromEndpoints(ORG_MODE_ON, FULL_CATALOGUE, READ_ONLY_OFF))
+    collapseScopeHierarchy(
+      buildScopesFromEndpoints(ORG_MODE_ON, FULL_CATALOGUE, READ_ONLY_OFF, undefined, true)
+    )
       .map(canonicalScope)
       .filter((scope) => !permitted.has(scope))
   );

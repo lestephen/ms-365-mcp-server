@@ -290,6 +290,15 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
         resolveAuthorizeScopes({ ...withBlocklist, readOnly: true }, 'Mail.Send')
       ).not.toContain('Mail.Send');
     });
+
+    it('refuses scopes from every alternative permission group', () => {
+      const options = { orgMode: true, blockedTools: '^(list-chats|get-chat)$' };
+
+      // Chat.Read remains valid for other unblocked chat tools. Chat.ReadBasic is unique
+      // to these endpoints and must still be removed even though it is their second group.
+      expect(resolveAuthorizeScopes(options, 'Chat.Read')).toContain('Chat.Read');
+      expect(resolveAuthorizeScopes(options, 'Chat.ReadBasic')).not.toContain('Chat.ReadBasic');
+    });
   });
 
   /**

@@ -2,7 +2,7 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { downloadGraphOpenAPI } from './modules/download-openapi.mjs';
+import { downloadGraphOpenAPI, readSpecPin, resolveSpecRef } from './modules/download-openapi.mjs';
 import { generateMcpTools } from './modules/generate-mcp-tools.mjs';
 import { createAndSaveSimplifiedOpenAPI } from './modules/simplified-openapi.mjs';
 
@@ -44,6 +44,13 @@ async function main() {
   console.log('------------------------------------');
 
   try {
+    const refreshRef = refreshSpec
+      ? await resolveSpecRef(readSpecPin(rootDir).repo, 'master')
+      : undefined;
+    if (refreshRef) {
+      console.log(`Resolved OpenAPI refresh ref master to ${refreshRef}`);
+    }
+
     for (const target of targets) {
       console.log(`\n=== Graph ${target.version} ===`);
 
@@ -51,6 +58,7 @@ async function main() {
       const downloaded = await downloadGraphOpenAPI(openapiDir, target.specFile, target.version, {
         repoRoot: rootDir,
         refreshSpec,
+        refreshRef,
         forceDownload,
       });
       console.log(downloaded ? '✅ Downloaded' : '⏭️ Download skipped (file exists)');

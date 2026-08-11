@@ -1,10 +1,17 @@
-import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'fs';
+import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { createHash } from 'crypto';
+import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 // @ts-expect-error - bin modules are plain ESM JavaScript with no type declarations
-import { readSpecPin, specUrl, verifyDownload } from '../bin/modules/download-openapi.mjs';
+import {
+  downloadGraphOpenAPI,
+  readSpecPin,
+  resolveSpecRef,
+  specUrl,
+  verifyDownload,
+} from '../bin/modules/download-openapi.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(__dirname, '..');
@@ -71,5 +78,94 @@ describe('a corrupt or unexpected download is rejected', () => {
 
   it('names the version in the failure, so the message points at the right spec', () => {
     expect(() => verifyDownload('beta', Buffer.from('x'), expected)).toThrow(/beta/);
+  });
+});
+
+describe('refreshing the Graph specs', () => {
+  it('resolves master once and downloads both specs from that immutable SHA', async () => {
+    const sha = '1234567890abcdef1234567890abcdef12345678';
+    const resolveFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ sha }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    );
+    const resolved = await resolveSpecRef(
+      'microsoftgraph/msgraph-metadata',
+      'master',
+      resolveFetch
+    );
+
+    expect(resolved).toBe(sha);
+    expect(resolveFetch).toHaveBeenCalledTimes(1);
+
+    const scratch = mkdtempSync(path.join(tmpdir(), 'openapi-refresh-'));
+    const specFetch = vi.fn(
+      async (url: string) =>
+        new Response(url.includes('/v1.0/') ? 'v1 refreshed' : 'beta refreshed', { status: 200 })
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      writeFileSync(
+        path.join(scratch, 'openapi-pin.json'),
+        JSON.stringify({
+          repo: 'microsoftgraph/msgraph-metadata',
+          ref: 'a'.repeat(40),
+          specs: {
+            'v1.0': { path: 'openapi/v1.0/openapi.yaml' },
+            beta: { path: 'openapi/beta/openapi.yaml' },
+          },
+        })
+      );
+      const targetDir = path.join(scratch, 'openapi');
+
+      await downloadGraphOpenAPI(targetDir, path.join(targetDir, 'v1.yaml'), 'v1.0', {
+        repoRoot: scratch,
+        refreshSpec: true,
+        refreshRef: resolved,
+        fetchImpl: specFetch,
+      });
+      await downloadGraphOpenAPI(targetDir, path.join(targetDir, 'beta.yaml'), 'beta', {
+        repoRoot: scratch,
+        refreshSpec: true,
+        refreshRef: resolved,
+        fetchImpl: specFetch,
+      });
+
+      expect(specFetch).toHaveBeenCalledTimes(2);
+      for (const [url] of specFetch.mock.calls) {
+        expect(url).toContain(`/${sha}/`);
+        expect(url).not.toContain('master');
+      }
+      expect(log.mock.calls.flat().join('\n')).toContain(`ref ${sha}`);
+    } finally {
+      log.mockRestore();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses refresh downloads without an immutable resolved SHA', async () => {
+    const scratch = mkdtempSync(path.join(tmpdir(), 'openapi-refresh-invalid-'));
+    try {
+      writeFileSync(
+        path.join(scratch, 'openapi-pin.json'),
+        JSON.stringify({
+          repo: 'microsoftgraph/msgraph-metadata',
+          ref: 'a'.repeat(40),
+          specs: { 'v1.0': { path: 'openapi/v1.0/openapi.yaml' } },
+        })
+      );
+
+      await expect(
+        downloadGraphOpenAPI(scratch, path.join(scratch, 'v1.yaml'), 'v1.0', {
+          repoRoot: scratch,
+          refreshSpec: true,
+          refreshRef: 'master',
+          fetchImpl: vi.fn(),
+        })
+      ).rejects.toThrow(/immutable.*commit SHA/i);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
