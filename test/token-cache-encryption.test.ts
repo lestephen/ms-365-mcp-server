@@ -19,6 +19,8 @@ const keychain = new Map<string, string>();
 let keytarAvailable = true;
 /** Reads fail while writes still work - a denied prompt rather than a dead keyring. */
 let keytarReadFails = false;
+/** Runs during keychain reads, allowing tests to hold an election mid-flight. */
+let keychainGetHook: (() => void | Promise<void>) | undefined;
 /** Runs just after a successful setPassword, to stand in for a racing sibling process. */
 let keychainSetHook: (() => void) | undefined;
 const setPasswordCalls: Array<{ account: string; value: string }> = [];
@@ -28,6 +30,7 @@ vi.mock('keytar', () => ({
     getPassword: vi.fn(async (service: string, account: string) => {
       if (!keytarAvailable) throw new Error('keychain unavailable');
       if (keytarReadFails) throw new Error('The user denied the keychain prompt.');
+      await keychainGetHook?.();
       return keychain.get(`${service}/${account}`) ?? null;
     }),
     setPassword: vi.fn(async (service: string, account: string, value: string) => {
@@ -60,6 +63,7 @@ describe('encrypted token cache storage', () => {
     keychain.clear();
     keytarAvailable = true;
     keytarReadFails = false;
+    keychainGetHook = undefined;
     keychainSetHook = undefined;
     setPasswordCalls.length = 0;
     // The logger mock is created once for the file, so its calls accumulate across tests
@@ -403,6 +407,51 @@ describe('encrypted token cache storage', () => {
       resetCacheKeyForTests();
       expect(await storage.load('token-cache')).toBe(tokenValue);
       expect(await storage.load('selected-account')).toBe(accountValue);
+    });
+
+    it('serializes key election across independent initializers', async () => {
+      let cacheKeyReads = 0;
+      let releaseElection!: () => void;
+      const electionHeld = new Promise<void>((resolve) => {
+        releaseElection = resolve;
+      });
+      let firstElectionRead!: () => void;
+      const firstElectionReached = new Promise<void>((resolve) => {
+        firstElectionRead = resolve;
+      });
+
+      keychainGetHook = async () => {
+        cacheKeyReads += 1;
+        // First read is the initial empty state. Hold the fresh read under the lock so
+        // a second initializer also observes an empty keychain before trying to elect.
+        if (cacheKeyReads === 2) {
+          firstElectionRead();
+          await electionHeld;
+        }
+      };
+
+      const firstValue = wrapCache('first');
+      const secondValue = wrapCache('second');
+      const first = new DefaultTokenCacheStorage().save('token-cache', firstValue);
+      await firstElectionReached;
+
+      // Separate processes do not share these memoized promises. Clearing them models
+      // that independent module state while both contenders still share the filesystem
+      // lock and mocked system keychain.
+      resetCacheKeyForTests();
+      const second = new DefaultTokenCacheStorage().save('selected-account', secondValue);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(setPasswordCalls.filter((call) => call.account === 'cache-key')).toHaveLength(0);
+
+      releaseElection();
+      await Promise.all([first, second]);
+
+      expect(setPasswordCalls.filter((call) => call.account === 'cache-key')).toHaveLength(1);
+      expect(fs.existsSync(path.join(dir, '.cache-key.lock'))).toBe(false);
+      resetCacheKeyForTests();
+      expect(await new DefaultTokenCacheStorage().load('token-cache')).toBe(firstValue);
+      expect(await new DefaultTokenCacheStorage().load('selected-account')).toBe(secondValue);
     });
 
     // The key file must never appear before its contents: a sibling reading it empty
