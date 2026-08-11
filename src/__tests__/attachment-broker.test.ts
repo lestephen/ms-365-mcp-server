@@ -10,6 +10,8 @@ import {
   downloadRouteHandler,
   parseRange,
   isBrokerEnabled,
+  releaseBrokerCapacity,
+  reserveBrokerCapacity,
   __testing,
 } from '../attachment-broker.js';
 
@@ -140,6 +142,35 @@ describe('attachment-broker', () => {
           resourcePath: '/b',
         })
       ).toThrow(/memory budget exceeded/);
+    });
+
+    it('counts in-flight reservations against the aggregate budget', () => {
+      process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '10';
+
+      const first = reserveBrokerCapacity(6, true);
+      expect(__testing.reservedBytes()).toBe(6);
+      expect(() => reserveBrokerCapacity(6, true)).toThrow(/memory budget exceeded/);
+
+      releaseBrokerCapacity(first);
+      expect(__testing.reservedBytes()).toBe(0);
+      expect(reserveBrokerCapacity(6, true)).toBeDefined();
+    });
+
+    it('atomically converts a reservation into stored bytes', () => {
+      process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '10';
+      const reservation = reserveBrokerCapacity(6, true);
+
+      const url = mintDownloadUrl(
+        { bytes: Buffer.from('1234'), contentType: 'text/plain', resourcePath: '/reserved' },
+        true,
+        undefined,
+        reservation
+      );
+
+      expect(url).toBeTruthy();
+      expect(__testing.reservedBytes()).toBe(0);
+      expect(__testing.totalBytes()).toBe(4);
+      expect(reservation?.active).toBe(false);
     });
 
     it('frees budget when an entry is consumed/expired before minting', () => {

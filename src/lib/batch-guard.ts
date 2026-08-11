@@ -59,7 +59,10 @@ function pathSegmentToRegex(segment: string): string {
   for (const match of segment.matchAll(placeholder)) {
     const index = match.index ?? 0;
     expanded += escapeRegexLiteral(segment.slice(cursor, index));
-    expanded += '[^/]+';
+    const name = match[0].slice(1, -1);
+    // Graph's site-by-path endpoint explicitly accepts a slash-delimited subpath in
+    // {path}; other placeholders remain confined to one URL segment.
+    expanded += name === 'path' ? '.+' : '[^/]+';
     cursor = index + match[0].length;
   }
   return expanded + escapeRegexLiteral(segment.slice(cursor));

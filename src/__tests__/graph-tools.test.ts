@@ -2739,6 +2739,73 @@ describe('graph-tools', () => {
       }
     });
 
+    it('reserves aggregate broker capacity before concurrent downloads start', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const previousPublicUrl = process.env.MS365_MCP_PUBLIC_URL;
+      const previousMaxBytes = process.env.MS365_MCP_BROKER_MAX_BYTES;
+      const previousTotalBytes = process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      process.env.MS365_MCP_BROKER_MAX_BYTES = '4';
+      process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '6';
+      try {
+        let finishDownload!: (value: {
+          bytes: Buffer;
+          contentType: string;
+          contentLength: number;
+        }) => void;
+        const pendingDownload = new Promise<{
+          bytes: Buffer;
+          contentType: string;
+          contentLength: number;
+        }>((resolve) => {
+          finishDownload = resolve;
+        });
+        const graphClient = {
+          graphRequest: vi.fn(),
+          downloadToBuffer: vi.fn().mockReturnValue(pendingDownload),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(
+          server as any,
+          graphClient as any,
+          false,
+          undefined,
+          false,
+          undefined,
+          false,
+          [],
+          undefined,
+          true
+        );
+        const tool = server.tools.get('get-download-url')!;
+
+        const first = tool.handler({ target: '/me/messages/m1/attachments/a1/$value' });
+        await vi.waitFor(() => expect(graphClient.downloadToBuffer).toHaveBeenCalledTimes(1));
+
+        const second = await tool.handler({ target: '/me/messages/m2/attachments/a2/$value' });
+        expect(second.isError).toBe(true);
+        expect(JSON.parse(second.content[0].text).error).toMatch(/memory budget exceeded/);
+        expect(graphClient.downloadToBuffer).toHaveBeenCalledTimes(1);
+
+        finishDownload({
+          bytes: Buffer.from('PDF'),
+          contentType: 'application/pdf',
+          contentLength: 3,
+        });
+        expect((await first).isError).toBeFalsy();
+      } finally {
+        if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = previousPublicUrl;
+        if (previousMaxBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_BYTES;
+        else process.env.MS365_MCP_BROKER_MAX_BYTES = previousMaxBytes;
+        if (previousTotalBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES;
+        else process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = previousTotalBytes;
+      }
+    });
+
     it('does not mint broker URLs in stdio when a public URL remains configured', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];

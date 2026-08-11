@@ -59,6 +59,14 @@ describe('presets from endpoints.json', () => {
     expect(tools).not.toContain('list-sharepoint-site-drives');
   });
 
+  it('personal includes every Excel range formatter referenced by its guidance', () => {
+    const tools = matchedTools('personal');
+    expect(tools).toContain('format-excel-range');
+    expect(tools).toContain('format-excel-range-font');
+    expect(tools).toContain('format-excel-range-fill');
+    expect(tools).toContain('format-excel-range-border');
+  });
+
   it('work covers org tools without leaking personal list-* tools', () => {
     const tools = matchedTools('work');
     expect(tools).toContain('list-shared-mailbox-messages');

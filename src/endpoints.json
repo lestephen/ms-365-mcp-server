@@ -826,7 +826,7 @@
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/range(address='{address}')/format/borders/{sideIndex}",
     "method": "patch",
     "toolName": "format-excel-range-border",
-    "presets": ["excel"],
+    "presets": ["excel", "personal"],
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
     "skipEncoding": ["address"],
