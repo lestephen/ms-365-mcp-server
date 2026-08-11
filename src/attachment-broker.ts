@@ -73,7 +73,40 @@ interface Capability {
 
 const store = new Map<string, Capability>();
 let totalBytes = 0;
+let reservedBytes = 0;
 let sweepTimer: ReturnType<typeof setInterval> | undefined;
+
+export interface BrokerCapacityReservation {
+  bytes: number;
+  active: boolean;
+}
+
+/** Reserve aggregate capacity before an attachment is read into memory. */
+export function reserveBrokerCapacity(
+  bytes: number,
+  httpMode: boolean,
+  publicBaseUrl?: string | null
+): BrokerCapacityReservation | undefined {
+  if (!isBrokerEnabled(httpMode, publicBaseUrl)) return undefined;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new Error('Broker reservation size must be a positive integer');
+  }
+  sweep();
+  const totalLimit = maxTotalBytes();
+  if (totalBytes + reservedBytes + bytes > totalLimit) {
+    throw new Error(
+      `Broker memory budget exceeded (${totalBytes} stored + ${reservedBytes} reserved + ${bytes} requested > ${totalLimit} bytes; set MS365_MCP_BROKER_MAX_TOTAL_BYTES to raise it). Retry shortly.`
+    );
+  }
+  reservedBytes += bytes;
+  return { bytes, active: true };
+}
+
+export function releaseBrokerCapacity(reservation?: BrokerCapacityReservation): void {
+  if (!reservation?.active) return;
+  reservedBytes -= reservation.bytes;
+  reservation.active = false;
+}
 
 function deleteEntry(handle: string): void {
   const cap = store.get(handle);
@@ -120,7 +153,8 @@ export interface MintInput {
 export function mintDownloadUrl(
   input: MintInput,
   httpMode: boolean,
-  publicBaseUrl?: string | null
+  publicBaseUrl?: string | null,
+  reservation?: BrokerCapacityReservation
 ): string | undefined {
   if (!httpMode) return undefined;
   const base = getPublicBaseUrl(publicBaseUrl);
@@ -132,17 +166,26 @@ export function mintDownloadUrl(
       `Content is ${input.bytes.length} bytes, exceeding the per-item broker limit of ${limit} bytes (set MS365_MCP_BROKER_MAX_BYTES to raise it).`
     );
   }
+  if (reservation?.active && input.bytes.length > reservation.bytes) {
+    throw new Error(
+      `Content is ${input.bytes.length} bytes, exceeding its broker reservation of ${reservation.bytes} bytes.`
+    );
+  }
 
   // Free expired entries first, then enforce an aggregate in-memory budget so a burst of large
   // mints cannot exhaust the single replica's memory (a security-relevant availability backstop
   // on the tokenless download path).
   sweep();
   const totalLimit = maxTotalBytes();
-  if (totalBytes + input.bytes.length > totalLimit) {
+  const heldReservation = reservation?.active ? reservation.bytes : 0;
+  if (totalBytes + reservedBytes - heldReservation + input.bytes.length > totalLimit) {
     throw new Error(
-      `Broker memory budget exceeded (${totalBytes} + ${input.bytes.length} > ${totalLimit} bytes; set MS365_MCP_BROKER_MAX_TOTAL_BYTES to raise it). Retry shortly.`
+      `Broker memory budget exceeded (${totalBytes} stored + ${reservedBytes - heldReservation} reserved + ${input.bytes.length} content > ${totalLimit} bytes; set MS365_MCP_BROKER_MAX_TOTAL_BYTES to raise it). Retry shortly.`
     );
   }
+
+  // Convert the in-flight reservation to stored bytes atomically before exposing the handle.
+  releaseBrokerCapacity(reservation);
 
   const handle = randomBytes(32).toString('base64url');
   store.set(handle, {
@@ -282,6 +325,8 @@ export const __testing = {
   reset: () => {
     store.clear();
     totalBytes = 0;
+    reservedBytes = 0;
   },
   totalBytes: () => totalBytes,
+  reservedBytes: () => reservedBytes,
 };

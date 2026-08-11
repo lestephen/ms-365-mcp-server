@@ -104,6 +104,28 @@ describe('findBlockedSubrequests', () => {
     expect(hits[0]).toMatchObject({ id: 'excel-1', toolName: 'delete-excel-range' });
   });
 
+  it('matches path-valued placeholders across multiple segments', () => {
+    const siteMatchers = buildBlockedOperationMatchers('^get-sharepoint-site-by-path$');
+    const hits = findBlockedSubrequests(
+      {
+        requests: [
+          {
+            id: 'site-path',
+            method: 'GET',
+            url: '/sites/contoso.sharepoint.com:/sites/marketing',
+          },
+        ],
+      },
+      siteMatchers
+    );
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      id: 'site-path',
+      toolName: 'get-sharepoint-site-by-path',
+    });
+  });
+
   it('ignores the query string when matching', () => {
     const hits = check([{ id: '1', method: 'POST', url: '/me/sendMail?foo=bar' }]);
     expect(hits).toHaveLength(1);

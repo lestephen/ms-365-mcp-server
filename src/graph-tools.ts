@@ -39,7 +39,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import { getRequestTokens } from './request-context.js';
-import { getBrokerMaxBytes, isBrokerEnabled, mintDownloadUrl } from './attachment-broker.js';
+import {
+  getBrokerMaxBytes,
+  isBrokerEnabled,
+  mintDownloadUrl,
+  releaseBrokerCapacity,
+  reserveBrokerCapacity,
+} from './attachment-broker.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
@@ -779,34 +785,41 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             };
           }
           const fetchPath = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
-          const { bytes, contentType } = await graphClient.downloadToBuffer(
-            fetchPath,
-            getBrokerMaxBytes(),
-            { accessToken: accountAccessToken }
-          );
-          const downloadUrl = mintDownloadUrl(
-            {
-              bytes,
-              contentType,
-              userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
-              resourcePath: fetchPath,
-            },
-            httpMode,
-            publicBaseUrl
-          );
-          return {
-            content: [
+          const maximumBytes = getBrokerMaxBytes();
+          const reservation = reserveBrokerCapacity(maximumBytes, httpMode, publicBaseUrl);
+          try {
+            const { bytes, contentType } = await graphClient.downloadToBuffer(
+              fetchPath,
+              maximumBytes,
+              { accessToken: accountAccessToken }
+            );
+            const downloadUrl = mintDownloadUrl(
               {
-                type: 'text',
-                text: JSON.stringify({
-                  downloadUrl,
-                  size: bytes.length,
-                  contentType,
-                  brokered: true,
-                }),
+                bytes,
+                contentType,
+                userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
+                resourcePath: fetchPath,
               },
-            ],
-          };
+              httpMode,
+              publicBaseUrl,
+              reservation
+            );
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    downloadUrl,
+                    size: bytes.length,
+                    contentType,
+                    brokered: true,
+                  }),
+                },
+              ],
+            };
+          } finally {
+            releaseBrokerCapacity(reservation);
+          }
         }
 
         if (!isDriveItemById && !isDriveItemByPath) {
