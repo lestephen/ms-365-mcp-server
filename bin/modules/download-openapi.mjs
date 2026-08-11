@@ -17,8 +17,9 @@ const PIN_FILE = 'openapi-pin.json';
  * check, so a truncated body became a malformed spec that only surfaced later as a
  * generated client missing schemas. See EnviroKinetics/ms365-mcp#27.
  *
- * Refresh deliberately with `npm run generate -- --refresh-spec`, which fetches master,
- * reports what it got, and tells you to update the pin and review the client diff.
+ * Refresh deliberately with `npm run generate -- --refresh-spec`, which resolves master
+ * once, fetches both specs from that commit, and tells you to update the pin and review
+ * the client diff.
  */
 export function readSpecPin(repoRoot = DEFAULT_REPO_ROOT) {
   const file = path.join(repoRoot, PIN_FILE);
@@ -60,8 +61,25 @@ export function verifyDownload(version, buffer, expected) {
   }
 }
 
-async function fetchSpec(url) {
-  const response = await fetch(url);
+export async function resolveSpecRef(repo, ref = 'master', fetchImpl = fetch) {
+  const response = await fetchImpl(`https://api.github.com/repos/${repo}/commits/${ref}`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'ms-365-mcp-server-openapi-refresh',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to resolve ${repo}@${ref}: ${response.status} ${response.statusText}`);
+  }
+  const payload = await response.json();
+  if (typeof payload?.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(payload.sha)) {
+    throw new Error(`GitHub returned an invalid commit SHA for ${repo}@${ref}`);
+  }
+  return payload.sha.toLowerCase();
+}
+
+async function fetchSpec(url, fetchImpl = fetch) {
+  const response = await fetchImpl(url);
   if (!response.ok) {
     throw new Error(`Failed to download: ${response.status} ${response.statusText}`);
   }
@@ -87,7 +105,13 @@ export async function downloadGraphOpenAPI(
   targetDir,
   targetFile,
   version,
-  { repoRoot = DEFAULT_REPO_ROOT, refreshSpec = false, forceDownload = false } = {}
+  {
+    repoRoot = DEFAULT_REPO_ROOT,
+    refreshSpec = false,
+    refreshRef,
+    forceDownload = false,
+    fetchImpl = fetch,
+  } = {}
 ) {
   if (!fs.existsSync(targetDir)) {
     console.log(`Creating directory: ${targetDir}`);
@@ -105,16 +129,19 @@ export async function downloadGraphOpenAPI(
     return false;
   }
 
-  const ref = refreshSpec ? 'refs/heads/master' : pin.ref;
+  if (refreshSpec && !/^[0-9a-f]{40}$/i.test(refreshRef ?? '')) {
+    throw new Error('Refresh mode requires one immutable 40-character commit SHA');
+  }
+  const ref = refreshSpec ? refreshRef : pin.ref;
   console.log(`Downloading ${version} OpenAPI specification from ${specUrl(pin, version, ref)}`);
 
-  const buffer = await fetchSpec(specUrl(pin, version, ref));
+  const buffer = await fetchSpec(specUrl(pin, version, ref), fetchImpl);
 
   if (refreshSpec) {
     const sha256 = createHash('sha256').update(buffer).digest('hex');
     console.log(
       `   refreshed ${version}: ${buffer.length} bytes, sha256 ${sha256}\n` +
-        `   update ${PIN_FILE} with these values and the new upstream ref before committing`
+        `   update ${PIN_FILE} with ref ${ref} and these values before committing`
     );
   } else {
     verifyDownload(version, buffer, expected);
