@@ -132,7 +132,12 @@ async function loadModule() {
 function createMockServer() {
   const tools = new Map<
     string,
-    { description: string; schema: any; handler: (...args: any[]) => any }
+    {
+      description: string;
+      schema: any;
+      annotations?: any;
+      handler: (...args: any[]) => any;
+    }
   >();
   const requestHandlers = new Map<string, (request: unknown, extra: unknown) => Promise<unknown>>();
   const installDefaultToolCallHandler = () => {
@@ -165,7 +170,7 @@ function createMockServer() {
         annotations: any,
         handler: (...args: any[]) => any
       ) => {
-        tools.set(name, { description, schema, handler });
+        tools.set(name, { description, schema, annotations, handler });
         installDefaultToolCallHandler();
       }
     ),
@@ -2522,6 +2527,62 @@ describe('graph-tools', () => {
       );
     });
 
+    it('registers as destructive and exposes the confirmation parameter', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, {} as any);
+
+      const tool = server.tools.get('download-bytes-to-file');
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: false,
+        destructiveHint: true,
+      });
+      expect(tool?.schema.confirm).toBeDefined();
+    });
+
+    it('requires confirm when the server confirmation gate is enabled', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const previous = process.env.MS365_MCP_REQUIRE_CONFIRM;
+      process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+
+      try {
+        const graphClient = {
+          downloadToFile: vi
+            .fn()
+            .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        const tool = server.tools.get('download-bytes-to-file')!;
+        const outputPath = join(tmpDir, 'confirmed.pdf');
+
+        const blocked = await tool.handler({ target: '/me/photo/$value', outputPath });
+        expect(blocked.isError).toBe(true);
+        expect(JSON.parse(blocked.content[0].text)).toMatchObject({
+          error: 'confirmation_required',
+          tool: 'download-bytes-to-file',
+          destructive: true,
+        });
+        expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+
+        const allowed = await tool.handler({
+          target: '/me/photo/$value',
+          outputPath,
+          confirm: true,
+        });
+        expect(allowed.isError).toBeUndefined();
+        expect(graphClient.downloadToFile).toHaveBeenCalledTimes(1);
+      } finally {
+        if (previous === undefined) delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+        else process.env.MS365_MCP_REQUIRE_CONFIRM = previous;
+      }
+    });
+
     it('rejects a relative outputPath', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
@@ -3653,6 +3714,55 @@ describe('graph-tools', () => {
       expect(path).toBe('/me/photo/$value');
     });
 
+    it('gates download-bytes-to-file through execute-tool and exposes confirm in its schema', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const previous = process.env.MS365_MCP_REQUIRE_CONFIRM;
+      process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+      const discoveryTmpDir = mkdtempSync(join(tmpdir(), 'dbtf-discovery-'));
+
+      try {
+        const graphClient = {
+          downloadToFile: vi
+            .fn()
+            .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+        };
+        const server = createMockServer();
+        const { registerDiscoveryTools } = await loadModule();
+        registerDiscoveryTools(server as any, graphClient as any);
+
+        const schemaResult = await server.tools
+          .get('get-tool-schema')!
+          .handler({ tool_name: 'download-bytes-to-file' });
+        const schema = JSON.parse(schemaResult.content[0].text);
+        expect(schema.parameters).toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: 'confirm', required: false })])
+        );
+
+        const parameters = {
+          target: '/me/messages/m1/attachments/a1/$value',
+          outputPath: join(discoveryTmpDir, 'confirmed.pdf'),
+        };
+        const blocked = await server.tools.get('execute-tool')!.handler({
+          tool_name: 'download-bytes-to-file',
+          parameters,
+        });
+        expect(JSON.parse(blocked.content[0].text).error).toBe('confirmation_required');
+        expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+
+        const allowed = await server.tools.get('execute-tool')!.handler({
+          tool_name: 'download-bytes-to-file',
+          parameters: { ...parameters, confirm: true },
+        });
+        expect(allowed.isError).toBeUndefined();
+        expect(graphClient.downloadToFile).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(discoveryTmpDir, { recursive: true, force: true });
+        if (previous === undefined) delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+        else process.env.MS365_MCP_REQUIRE_CONFIRM = previous;
+      }
+    });
+
     it('execute-tool reports unknown tool when name matches neither registry', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
@@ -3815,9 +3925,9 @@ describe('graph-tools', () => {
     });
   });
 
-  // ---- 12. Read-only mode filters utility tools without readOnlyHint ----
+  // ---- 12. Read-only mode filters mutating utility tools ----
   describe('utility tools in read-only mode', () => {
-    it('skips utility tools whose readOnlyHint is not true', async () => {
+    it('keeps read utilities and excludes the local file writer from direct registration', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
@@ -3825,10 +3935,36 @@ describe('graph-tools', () => {
       const { registerGraphTools } = await loadModule();
       registerGraphTools(server as any, {} as any, true);
 
-      // Both built-in utility tools (download-bytes, parse-teams-url) have
-      // readOnlyHint: true so they should be present.
       expect(server.tools.has('download-bytes')).toBe(true);
       expect(server.tools.has('parse-teams-url')).toBe(true);
+      expect(server.tools.has('get-download-url')).toBe(true);
+      expect(server.tools.has('download-bytes-to-file')).toBe(false);
+    });
+
+    it('excludes the local file writer from discovery and execute-tool dispatch', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = { downloadToFile: vi.fn() };
+      const server = createMockServer();
+      const { registerDiscoveryTools } = await loadModule();
+      registerDiscoveryTools(server as any, graphClient as any, true);
+
+      const searchResult = await server.tools.get('search-tools')!.handler({ limit: 50 });
+      const names = JSON.parse(searchResult.content[0].text).tools.map((tool: any) => tool.name);
+      expect(names).not.toContain('download-bytes-to-file');
+
+      const result = await server.tools.get('execute-tool')!.handler({
+        tool_name: 'download-bytes-to-file',
+        parameters: {
+          target: '/me/photo/$value',
+          outputPath: join(tmpdir(), 'read-only-blocked.bin'),
+          confirm: true,
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toMatch(/not found/i);
+      expect(graphClient.downloadToFile).not.toHaveBeenCalled();
     });
   });
 
