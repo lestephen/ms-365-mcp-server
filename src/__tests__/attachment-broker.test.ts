@@ -173,6 +173,29 @@ describe('attachment-broker', () => {
       expect(reservation?.active).toBe(false);
     });
 
+    it('accounts retained backing allocation rather than only the logical view', () => {
+      process.env.MS365_MCP_BROKER_MAX_BYTES = '8';
+      process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '8';
+      const reservation = reserveBrokerCapacity(8, true)!;
+      const backing = Buffer.allocUnsafeSlow(8);
+
+      mintDownloadUrl(
+        {
+          bytes: backing.subarray(0, 2),
+          memoryBytes: 8,
+          contentType: 'application/octet-stream',
+          resourcePath: '/small-with-large-backing',
+        },
+        true,
+        undefined,
+        reservation
+      );
+
+      expect(__testing.reservedBytes()).toBe(0);
+      expect(__testing.totalBytes()).toBe(8);
+      expect(() => reserveBrokerCapacity(1, true)).toThrow(/memory budget exceeded/);
+    });
+
     it('frees budget when an entry is consumed/expired before minting', () => {
       process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '10';
       process.env.MS365_MCP_BROKER_TTL_MS = '1';

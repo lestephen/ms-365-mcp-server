@@ -335,10 +335,56 @@ describe('GraphClient bounded memory downloads', () => {
 
       expect(result).toEqual({
         bytes: Buffer.from(bytes),
+        allocatedBytes: 4,
         contentType: 'application/pdf',
         contentLength: 4,
       });
     } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('streams into one reserved backing buffer without concatenating chunks', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const concat = vi.spyOn(Buffer, 'concat');
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([1, 2]) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([3, 4]) })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      const result = await client.downloadToBuffer('/me/photo/$value', 8);
+
+      expect(result.bytes).toEqual(Buffer.from([1, 2, 3, 4]));
+      expect(result.allocatedBytes).toBe(8);
+      expect(result.bytes.buffer.byteLength).toBe(8);
+      expect(concat).not.toHaveBeenCalled();
+    } finally {
+      concat.mockRestore();
       global.fetch = originalFetch;
     }
   });

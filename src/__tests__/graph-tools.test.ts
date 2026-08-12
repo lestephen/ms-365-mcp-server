@@ -210,6 +210,72 @@ describe('graph-tools', () => {
       );
       expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="download-bytes"\} 2/);
     });
+
+    it('records Graph calls rejected before request dispatch', async () => {
+      mockEndpoints.push(
+        makeEndpoint({ alias: 'delete-test-item', method: 'delete', path: '/me/items/:itemId' }),
+        makeEndpoint({ alias: 'get-test-item', method: 'get', path: '/me/items/:itemId' })
+      );
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'delete-test-item',
+          method: 'delete',
+          pathPattern: '/me/items/{id}',
+        }),
+        makeConfig({ toolName: 'get-test-item', method: 'get', pathPattern: '/me/items/{id}' }),
+      ];
+      const { registerGraphTools, registerDiscoveryTools } = await loadModule();
+      const { enableMetrics, metricsText, registry } = await import('../metrics.js');
+      enableMetrics();
+      registry.resetMetrics();
+
+      const previousConfirm = process.env.MS365_MCP_REQUIRE_CONFIRM;
+      process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+      try {
+        const directServer = createMockServer();
+        const directGraphClient = { graphRequest: vi.fn() };
+        registerGraphTools(directServer as any, directGraphClient as any);
+        const blocked = await directServer.tools
+          .get('delete-test-item')!
+          .handler({ itemId: 'one' });
+        expect(blocked.isError).toBe(true);
+        expect(directGraphClient.graphRequest).not.toHaveBeenCalled();
+
+        const accountError = new Error('cached account is unavailable');
+        const authManager = {
+          isOAuthModeEnabled: vi.fn().mockReturnValue(false),
+          getTokenForAccount: vi.fn().mockRejectedValue(accountError),
+        };
+        const discoveryServer = createMockServer();
+        const discoveryGraphClient = { graphRequest: vi.fn() };
+        registerDiscoveryTools(
+          discoveryServer as any,
+          discoveryGraphClient as any,
+          false,
+          false,
+          authManager as any
+        );
+        const failed = await discoveryServer.tools.get('execute-tool')!.handler({
+          tool_name: 'get-test-item',
+          parameters: { itemId: 'two' },
+        });
+        expect(failed.isError).toBe(true);
+        expect(discoveryGraphClient.graphRequest).not.toHaveBeenCalled();
+
+        const text = await metricsText();
+        expect(text).toMatch(
+          /ms365_mcp_tool_calls_total\{tool="delete-test-item",route="direct",outcome="blocked"\} 1/
+        );
+        expect(text).toMatch(
+          /ms365_mcp_tool_calls_total\{tool="get-test-item",route="execute_tool",outcome="error"\} 1/
+        );
+        expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="delete-test-item"\} 1/);
+        expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="get-test-item"\} 1/);
+      } finally {
+        if (previousConfirm === undefined) delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+        else process.env.MS365_MCP_REQUIRE_CONFIRM = previousConfirm;
+      }
+    });
   });
 
   // ---- 1. $count advanced query mode ----
@@ -2085,6 +2151,7 @@ describe('graph-tools', () => {
           graphRequest: vi.fn(),
           downloadToBuffer: vi.fn().mockResolvedValue({
             bytes: Buffer.from('PDF'),
+            allocatedBytes: 4,
             contentType: 'application/pdf',
             contentLength: 3,
           }),
@@ -2118,7 +2185,7 @@ describe('graph-tools', () => {
         expect(graphClient.graphRequest).not.toHaveBeenCalled();
 
         const payload = JSON.parse(result.content[0].text);
-        expect(payload.brokered).toBe(true);
+        expect(payload).toMatchObject({ brokered: true });
         expect(payload.contentType).toBe('application/pdf');
         expect(payload.downloadUrl).toMatch(
           /^https:\/\/mcp\.example\.com\/download\/[A-Za-z0-9_-]+$/
@@ -2144,11 +2211,13 @@ describe('graph-tools', () => {
       try {
         let finishDownload!: (value: {
           bytes: Buffer;
+          allocatedBytes: number;
           contentType: string;
           contentLength: number;
         }) => void;
         const pendingDownload = new Promise<{
           bytes: Buffer;
+          allocatedBytes: number;
           contentType: string;
           contentLength: number;
         }>((resolve) => {
@@ -2184,6 +2253,7 @@ describe('graph-tools', () => {
 
         finishDownload({
           bytes: Buffer.from('PDF'),
+          allocatedBytes: 4,
           contentType: 'application/pdf',
           contentLength: 3,
         });

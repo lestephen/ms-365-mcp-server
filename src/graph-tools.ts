@@ -8,6 +8,7 @@ import {
   recordDiscoveryStage,
   recordToolCall,
   type ToolRoute,
+  type ToolOutcome,
   initBlockedOperationSeries,
 } from './metrics.js';
 import {
@@ -830,14 +831,14 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           const maximumBytes = getBrokerMaxBytes();
           const reservation = reserveBrokerCapacity(maximumBytes, httpMode, publicBaseUrl);
           try {
-            const { bytes, contentType } = await graphClient.downloadToBuffer(
-              fetchPath,
-              maximumBytes,
-              { accessToken: accountAccessToken }
-            );
+            const download = await graphClient.downloadToBuffer(fetchPath, maximumBytes, {
+              accessToken: accountAccessToken,
+            });
+            const { bytes, contentType } = download;
             const downloadUrl = mintDownloadUrl(
               {
                 bytes,
+                memoryBytes: download.allocatedBytes,
                 contentType,
                 userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
                 resourcePath: fetchPath,
@@ -1067,6 +1068,14 @@ async function executeGraphTool(
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
   const startedAt = Date.now();
   const elapsed = () => (Date.now() - startedAt) / 1000;
+  let metricsRecorded = false;
+  const finish = (result: CallToolResult, outcome?: ToolOutcome): CallToolResult => {
+    if (!metricsRecorded) {
+      recordToolCall(tool.alias, route, outcome ?? (result.isError ? 'error' : 'ok'), elapsed());
+      metricsRecorded = true;
+    }
+    return result;
+  };
 
   if (
     isConfirmGateEnabled() &&
@@ -1076,22 +1085,25 @@ async function executeGraphTool(
     logger.warn(
       `Refusing destructive tool ${tool.alias} (${tool.method.toUpperCase()}): missing confirm: true`
     );
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            error: 'confirmation_required',
-            tool: tool.alias,
-            method: tool.method.toUpperCase(),
-            destructive: true,
-            message:
-              'This tool modifies user data. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
-          }),
-        },
-      ],
-      isError: true,
-    };
+    return finish(
+      {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              error: 'confirmation_required',
+              tool: tool.alias,
+              method: tool.method.toUpperCase(),
+              destructive: true,
+              message:
+                'This tool modifies user data. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
+            }),
+          },
+        ],
+        isError: true,
+      },
+      'blocked'
+    );
   }
 
   const requestId = randomUUID();
@@ -1107,10 +1119,10 @@ async function executeGraphTool(
     // identity instead of silently returning the bearer user's data (discussion #467).
     const accountModeError = await checkAccountParamInBearerMode(accountParam, authManager);
     if (accountModeError) {
-      return {
+      return finish({
         content: [{ type: 'text', text: JSON.stringify({ error: accountModeError }) }],
         isError: true,
-      };
+      });
     }
 
     // Resolve account-specific token if `account` parameter is provided (or auto-resolve for single account).
@@ -1121,7 +1133,7 @@ async function executeGraphTool(
       try {
         accountAccessToken = await authManager.getTokenForAccount(accountParam);
       } catch (err) {
-        return {
+        return finish({
           content: [
             {
               type: 'text',
@@ -1129,7 +1141,7 @@ async function executeGraphTool(
             },
           ],
           isError: true,
-        };
+        });
       }
     }
 
@@ -1377,24 +1389,26 @@ async function executeGraphTool(
       const hits = findBlockedSubrequests(body, blockedOperations);
       if (hits.length > 0) {
         for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
-        recordToolCall(tool.alias, route, 'blocked', elapsed());
         logger.warn(
           `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
             hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
         );
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error: 'blocked_operation',
-                message: describeBlockedSubrequests(hits),
-                blocked: hits,
-              }),
-            },
-          ],
-          isError: true,
-        };
+        return finish(
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'blocked_operation',
+                  message: describeBlockedSubrequests(hits),
+                  blocked: hits,
+                }),
+              },
+            ],
+            isError: true,
+          },
+          'blocked'
+        );
       }
     }
 
@@ -1673,13 +1687,11 @@ async function executeGraphTool(
       duration_ms: Date.now() - startTime,
       ...(targetResource ? { target_resource: targetResource } : {}),
     });
-    recordToolCall(tool.alias, route, response.isError ? 'error' : 'ok', elapsed());
-
-    return {
+    return finish({
       content,
       _meta: response._meta,
       isError: response.isError,
-    };
+    });
   } catch (error) {
     const err = error as { name?: string; code?: string | number; status?: string | number };
     logger.error(`Error in tool ${tool.alias}: ${(error as Error).message}`);
@@ -1695,8 +1707,7 @@ async function executeGraphTool(
       error_type: err?.name || 'Error',
       error_code: err?.status ?? err?.code,
     });
-    recordToolCall(tool.alias, route, 'error', elapsed());
-    return {
+    return finish({
       content: [
         {
           type: 'text',
@@ -1706,7 +1717,7 @@ async function executeGraphTool(
         },
       ],
       isError: true,
-    };
+    });
   }
 }
 

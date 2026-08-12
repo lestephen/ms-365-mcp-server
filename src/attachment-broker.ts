@@ -64,6 +64,7 @@ export function isBrokerEnabled(httpMode: boolean, publicBaseUrl?: string | null
 
 interface Capability {
   bytes: Buffer;
+  memoryBytes: number;
   contentType: string;
   name?: string;
   userPrincipalName?: string;
@@ -111,7 +112,7 @@ export function releaseBrokerCapacity(reservation?: BrokerCapacityReservation): 
 function deleteEntry(handle: string): void {
   const cap = store.get(handle);
   if (cap) {
-    totalBytes -= cap.bytes.length;
+    totalBytes -= cap.memoryBytes;
     store.delete(handle);
   }
 }
@@ -139,6 +140,8 @@ function ensureSweeper(): void {
 
 export interface MintInput {
   bytes: Buffer;
+  /** Retained backing allocation when larger than the logical byte view. */
+  memoryBytes?: number;
   contentType: string;
   name?: string;
   userPrincipalName?: string;
@@ -161,14 +164,24 @@ export function mintDownloadUrl(
   if (!base) return undefined;
 
   const limit = getBrokerMaxBytes();
+  const memoryBytes = input.memoryBytes ?? input.bytes.length;
   if (input.bytes.length > limit) {
     throw new Error(
       `Content is ${input.bytes.length} bytes, exceeding the per-item broker limit of ${limit} bytes (set MS365_MCP_BROKER_MAX_BYTES to raise it).`
     );
   }
-  if (reservation?.active && input.bytes.length > reservation.bytes) {
+  if (
+    !Number.isSafeInteger(memoryBytes) ||
+    memoryBytes < input.bytes.length ||
+    memoryBytes > limit
+  ) {
     throw new Error(
-      `Content is ${input.bytes.length} bytes, exceeding its broker reservation of ${reservation.bytes} bytes.`
+      `Broker memory allocation must be an integer from ${input.bytes.length} through ${limit} bytes.`
+    );
+  }
+  if (reservation?.active && memoryBytes > reservation.bytes) {
+    throw new Error(
+      `Content retains ${memoryBytes} bytes, exceeding its broker reservation of ${reservation.bytes} bytes.`
     );
   }
 
@@ -178,9 +191,9 @@ export function mintDownloadUrl(
   sweep();
   const totalLimit = maxTotalBytes();
   const heldReservation = reservation?.active ? reservation.bytes : 0;
-  if (totalBytes + reservedBytes - heldReservation + input.bytes.length > totalLimit) {
+  if (totalBytes + reservedBytes - heldReservation + memoryBytes > totalLimit) {
     throw new Error(
-      `Broker memory budget exceeded (${totalBytes} stored + ${reservedBytes - heldReservation} reserved + ${input.bytes.length} content > ${totalLimit} bytes; set MS365_MCP_BROKER_MAX_TOTAL_BYTES to raise it). Retry shortly.`
+      `Broker memory budget exceeded (${totalBytes} stored + ${reservedBytes - heldReservation} reserved + ${memoryBytes} content allocation > ${totalLimit} bytes; set MS365_MCP_BROKER_MAX_TOTAL_BYTES to raise it). Retry shortly.`
     );
   }
 
@@ -190,13 +203,14 @@ export function mintDownloadUrl(
   const handle = randomBytes(32).toString('base64url');
   store.set(handle, {
     bytes: input.bytes,
+    memoryBytes,
     contentType: input.contentType || 'application/octet-stream',
     name: input.name,
     userPrincipalName: input.userPrincipalName,
     resourcePath: input.resourcePath,
     expiresAt: Date.now() + ttlMs(),
   });
-  totalBytes += input.bytes.length;
+  totalBytes += memoryBytes;
   ensureSweeper();
 
   auditLog({
