@@ -24,16 +24,19 @@ const repoRoot = path.join(__dirname, '..');
 
 const PORT = 3198;
 const BASE = `http://127.0.0.1:${PORT}`;
+const RESTRICTED_PORT = 3199;
+const RESTRICTED_BASE = `http://127.0.0.1:${RESTRICTED_PORT}`;
 const BLOCKED =
-  '^(send-mail|send-draft-message|send-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
+  '^(send-mail|send-draft-message|send-shared-mailbox-mail|reply-shared-mailbox-mail|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
 
 let child: ChildProcess;
+let restrictedChild: ChildProcess;
 
-async function authorizeScopes(requested: string | null): Promise<string[]> {
+async function authorizeScopes(requested: string | null, base: string = BASE): Promise<string[]> {
   const qs = new URLSearchParams({ redirect_uri: 'http://localhost', state: 'test-state' });
   if (requested !== null) qs.set('scope', requested);
 
-  const res = await fetch(`${BASE}/authorize?${qs.toString()}`, { redirect: 'manual' });
+  const res = await fetch(`${base}/authorize?${qs.toString()}`, { redirect: 'manual' });
   const location = res.headers.get('location');
   if (!location) throw new Error(`no redirect from /authorize (status ${res.status})`);
 
@@ -41,38 +44,53 @@ async function authorizeScopes(requested: string | null): Promise<string[]> {
   return scope.split(/\s+/).filter(Boolean);
 }
 
-beforeAll(async () => {
-  child = spawn(
+function spawnServer(port: number, extraArgs: string[] = []): ChildProcess {
+  return spawn(
     'node',
     [
       path.join(repoRoot, 'dist', 'index.js'),
       '--http',
-      String(PORT),
+      String(port),
       '--org-mode',
       '--preset',
       'all',
       '--allow-unauthenticated-discovery',
       '--blocked-tools',
       BLOCKED,
+      ...extraArgs,
     ],
     { cwd: repoRoot, stdio: 'ignore', env: { ...process.env, MS365_MCP_CLIENT_ID: 'test-client' } }
   );
+}
 
+async function waitForServer(base: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   for (;;) {
     try {
-      const res = await fetch(`${BASE}/.well-known/oauth-authorization-server`);
-      if (res.ok) break;
+      const res = await fetch(`${base}/.well-known/oauth-authorization-server`);
+      if (res.ok) return;
     } catch {
       /* not listening yet */
     }
     if (Date.now() > deadline) throw new Error('server did not start within 30s');
     await new Promise((r) => setTimeout(r, 300));
   }
+}
+
+beforeAll(async () => {
+  child = spawnServer(PORT);
+  restrictedChild = spawnServer(RESTRICTED_PORT, [
+    '--allowed-scopes',
+    'Mail.ReadWrite Calendars.Read Sites.Selected',
+    '--extra-scopes',
+    'Mail.Send CopilotPackages.ReadWrite.All',
+  ]);
+  await Promise.all([waitForServer(BASE), waitForServer(RESTRICTED_BASE)]);
 }, 45_000);
 
 afterAll(() => {
   child?.kill('SIGKILL');
+  restrictedChild?.kill('SIGKILL');
 });
 
 describe('/authorize cannot be talked into a blocked scope', () => {
@@ -88,6 +106,15 @@ describe('/authorize cannot be talked into a blocked scope', () => {
 
     expect(scopes).not.toContain('Mail.Send');
     expect(scopes.length).toBeGreaterThan(0);
+  });
+
+  it('filters blocked extra scopes after allowed scopes on the real route', async () => {
+    const scopes = await authorizeScopes(null, RESTRICTED_BASE);
+
+    expect(scopes).not.toContain('Mail.Send');
+    expect(scopes).toContain('Mail.ReadWrite');
+    expect(scopes).toContain('Sites.Selected');
+    expect(scopes).toContain('CopilotPackages.ReadWrite.All');
   });
 
   // The first version of the fix compared the client's raw string against bare
