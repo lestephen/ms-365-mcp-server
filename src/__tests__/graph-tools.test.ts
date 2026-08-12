@@ -2095,6 +2095,12 @@ describe('graph-tools', () => {
       ['/me/messages/m1/attachments/a1/$value%2523ignored', 'double-encoded fragment'],
       ['/me/messages/m1/attachments/a1/$value%3Fdownload=1', 'encoded query'],
       ['/me/messages%2Fm1/attachments/a1/$value', 'encoded route slash'],
+      ['/drives/d/items/decoy/../i/content', 'raw parent segment'],
+      ['/drives/d/items/decoy/./i/content', 'raw current segment'],
+      ['/drives/d/items/decoy//../i/content', 'raw parent after repeated slash'],
+      ['/drives/d/items/decoy/../', 'raw trailing parent segment'],
+      ['/drives/d/items/decoy/%2e/i/content', 'encoded current segment'],
+      ['/drives/d/items/decoy/%2e%2e/i/content', 'encoded parent segment'],
       ['/drives/d1/root:/safe/%2e%2e/secret:/content', 'encoded dot segment'],
     ])('rejects a %s target before every binary dispatch (%s)', async (target) => {
       mockEndpoints.length = 0;
@@ -2160,6 +2166,73 @@ describe('graph-tools', () => {
         accessToken: undefined,
       });
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('preserves dotted drive filenames through every binary utility', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/drive/root:/Reports/Budget.v1.final.pdf:/content';
+      const itemTarget = '/me/drive/root:/Reports/Budget.v1.final.pdf:';
+      const outputDir = mkdtempSync(join(tmpdir(), 'binary-dots-'));
+      const outputPath = join(outputDir, 'Budget.v1.final.pdf');
+      const graphClient = {
+        graphRequest: vi.fn().mockImplementation(async (_path: string, options?: any) => {
+          if (options?.rawResponse) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ contentType: 'application/pdf', contentBytes: 'cGRm' }),
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  '@microsoft.graph.downloadUrl': 'https://download.example/dotted-file',
+                  name: 'Budget.v1.final.pdf',
+                }),
+              },
+            ],
+          };
+        }),
+        downloadToFile: vi
+          .fn()
+          .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      try {
+        const results = await Promise.all([
+          server.tools.get('download-bytes')!.handler({ target }),
+          server.tools.get('download-bytes-to-file')!.handler({
+            target,
+            outputPath,
+            confirm: true,
+          }),
+          server.tools.get('get-download-url')!.handler({ target }),
+        ]);
+
+        expect(results.every((result) => !result.isError)).toBe(true);
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
+          accessToken: undefined,
+          rawResponse: true,
+        });
+        expect(graphClient.downloadToFile).toHaveBeenCalledWith(target, outputPath, {
+          accessToken: undefined,
+        });
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(itemTarget, {
+          accessToken: undefined,
+          forceJsonOutput: true,
+        });
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
     });
 
     it('preserves an encoded hash inside a drive root path for every binary utility', async () => {
