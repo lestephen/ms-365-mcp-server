@@ -321,6 +321,12 @@ function encodedHashesAreDrivePathData(target: string): boolean {
   return true;
 }
 
+function validateBinaryTargetSegments(target: string): void {
+  if (target.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new Error('target must not contain dot path segments.');
+  }
+}
+
 function validateBinaryTargetEncoding(target: string): void {
   let layer = target;
   for (let depth = 0; depth < 16; depth++) {
@@ -357,6 +363,9 @@ function canonicalizeBinaryTarget(target: string): CanonicalBinaryTarget {
   if (target.includes('?')) throw new Error('target must not include query parameters.');
   if (target.includes('#')) throw new Error('target must not include a URL fragment.');
   if (target.includes('\\')) throw new Error('target must not include a backslash.');
+  // URL implementations normalize raw dot segments before dispatch. Reject them
+  // explicitly so classification and the effective Graph resource cannot diverge.
+  validateBinaryTargetSegments(target);
   validateBinaryTargetEncoding(target);
   for (let index = 0; index < target.length; index++) {
     const code = target.charCodeAt(index);
