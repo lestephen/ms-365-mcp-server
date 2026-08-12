@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
+import { createServer, type AddressInfo, type Server } from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -22,21 +23,22 @@ const repoRoot = path.join(__dirname, '..');
  * Requires `npm run build` first, which CI does before `npm test`.
  */
 
-const PORT = 3198;
-const BASE = `http://127.0.0.1:${PORT}`;
-const RESTRICTED_PORT = 3199;
-const RESTRICTED_BASE = `http://127.0.0.1:${RESTRICTED_PORT}`;
+let base: string;
+let restrictedBase: string;
 const BLOCKED =
   '^(send-mail|send-draft-message|send-shared-mailbox-mail|reply-shared-mailbox-mail|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
 
 let child: ChildProcess;
 let restrictedChild: ChildProcess;
 
-async function authorizeScopes(requested: string | null, base: string = BASE): Promise<string[]> {
+async function authorizeScopes(
+  requested: string | null,
+  targetBase: string = base
+): Promise<string[]> {
   const qs = new URLSearchParams({ redirect_uri: 'http://localhost', state: 'test-state' });
   if (requested !== null) qs.set('scope', requested);
 
-  const res = await fetch(`${base}/authorize?${qs.toString()}`, { redirect: 'manual' });
+  const res = await fetch(`${targetBase}/authorize?${qs.toString()}`, { redirect: 'manual' });
   const location = res.headers.get('location');
   if (!location) throw new Error(`no redirect from /authorize (status ${res.status})`);
 
@@ -63,6 +65,21 @@ function spawnServer(port: number, extraArgs: string[] = []): ChildProcess {
   );
 }
 
+async function reservePort(): Promise<{ port: number; server: Server }> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return { port: (server.address() as AddressInfo).port, server };
+}
+
+async function releasePort(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve()))
+  );
+}
+
 async function waitForServer(base: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   for (;;) {
@@ -78,14 +95,25 @@ async function waitForServer(base: string): Promise<void> {
 }
 
 beforeAll(async () => {
-  child = spawnServer(PORT);
-  restrictedChild = spawnServer(RESTRICTED_PORT, [
+  // Hold both ephemeral ports until immediately before each child starts. This
+  // keeps concurrent Vitest files from selecting the same integration-test port.
+  const primaryReservation = await reservePort();
+  const restrictedReservation = await reservePort();
+  base = `http://127.0.0.1:${primaryReservation.port}`;
+  restrictedBase = `http://127.0.0.1:${restrictedReservation.port}`;
+
+  await releasePort(primaryReservation.server);
+  child = spawnServer(primaryReservation.port);
+  await waitForServer(base);
+
+  await releasePort(restrictedReservation.server);
+  restrictedChild = spawnServer(restrictedReservation.port, [
     '--allowed-scopes',
     'Mail.ReadWrite Calendars.Read Sites.Selected',
     '--extra-scopes',
     'Mail.Send CopilotPackages.ReadWrite.All',
   ]);
-  await Promise.all([waitForServer(BASE), waitForServer(RESTRICTED_BASE)]);
+  await waitForServer(restrictedBase);
 }, 45_000);
 
 afterAll(() => {
@@ -109,7 +137,7 @@ describe('/authorize cannot be talked into a blocked scope', () => {
   });
 
   it('filters blocked extra scopes after allowed scopes on the real route', async () => {
-    const scopes = await authorizeScopes(null, RESTRICTED_BASE);
+    const scopes = await authorizeScopes(null, restrictedBase);
 
     expect(scopes).not.toContain('Mail.Send');
     expect(scopes).toContain('Mail.ReadWrite');
@@ -139,7 +167,7 @@ describe('/authorize cannot be talked into a blocked scope', () => {
     // never sees the filter, so a POST was structurally a second door into the same
     // endpoint. It happens to fail closed today on a redirect_uri check inside the SDK,
     // which is not a guarantee this server controls. Close the door explicitly.
-    const res = await fetch(`${BASE}/authorize`, {
+    const res = await fetch(`${base}/authorize`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
