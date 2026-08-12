@@ -319,8 +319,16 @@ class GraphClient {
       }
 
       const contentLengthHeader = response.headers.get('content-length');
+      const contentEncoding = response.headers.get('content-encoding')?.trim();
       let declaredLength: number | undefined;
-      if (contentLengthHeader !== null && contentLengthHeader.trim() !== '') {
+      // Node fetch transparently decodes compressed response bodies but preserves the
+      // wire Content-Length. It is therefore only a usable allocation bound for an
+      // identity response.
+      if (
+        (!contentEncoding || contentEncoding.toLowerCase() === 'identity') &&
+        contentLengthHeader !== null &&
+        contentLengthHeader.trim() !== ''
+      ) {
         const parsedLength = Number(contentLengthHeader);
         if (Number.isFinite(parsedLength) && parsedLength > maximumBytes) {
           await response.body?.cancel().catch(() => undefined);

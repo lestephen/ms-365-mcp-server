@@ -50,6 +50,10 @@ import {
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
+import {
+  prepareUnencodedPathParameter,
+  refineUnencodedPathParameterSchema,
+} from './lib/unencoded-path-params.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
   nameTokens: Map<string, Set<string>>;
@@ -1196,6 +1200,12 @@ async function executeGraphTool(
       // endpoints.json uses {message-id} but hack.ts extracts :messageId (camelCase) from the path.
       // LLMs may pass "message-id" (kebab) — we normalize so both forms work.
       const camelCaseParamName = paramName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+      const skipEncodingParamName = config?.skipEncoding?.find(
+        (configuredName) =>
+          configuredName === paramName ||
+          configuredName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()) ===
+            camelCaseParamName
+      );
 
       // Look up param definition using normalized name (without $) for OData params,
       // or camelCase equivalent for kebab-case path params
@@ -1210,13 +1220,17 @@ async function executeGraphTool(
         switch (paramDef.type) {
           case 'Path': {
             // Check if this parameter should skip URL encoding (for function-style API calls)
-            const shouldSkipEncoding = config?.skipEncoding?.includes(paramName) ?? false;
+            const shouldSkipEncoding = skipEncodingParamName !== undefined;
             // Use encodeURIComponent but preserve '=' which is valid in path segments (RFC 3986)
             // and commonly appears in Microsoft Graph base64-encoded resource IDs.
             // Without this, IDs like "AAMk...AAA=" become "AAMk...AAA%3D" causing 404 errors.
             // First we encode, then unencode. Crazy, check out https://github.com/Softeria/ms-365-mcp-server/issues/245
             const encodedValue = shouldSkipEncoding
-              ? (paramValue as string)
+              ? prepareUnencodedPathParameter(
+                  config!.pathPattern,
+                  skipEncodingParamName,
+                  paramValue
+                )
               : encodeURIComponent(paramValue as string).replace(/%3D/g, '=');
 
             // Replace both the original param name and the camelCase variant
@@ -1272,7 +1286,9 @@ async function executeGraphTool(
       ) {
         // Fallback: path param not declared in tool.parameters (generated client omits them).
         // Replace placeholder directly so the URL is valid.
-        const encodedValue = encodeURIComponent(paramValue as string).replace(/%3D/g, '=');
+        const encodedValue = skipEncodingParamName
+          ? prepareUnencodedPathParameter(config!.pathPattern, skipEncodingParamName, paramValue)
+          : encodeURIComponent(paramValue as string).replace(/%3D/g, '=');
         path = path
           .replace(`{${paramName}}`, encodedValue)
           .replace(`:${paramName}`, encodedValue)
@@ -1826,6 +1842,26 @@ export function registerGraphTools(
       if (!(pathParamName in paramSchema)) {
         paramSchema[pathParamName] = z.string().describe(describePathParam(pathParamName));
       }
+    }
+
+    // Raw path interpolation is needed for a few Graph function and colon-addressing
+    // routes. Refine their public schemas, then enforce the same rules again during
+    // execution because execute-tool and stale clients do not necessarily pass through
+    // the registered direct-tool schema.
+    for (const paramName of endpointConfig?.skipEncoding ?? []) {
+      const camelCaseParamName = paramName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+      const schemaName = paramSchema[paramName] !== undefined ? paramName : camelCaseParamName;
+      const schema = paramSchema[schemaName];
+      if (!schema) {
+        throw new Error(
+          `skipEncoding parameter ${JSON.stringify(paramName)} has no schema for ${tool.alias}`
+        );
+      }
+      paramSchema[schemaName] = refineUnencodedPathParameterSchema(
+        schema,
+        endpointConfig!.pathPattern,
+        paramName
+      );
     }
 
     if (isFetchAllPagesApplicable(tool)) {

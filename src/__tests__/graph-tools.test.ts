@@ -278,6 +278,87 @@ describe('graph-tools', () => {
     });
   });
 
+  describe('skipEncoding route safety', () => {
+    it('validates generated path-parameter fallbacks before raw interpolation', async () => {
+      mockEndpoints.push(
+        makeEndpoint({
+          alias: 'search-test-drive',
+          path: "/drives/:driveId/search(q=':q')",
+          parameters: [],
+        }),
+        makeEndpoint({
+          alias: 'get-test-range',
+          path: "/drives/:driveId/workbook/range(address=':address')",
+          parameters: [],
+        }),
+        makeEndpoint({
+          alias: 'get-test-row',
+          path: '/drives/:driveId/workbook/rows/itemAt(index=:index)',
+          parameters: [],
+        })
+      );
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'search-test-drive',
+          pathPattern: "/drives/{drive-id}/search(q='{q}')",
+          skipEncoding: ['q'],
+        }),
+        makeConfig({
+          toolName: 'get-test-range',
+          pathPattern: "/drives/{drive-id}/workbook/range(address='{address}')",
+          skipEncoding: ['address'],
+        }),
+        makeConfig({
+          toolName: 'get-test-row',
+          pathPattern: '/drives/{drive-id}/workbook/rows/itemAt(index={index})',
+          skipEncoding: ['index'],
+        }),
+      ];
+      const { registerGraphTools } = await loadModule();
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      registerGraphTools(server as any, graphClient as any);
+
+      await server.tools.get('search-test-drive')!.handler({
+        driveId: 'drive-1',
+        q: "Stephen's quarterly report",
+      });
+      await server.tools.get('get-test-range')!.handler({
+        driveId: 'drive-1',
+        address: 'Sheet1!$A$1:B2',
+      });
+      await server.tools.get('get-test-row')!.handler({ driveId: 'drive-1', index: '12' });
+
+      expect(graphClient.graphRequest.mock.calls.map((call) => call[0])).toEqual([
+        "/drives/drive-1/search(q='Stephen''s quarterly report')",
+        "/drives/drive-1/workbook/range(address='Sheet1!$A$1:B2')",
+        '/drives/drive-1/workbook/rows/itemAt(index=12)',
+      ]);
+
+      graphClient.graphRequest.mockClear();
+      const results = await Promise.all([
+        server.tools.get('search-test-drive')!.handler({
+          driveId: 'drive-1',
+          q: "report')/children",
+        }),
+        server.tools.get('get-test-range')!.handler({
+          driveId: 'drive-1',
+          address: 'A1/B2?route=blocked',
+        }),
+        server.tools.get('get-test-row')!.handler({
+          driveId: 'drive-1',
+          index: '0)/tables',
+        }),
+      ]);
+
+      expect(results.every((result) => result.isError === true)).toBe(true);
+      expect(results.every((result) => result.content[0].text.includes('Unsafe unencoded'))).toBe(
+        true
+      );
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+  });
+
   // ---- 1. $count advanced query mode ----
   describe('$count advanced query mode', () => {
     it('should set ConsistencyLevel: eventual header when $count=true', async () => {
