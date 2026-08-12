@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   encodeCacheKey,
@@ -452,6 +453,76 @@ describe('encrypted token cache storage', () => {
       resetCacheKeyForTests();
       expect(await new DefaultTokenCacheStorage().load('token-cache')).toBe(firstValue);
       expect(await new DefaultTokenCacheStorage().load('selected-account')).toBe(secondValue);
+    });
+
+    it('recovers a key election lock immediately after its owner is killed', async () => {
+      const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        stdio: 'ignore',
+      });
+      await new Promise<void>((resolve, reject) => {
+        owner.once('spawn', resolve);
+        owner.once('error', reject);
+      });
+      const lockPath = path.join(dir, '.cache-key.lock');
+      fs.writeFileSync(
+        lockPath,
+        JSON.stringify({
+          version: 1,
+          pid: owner.pid,
+          createdAt: Date.now(),
+          token: '0123456789abcdef',
+        }),
+        { mode: 0o600 }
+      );
+
+      const ownerClosed = new Promise<void>((resolve) => owner.once('close', () => resolve()));
+      owner.kill('SIGKILL');
+      await ownerClosed;
+
+      await expect(
+        new DefaultTokenCacheStorage().save('token-cache', wrapCache('recovered'))
+      ).resolves.toBeUndefined();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('(dead owner)'));
+    });
+
+    it('preserves a live owner even when its lock metadata is older than the stale threshold', async () => {
+      const lockPath = path.join(dir, '.cache-key.lock');
+      const owner = JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        createdAt: Date.now() - 60_000,
+        token: '0123456789abcdef',
+      });
+      fs.writeFileSync(lockPath, owner, { mode: 0o600 });
+      const old = new Date(Date.now() - 60_000);
+      fs.utimesSync(lockPath, old, old);
+
+      let settled = false;
+      const save = new DefaultTokenCacheStorage()
+        .save('token-cache', wrapCache('waited'))
+        .finally(() => {
+          settled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+
+      expect(settled).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf8')).toBe(owner);
+      fs.unlinkSync(lockPath);
+      await expect(save).resolves.toBeUndefined();
+    });
+
+    it('recovers stale invalid lock metadata before the waiter timeout', async () => {
+      const lockPath = path.join(dir, '.cache-key.lock');
+      fs.writeFileSync(lockPath, 'invalid-owner', { mode: 0o600 });
+      const old = new Date(Date.now() - 20_000);
+      fs.utimesSync(lockPath, old, old);
+
+      await expect(
+        new DefaultTokenCacheStorage().save('token-cache', wrapCache('recovered'))
+      ).resolves.toBeUndefined();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('(stale invalid metadata)'));
     });
 
     // The key file must never appear before its contents: a sibling reading it empty

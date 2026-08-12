@@ -52,7 +52,14 @@ const CACHE_KEY_FILE = '.cache-key';
 const CACHE_KEY_LOCK_FILE = '.cache-key.lock';
 const CACHE_KEY_LOCK_POLL_MS = 25;
 const CACHE_KEY_LOCK_TIMEOUT_MS = 30_000;
-const CACHE_KEY_LOCK_STALE_MS = 10 * 60_000;
+const CACHE_KEY_LOCK_STALE_MS = 10_000;
+
+interface CacheKeyLockOwner {
+  version: 1;
+  pid: number;
+  createdAt: number;
+  token: string;
+}
 
 // Where the cache used to live: inside the installed package. Kept only so an upgrade
 // can move the file out instead of silently forcing a fresh device-code login.
@@ -557,17 +564,23 @@ async function resolveEncryptionKey(): Promise<Buffer> {
  */
 async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise<T> {
   const lockPath = path.join(path.dirname(getCacheKeyPath()), CACHE_KEY_LOCK_FILE);
-  const owner = `${process.pid}:${Date.now()}:${randomBytes(8).toString('hex')}`;
+  const owner: CacheKeyLockOwner = {
+    version: 1,
+    pid: process.pid,
+    createdAt: Date.now(),
+    token: randomBytes(8).toString('hex'),
+  };
+  const serializedOwner = JSON.stringify(owner);
   const deadline = Date.now() + CACHE_KEY_LOCK_TIMEOUT_MS;
 
   ensureParentDir(lockPath);
   while (true) {
     try {
-      fs.writeFileSync(lockPath, owner, { flag: 'wx', mode: 0o600 });
+      fs.writeFileSync(lockPath, serializedOwner, { flag: 'wx', mode: 0o600 });
       break;
     } catch (error) {
       if ((error as { code?: string }).code !== 'EEXIST') throw error;
-      if (removeStaleCacheKeyLock(lockPath)) continue;
+      if (removeOrphanedCacheKeyLock(lockPath)) continue;
       if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for auth cache key election lock at ${lockPath}`);
       }
@@ -578,24 +591,69 @@ async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise
   try {
     return await operation();
   } finally {
-    // Only remove the lock if it is still ours. A very long keychain prompt can outlive
-    // the stale threshold and let another process recover the lock; its replacement must
-    // not be removed when this operation finally returns.
+    // Only remove the lock if it is still ours. Never remove a replacement lock that
+    // another process created after recovering this owner.
     try {
-      if (readFileSync(lockPath, 'utf8') === owner) fs.unlinkSync(lockPath);
+      if (readFileSync(lockPath, 'utf8') === serializedOwner) fs.unlinkSync(lockPath);
     } catch {
       // Already recovered or removed. There is no lock left for this owner to release.
     }
   }
 }
 
-/** Recover a lock whose owner almost certainly exited during initial key creation. */
-function removeStaleCacheKeyLock(lockPath: string): boolean {
-  let owner: string;
+function parseCacheKeyLockOwner(value: string): CacheKeyLockOwner | undefined {
+  try {
+    const parsed = JSON.parse(value) as Partial<CacheKeyLockOwner>;
+    if (
+      parsed.version === 1 &&
+      Number.isSafeInteger(parsed.pid) &&
+      (parsed.pid ?? 0) > 0 &&
+      Number.isFinite(parsed.createdAt) &&
+      typeof parsed.token === 'string' &&
+      /^[0-9a-f]{16}$/i.test(parsed.token)
+    ) {
+      return parsed as CacheKeyLockOwner;
+    }
+  } catch {
+    // Pre-metadata releases wrote pid:timestamp:token. Parse that below so an
+    // upgrade can recover an orphan immediately instead of waiting for staleness.
+  }
+
+  const legacy = /^(\d+):(\d+):([0-9a-f]{16})$/i.exec(value);
+  if (!legacy) return undefined;
+  const pid = Number(legacy[1]);
+  const createdAt = Number(legacy[2]);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(createdAt)) return undefined;
+  return { version: 1, pid, createdAt, token: legacy[3] };
+}
+
+function processIsAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH is the portable Node signal that no such process exists. EPERM and
+    // unknown platform errors mean the process may be alive, so fail closed.
+    return (error as { code?: string }).code !== 'ESRCH';
+  }
+}
+
+/** Recover a dead-owner lock immediately, or malformed lock data once it is stale. */
+function removeOrphanedCacheKeyLock(lockPath: string): boolean {
+  let serializedOwner: string;
+  let recoveryReason: 'dead owner' | 'stale invalid metadata';
   try {
     const stats = fs.statSync(lockPath);
-    if (Date.now() - stats.mtimeMs < CACHE_KEY_LOCK_STALE_MS) return false;
-    owner = readFileSync(lockPath, 'utf8');
+    serializedOwner = readFileSync(lockPath, 'utf8');
+    const owner = parseCacheKeyLockOwner(serializedOwner);
+    if (owner) {
+      if (processIsAlive(owner.pid)) return false;
+      recoveryReason = 'dead owner';
+    } else {
+      if (Date.now() - stats.mtimeMs < CACHE_KEY_LOCK_STALE_MS) return false;
+      recoveryReason = 'stale invalid metadata';
+    }
   } catch {
     return false;
   }
@@ -603,9 +661,9 @@ function removeStaleCacheKeyLock(lockPath: string): boolean {
   try {
     // Recheck the owner immediately before removal so a recovered replacement is not
     // mistaken for the stale file observed above.
-    if (readFileSync(lockPath, 'utf8') !== owner) return false;
+    if (readFileSync(lockPath, 'utf8') !== serializedOwner) return false;
     fs.unlinkSync(lockPath);
-    logger.warn(`Recovered stale auth cache key election lock at ${lockPath}`);
+    logger.warn(`Recovered auth cache key election lock (${recoveryReason}) at ${lockPath}`);
     return true;
   } catch {
     return false;
