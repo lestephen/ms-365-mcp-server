@@ -388,6 +388,54 @@ describe('GraphClient bounded memory downloads', () => {
       global.fetch = originalFetch;
     }
   });
+
+  it('does not trust compressed Content-Length for a decoded response body', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const decodedBytes = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: decodedBytes })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/octet-stream',
+          'content-encoding': 'gzip',
+          // Node fetch preserves the compressed wire length after decoding the body.
+          'content-length': '3',
+        }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      const result = await client.downloadToBuffer('/me/photo/$value', 8);
+
+      expect(result.bytes).toEqual(Buffer.from(decodedBytes));
+      expect(result.allocatedBytes).toBe(8);
+      expect(result.bytes.buffer.byteLength).toBe(8);
+      expect(reader.cancel).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });
 
 describe('GraphClient file downloads', () => {
