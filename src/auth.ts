@@ -529,15 +529,14 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
 
 function resolveAuthScopes(options: AllowedScopeOptions = {}): string[] {
   const toolScopes = buildAllowedScopeDiagnostics(options).effectivePermissions;
-  // Extra scopes are appended verbatim to the token request, independent of the tool
-  // surface and the allowed-scopes filter. They let a user on their own app registration
-  // request scopes no bundled tool needs (e.g. CopilotPackages.ReadWrite.All) and then
-  // drive the matching endpoints via graph-batch.
+  // Extra scopes extend the token request independently of the tool surface and the
+  // allowed-scopes filter. They let a user on their own app registration request scopes
+  // no bundled tool needs (e.g. CopilotPackages.ReadWrite.All) and then drive matching
+  // endpoints via graph-batch. The blocked-tool policy is the exception and runs last:
+  // an extra may not restore a capability that the operator explicitly removed.
   const extraScopes = parseAllowedScopes(options.extraScopes);
-  if (!extraScopes || extraScopes.length === 0) {
-    return toolScopes;
-  }
-  return Array.from(new Set([...toolScopes, ...extraScopes]));
+  const requested = Array.from(new Set([...toolScopes, ...(extraScopes ?? [])]));
+  return filterBlockedToolScopes(options, requested);
 }
 
 /**
@@ -687,6 +686,61 @@ function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
 }
 
 /**
+ * Apply blocked-tool capability policy to any scope source. This is deliberately the
+ * final step for configured allowed scopes, extra scopes, derived alternative groups,
+ * and client-requested authorize scopes. No earlier allow decision may reintroduce a
+ * capability whose last remaining tool was blocked.
+ */
+function filterBlockedToolScopes(options: AllowedScopeOptions, requested: string[]): string[] {
+  if (!options.blockedTools) return requested;
+
+  const prohibited = blockedToolScopes(options);
+  // Use every spelling from every alternative group. This map only supplements the
+  // canonical suffix rules, but restricting it to the selected login group would make
+  // the security result depend on which allowed-scopes alternative happened to win.
+  const catalogueSpelling = new Map<string, string>(
+    buildScopesFromEndpoints(true, undefined, false, undefined, true).map((scope) => [
+      canonicalScope(scope),
+      scope,
+    ])
+  );
+
+  const granted = requested.filter((scope) => {
+    const canonical = canonicalScope(scope);
+
+    // `.default` is catalogue-independent: it asks for every statically consented app
+    // permission, which necessarily includes the ones the operator blocked.
+    if (canonical === '.default') return false;
+
+    const implied = canonicalImpliedScopes(canonical);
+    const catalogued = catalogueSpelling.get(canonical);
+    if (catalogued) {
+      for (const impliedScope of collapseScopeHierarchy([catalogued])) {
+        implied.add(canonicalScope(impliedScope));
+      }
+    }
+
+    for (const impliedScope of implied) {
+      if (prohibited.has(impliedScope)) return false;
+    }
+
+    for (const blocked of prohibited) {
+      if (canonical.startsWith(`${blocked}.`)) return false;
+    }
+
+    return true;
+  });
+
+  if (granted.length !== requested.length) {
+    const grantedSet = new Set(granted);
+    const dropped = requested.filter((scope) => !grantedSet.has(scope));
+    logger.warn(`Ignoring requested scope(s) for blocked tools: ${dropped.join(', ')}`);
+  }
+
+  return granted;
+}
+
+/**
  * Resolve the scopes the /authorize redirect may request, given what the client asked
  * for.
  *
@@ -710,12 +764,21 @@ function resolveAuthorizeScopes(
     return resolveAuthScopes(options);
   }
 
-  const derived = buildScopesFromEndpoints(
-    options.orgMode,
-    options.enabledTools,
-    options.readOnly,
-    // Do not request scopes for tools the operator blocked (#24).
-    options.blockedTools
+  // Preserve the established no-allowlist derivation and its primary-group choices.
+  // Configured extras still join that result, but the block policy runs last across both.
+  const derived = filterBlockedToolScopes(
+    options,
+    Array.from(
+      new Set([
+        ...buildScopesFromEndpoints(
+          options.orgMode,
+          options.enabledTools,
+          options.readOnly,
+          options.blockedTools
+        ),
+        ...(parseAllowedScopes(options.extraScopes) ?? []),
+      ])
+    )
   );
 
   const requested = parseAllowedScopes(clientScope ?? undefined);
@@ -723,10 +786,6 @@ function resolveAuthorizeScopes(
     return derived;
   }
 
-  // Compare canonically. The client controls the spelling, and Entra treats
-  // `mail.send`, `Mail.Send` and `https://graph.microsoft.com/Mail.Send` as the same
-  // permission, so an exact match against bare catalogue names is trivially bypassable.
-  const prohibited = blockedToolScopes(options);
   if (!options.blockedTools) {
     // The operator prohibited nothing, so there is nothing to subtract and upstream's
     // behaviour of honouring the client's request applies unchanged.
@@ -738,55 +797,7 @@ function resolveAuthorizeScopes(
     return requested;
   }
 
-  // Catalogue spelling still matters for SCOPE_HIERARCHY, which is keyed on exact
-  // names and expresses relationships the suffix rules cannot derive. It is a
-  // supplement to the canonical expansion below, never the only line of defence:
-  // a scope absent from the catalogue must still be checked.
-  const catalogueSpelling = new Map<string, string>(
-    buildScopesFromEndpoints(options.orgMode, options.enabledTools, options.readOnly).map(
-      (scope) => [canonicalScope(scope), scope]
-    )
-  );
-
-  const granted = requested.filter((scope) => {
-    const canonical = canonicalScope(scope);
-
-    // `.default` is catalogue-independent: it asks for every statically consented app
-    // permission, which necessarily includes the ones the operator blocked. There is no
-    // narrower reading of it, so it cannot be honoured while a blocklist is in force.
-    if (canonical === '.default') return false;
-
-    // Reject when the scope IS prohibited or IMPLIES something prohibited, so a broader
-    // scope cannot smuggle a blocked one in. Union of the case-insensitive suffix
-    // expansion (works for any scope, catalogued or not) and the catalogue's own
-    // hierarchy map (catches relationships the suffix rules do not encode).
-    const implied = canonicalImpliedScopes(canonical);
-    const catalogued = catalogueSpelling.get(canonical);
-    if (catalogued) {
-      for (const s of collapseScopeHierarchy([catalogued])) implied.add(canonicalScope(s));
-    }
-
-    for (const s of implied) {
-      if (prohibited.has(s)) return false;
-    }
-
-    // Graph appends qualifiers rather than renaming, so a scope that extends a
-    // prohibited one with a further dotted segment is at least as broad:
-    // Mail.Send.Shared covers Mail.Send, Files.ReadWrite.AppFolder sits under
-    // Files.ReadWrite. Enumerating those suffixes one at a time is a losing game, and
-    // each one missed is granted capability, so treat the extension itself as the
-    // signal. The trailing dot matters: Mail.ReadWrite must not match Mail.Read.
-    for (const blocked of prohibited) {
-      if (canonical.startsWith(`${blocked}.`)) return false;
-    }
-
-    return true;
-  });
-
-  if (granted.length !== requested.length) {
-    const dropped = requested.filter((scope) => !granted.includes(scope));
-    logger.warn(`Ignoring client-requested scope(s) for blocked tools: ${dropped.join(', ')}`);
-  }
+  const granted = filterBlockedToolScopes(options, requested);
 
   // Falling back keeps sign-in working when a client asks only for prohibited scopes,
   // rather than requesting an empty scope list.

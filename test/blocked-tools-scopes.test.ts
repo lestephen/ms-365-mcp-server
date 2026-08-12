@@ -21,6 +21,9 @@ describe('blocked tools do not contribute scopes', () => {
     'send-mail',
     'send-draft-message',
     'send-shared-mailbox-mail',
+    'reply-shared-mailbox-mail',
+    'reply-all-shared-mailbox-mail',
+    'forward-shared-mailbox-mail',
     'reply-mail-message',
     'reply-all-mail-message',
     'forward-mail-message',
@@ -66,6 +69,36 @@ describe('blocked tools do not contribute scopes', () => {
     expect(withoutSends).not.toContain('Mail.Send');
   });
 
+  it('filters blocked extras after allowed-scope and alternative-group resolution', () => {
+    const scopes = resolveAuthScopes({
+      orgMode: true,
+      allowedScopes: 'Mail.ReadWrite Sites.Selected',
+      extraScopes: 'Mail.Send CopilotPackages.ReadWrite.All',
+      blockedTools: BLOCKED,
+    });
+
+    expect(scopes).not.toContain('Mail.Send');
+    expect(scopes).toContain('Mail.ReadWrite');
+    expect(scopes).toContain('Sites.Selected');
+    expect(scopes).toContain('CopilotPackages.ReadWrite.All');
+  });
+
+  it('filters fully qualified and broader blocked extras without dropping unrelated extras', () => {
+    const scopes = resolveAuthScopes({
+      orgMode: true,
+      allowedScopes: 'Mail.ReadWrite',
+      extraScopes:
+        'https://graph.microsoft.com/Mail.Send mail.send.shared CopilotPackages.ReadWrite.All',
+      blockedTools: BLOCKED,
+    });
+
+    expect(scopes.map((scope) => scope.toLowerCase())).not.toContain(
+      'https://graph.microsoft.com/mail.send'
+    );
+    expect(scopes.map((scope) => scope.toLowerCase())).not.toContain('mail.send.shared');
+    expect(scopes).toContain('CopilotPackages.ReadWrite.All');
+  });
+
   it('ignores an invalid blocklist pattern rather than dropping every scope', () => {
     // Failing closed here would request no scopes at all and brick sign-in. The
     // guardrail that must fail closed is registration, which compileBlockedToolsRegex
@@ -88,7 +121,7 @@ describe('blocked tools do not contribute scopes', () => {
  */
 describe('authorize-route scopes cannot exceed what the tool surface permits', () => {
   const BLOCKED =
-    '^(send-mail|send-draft-message|send-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
+    '^(send-mail|send-draft-message|send-shared-mailbox-mail|reply-shared-mailbox-mail|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
 
   it('drops a client-requested scope the blocklist prohibits', () => {
     const scopes = resolveAuthorizeScopes(
