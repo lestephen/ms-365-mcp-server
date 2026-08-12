@@ -51,13 +51,16 @@ const CACHE_KEY_FILE = '.cache-key';
 const CACHE_KEY_LOCK_FILE = '.cache-key.lock';
 const CACHE_KEY_LOCK_POLL_MS = 25;
 const CACHE_KEY_LOCK_TIMEOUT_MS = 30_000;
-const CACHE_KEY_LOCK_STALE_MS = 10_000;
+const DEFAULT_CACHE_KEY_LOCK_STALE_MS = 10_000;
+const DEFAULT_CACHE_KEY_LOCK_HEARTBEAT_MS = 2_000;
+
+let cacheKeyLockStaleMs = DEFAULT_CACHE_KEY_LOCK_STALE_MS;
+let cacheKeyLockHeartbeatMs = DEFAULT_CACHE_KEY_LOCK_HEARTBEAT_MS;
 
 interface CacheKeyLockOwner {
-  version: 1;
-  pid: number;
+  version: 2;
+  ownerId: string;
   createdAt: number;
-  token: string;
 }
 
 // Where the cache used to live: inside the installed package. Kept only so an upgrade
@@ -145,6 +148,11 @@ export function getSelectedAccountPath(): string {
 /** Key file sits beside the token cache, so a custom cache path takes it along. */
 export function getCacheKeyPath(): string {
   return path.join(path.dirname(getTokenCachePath()), CACHE_KEY_FILE);
+}
+
+/** The lock protects the global keychain account, so it must not follow a custom cache. */
+export function getCacheKeyLockPath(): string {
+  return path.join(getConfigDir(), CACHE_KEY_LOCK_FILE);
 }
 
 let legacyPathsMigrated = false;
@@ -313,6 +321,13 @@ export function resetCacheKeyForTests(): void {
   legacyKeytarEntries.clear();
   warnedUndecryptable.clear();
   legacyPathsMigrated = false;
+  cacheKeyLockStaleMs = DEFAULT_CACHE_KEY_LOCK_STALE_MS;
+  cacheKeyLockHeartbeatMs = DEFAULT_CACHE_KEY_LOCK_HEARTBEAT_MS;
+}
+
+export function setCacheKeyLockTimingsForTests(staleMs: number, heartbeatMs: number): void {
+  cacheKeyLockStaleMs = staleMs;
+  cacheKeyLockHeartbeatMs = heartbeatMs;
 }
 
 async function clearLegacyKeytarEntry(key: TokenCacheStorageKey): Promise<void> {
@@ -448,12 +463,11 @@ async function resolveEncryptionKey(): Promise<Buffer> {
  * the fresh read and mint. Normal reads and writes never take this lock once a key exists.
  */
 async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise<T> {
-  const lockPath = path.join(path.dirname(getCacheKeyPath()), CACHE_KEY_LOCK_FILE);
+  const lockPath = getCacheKeyLockPath();
   const owner: CacheKeyLockOwner = {
-    version: 1,
-    pid: process.pid,
+    version: 2,
+    ownerId: randomBytes(16).toString('hex'),
     createdAt: Date.now(),
-    token: randomBytes(8).toString('hex'),
   };
   const serializedOwner = JSON.stringify(owner);
   const deadline = Date.now() + CACHE_KEY_LOCK_TIMEOUT_MS;
@@ -473,9 +487,25 @@ async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise
     }
   }
 
+  const heartbeat = setInterval(() => {
+    try {
+      // Refresh only while the owner token is still ours. This lease, rather than PID
+      // visibility, works across containers that share a volume but not a PID namespace.
+      if (readFileSync(lockPath, 'utf8') === serializedOwner) {
+        const now = new Date();
+        fs.utimesSync(lockPath, now, now);
+      }
+    } catch {
+      // A waiter recovered or replaced the lease. The exact-token cleanup below will
+      // leave its replacement alone when this operation eventually finishes.
+    }
+  }, cacheKeyLockHeartbeatMs);
+  heartbeat.unref();
+
   try {
     return await operation();
   } finally {
+    clearInterval(heartbeat);
     // Only remove the lock if it is still ours. Never remove a replacement lock that
     // another process created after recovering this owner.
     try {
@@ -486,59 +516,15 @@ async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise
   }
 }
 
-function parseCacheKeyLockOwner(value: string): CacheKeyLockOwner | undefined {
-  try {
-    const parsed = JSON.parse(value) as Partial<CacheKeyLockOwner>;
-    if (
-      parsed.version === 1 &&
-      Number.isSafeInteger(parsed.pid) &&
-      (parsed.pid ?? 0) > 0 &&
-      Number.isFinite(parsed.createdAt) &&
-      typeof parsed.token === 'string' &&
-      /^[0-9a-f]{16}$/i.test(parsed.token)
-    ) {
-      return parsed as CacheKeyLockOwner;
-    }
-  } catch {
-    // Pre-metadata releases wrote pid:timestamp:token. Parse that below so an
-    // upgrade can recover an orphan immediately instead of waiting for staleness.
-  }
-
-  const legacy = /^(\d+):(\d+):([0-9a-f]{16})$/i.exec(value);
-  if (!legacy) return undefined;
-  const pid = Number(legacy[1]);
-  const createdAt = Number(legacy[2]);
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(createdAt)) return undefined;
-  return { version: 1, pid, createdAt, token: legacy[3] };
-}
-
-function processIsAlive(pid: number): boolean {
-  if (pid === process.pid) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // ESRCH is the portable Node signal that no such process exists. EPERM and
-    // unknown platform errors mean the process may be alive, so fail closed.
-    return (error as { code?: string }).code !== 'ESRCH';
-  }
-}
-
-/** Recover a dead-owner lock immediately, or malformed lock data once it is stale. */
+/** Recover an expired lease without relying on namespace-local PID visibility. */
 function removeOrphanedCacheKeyLock(lockPath: string): boolean {
   let serializedOwner: string;
-  let recoveryReason: 'dead owner' | 'stale invalid metadata';
+  let observedMtimeMs: number;
   try {
     const stats = fs.statSync(lockPath);
+    observedMtimeMs = stats.mtimeMs;
+    if (Date.now() - observedMtimeMs < cacheKeyLockStaleMs) return false;
     serializedOwner = readFileSync(lockPath, 'utf8');
-    const owner = parseCacheKeyLockOwner(serializedOwner);
-    if (owner) {
-      if (processIsAlive(owner.pid)) return false;
-      recoveryReason = 'dead owner';
-    } else {
-      if (Date.now() - stats.mtimeMs < CACHE_KEY_LOCK_STALE_MS) return false;
-      recoveryReason = 'stale invalid metadata';
-    }
   } catch {
     return false;
   }
@@ -546,9 +532,11 @@ function removeOrphanedCacheKeyLock(lockPath: string): boolean {
   try {
     // Recheck the owner immediately before removal so a recovered replacement is not
     // mistaken for the stale file observed above.
+    const currentStats = fs.statSync(lockPath);
+    if (currentStats.mtimeMs !== observedMtimeMs) return false;
     if (readFileSync(lockPath, 'utf8') !== serializedOwner) return false;
     fs.unlinkSync(lockPath);
-    logger.warn(`Recovered auth cache key election lock (${recoveryReason}) at ${lockPath}`);
+    logger.warn(`Recovered expired auth cache key election lease at ${lockPath}`);
     return true;
   } catch {
     return false;
