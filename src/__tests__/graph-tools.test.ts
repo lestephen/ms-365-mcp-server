@@ -969,17 +969,17 @@ describe('graph-tools', () => {
 
       await server.tools.get('search-test-drive')!.handler({
         driveId: 'drive-1',
-        q: "Stephen's quarterly report",
+        q: "Budget#1/? Stephen's report",
       });
       await server.tools.get('get-test-range')!.handler({
         driveId: 'drive-1',
-        address: 'Sheet1!$A$1:B2',
+        address: 'Table1[#All]',
       });
       await server.tools.get('get-test-row')!.handler({ driveId: 'drive-1', index: '12' });
 
       expect(graphClient.graphRequest.mock.calls.map((call) => call[0])).toEqual([
-        "/drives/drive-1/search(q='Stephen''s quarterly report')",
-        "/drives/drive-1/workbook/range(address='Sheet1!$A$1:B2')",
+        "/drives/drive-1/search(q='Budget%231%2F%3F%20Stephen%27%27s%20report')",
+        "/drives/drive-1/workbook/range(address='Table1%5B%23All%5D')",
         '/drives/drive-1/workbook/rows/itemAt(index=12)',
       ]);
 
@@ -999,11 +999,14 @@ describe('graph-tools', () => {
         }),
       ]);
 
-      expect(results.every((result) => result.isError === true)).toBe(true);
-      expect(results.every((result) => result.content[0].text.includes('Unsafe unencoded'))).toBe(
-        true
-      );
-      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      expect(results[0].isError).toBeFalsy();
+      expect(results[1].isError).toBeFalsy();
+      expect(results[2].isError).toBe(true);
+      expect(results[2].content[0].text).toContain('Unsafe unencoded');
+      expect(graphClient.graphRequest.mock.calls.map((call) => call[0])).toEqual([
+        "/drives/drive-1/search(q='report%27%27)%2Fchildren')",
+        "/drives/drive-1/workbook/range(address='A1%2FB2%3Froute%3Dblocked')",
+      ]);
     });
   });
 
@@ -2076,6 +2079,82 @@ describe('graph-tools', () => {
 
       const [, options] = graphClient.graphRequest.mock.calls[0];
       expect(options.headers['Content-Type']).toBe('application/pdf');
+    });
+  });
+
+  describe('binary utility target canonicalization', () => {
+    it.each([
+      ['/me/messages/m1/attachments/a1/$value#ignored', 'raw fragment'],
+      ['/me/messages/m1/attachments/a1/$value?download=1', 'raw query'],
+      ['/me/messages/m1/attachments/a1/$value%23ignored', 'encoded fragment'],
+      ['/me/messages/m1/attachments/a1/$value%2523ignored', 'double-encoded fragment'],
+      ['/me/messages/m1/attachments/a1/$value%3Fdownload=1', 'encoded query'],
+      ['/me/messages%2Fm1/attachments/a1/$value', 'encoded route slash'],
+      ['/drives/d1/root:/safe/%2e%2e/secret:/content', 'encoded dot segment'],
+    ])('rejects a %s target before every binary dispatch (%s)', async (target) => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn(),
+        downloadToFile: vi.fn(),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      const results = await Promise.all([
+        server.tools.get('download-bytes')!.handler({ target }),
+        server.tools.get('download-bytes-to-file')!.handler({
+          target,
+          outputPath: join(tmpdir(), 'should-not-be-created.bin'),
+        }),
+        server.tools.get('get-download-url')!.handler({ target }),
+      ]);
+
+      expect(results.every((result) => result.isError === true)).toBe(true);
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
+      expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+    });
+
+    it('preserves legitimate encoded dot and percent filename data for bounded dispatch', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/drive/root:/Reports/Budget%2525/report%2Epdf:/content/';
+      const canonicalTarget = target.slice(0, -1);
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn().mockResolvedValue({
+          bytes: Buffer.from('pdf'),
+          contentType: 'application/pdf',
+          contentLength: 3,
+        }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as any,
+        graphClient as any,
+        false,
+        undefined,
+        false,
+        undefined,
+        false,
+        [],
+        undefined,
+        true,
+        undefined,
+        'https://mcp.example.com'
+      );
+
+      const result = await server.tools.get('download-bytes')!.handler({ target });
+
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(canonicalTarget, 256 * 1024, {
+        accessToken: undefined,
+      });
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
     });
   });
 

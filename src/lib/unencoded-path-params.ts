@@ -49,24 +49,23 @@ export function unencodedPathParameterError(
   if (typeof value !== 'string') return `${paramName} must be a string`;
   if (value.length === 0) return `${paramName} must not be empty`;
   if (containsControlCharacter(value)) return `${paramName} must not contain control characters`;
-  if (PERCENT_ESCAPE.test(value)) return `${paramName} must not contain percent-encoded bytes`;
 
   const kind = classifyUnencodedPathParameter(pathPattern, paramName);
   switch (kind) {
     case 'quoted-literal':
       // These values are interpolated inside an OData single-quoted path function.
-      // URL delimiters or a slash can escape the route. Apostrophes are valid data and
-      // are doubled by prepareUnencodedPathParameter before interpolation.
-      if (value.includes('/')) return `${paramName} must not contain a slash`;
-      if (URL_DELIMITERS.test(value)) return `${paramName} contains an unsafe URL delimiter`;
+      // Their content is encoded by prepareUnencodedPathParameter, so punctuation is
+      // data rather than URL structure. Only controls remain invalid.
       return undefined;
 
     case 'nonnegative-integer':
+      if (PERCENT_ESCAPE.test(value)) return `${paramName} must not contain percent-encoded bytes`;
       return /^(0|[1-9]\d*)$/.test(value)
         ? undefined
         : `${paramName} must be a nonnegative decimal integer`;
 
     case 'relative-path': {
+      if (PERCENT_ESCAPE.test(value)) return `${paramName} must not contain percent-encoded bytes`;
       if (URL_DELIMITERS.test(value) || value.includes(':')) {
         return `${paramName} contains an unsafe route or URL delimiter`;
       }
@@ -98,7 +97,7 @@ export function prepareUnencodedPathParameter(
 ): string {
   assertSafeUnencodedPathParameter(pathPattern, paramName, value);
   return classifyUnencodedPathParameter(pathPattern, paramName) === 'quoted-literal'
-    ? value.replace(/'/g, "''")
+    ? encodeURIComponent(value.replace(/'/g, "''")).replace(/'/g, '%27')
     : value;
 }
 

@@ -724,13 +724,72 @@ interface DownloadUrlTargetClassification {
   isDriveContentEndpoint: boolean;
 }
 
+interface CanonicalBinaryTarget {
+  target: string;
+  classification: DownloadUrlTargetClassification;
+}
+
+const ENCODED_BINARY_ROUTE_DELIMITER = /%(?:23|2f|3a|3f|5c)/i;
+
+function validateBinaryTargetEncoding(target: string): void {
+  let layer = target;
+  for (let depth = 0; depth < 16; depth++) {
+    if (ENCODED_BINARY_ROUTE_DELIMITER.test(layer)) {
+      throw new Error('target must not contain encoded route, query, or fragment delimiters.');
+    }
+
+    // Encoded dots are ordinary filename data unless decoding makes the whole segment
+    // `.` or `..`, which changes routing semantics. Do not decode the dispatched path.
+    const dotsDecoded = layer.replace(/%2e/gi, '.');
+    if (dotsDecoded.split('/').some((segment) => segment === '.' || segment === '..')) {
+      throw new Error('target must not contain an encoded dot path segment.');
+    }
+
+    // Peel one layer of encoded percent signs so double-encoded delimiters cannot hide.
+    // A literal `%25` filename is fine: it becomes `%` on the next pass and stabilizes.
+    const next = layer.replace(/%25/gi, '%');
+    if (next === layer) return;
+    layer = next;
+  }
+  throw new Error('target contains excessive nested percent encoding.');
+}
+
+/**
+ * Validate and normalize the Graph path once before either classification or dispatch.
+ * URL fragments are not sent by fetch, and encoded route delimiters may be decoded by
+ * an intermediary, so accepting either would let the classifier inspect a different
+ * effective resource from the one Graph receives.
+ */
+function canonicalizeBinaryTarget(target: string): CanonicalBinaryTarget {
+  if (!target.startsWith('/')) {
+    throw new Error('target must be a relative Microsoft Graph path starting with "/".');
+  }
+  if (target.includes('?')) throw new Error('target must not include query parameters.');
+  if (target.includes('#')) throw new Error('target must not include a URL fragment.');
+  if (target.includes('\\')) throw new Error('target must not include a backslash.');
+  validateBinaryTargetEncoding(target);
+  for (let index = 0; index < target.length; index++) {
+    const code = target.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      throw new Error('target must not contain control characters.');
+    }
+  }
+
+  const canonicalTarget = target.replace(/\/+$/, '');
+  if (canonicalTarget === '') throw new Error('target must identify a Microsoft Graph resource.');
+  return {
+    target: canonicalTarget,
+    classification: classifyDownloadUrlTarget(canonicalTarget),
+  };
+}
+
 /**
  * Classify the exact target shapes get-download-url can serve. This is shared with
  * download-bytes so its HTTP inline cutoff is only applied when the suggested
  * out-of-band route really exists.
  */
 function classifyDownloadUrlTarget(target: string): DownloadUrlTargetClassification {
-  const pathPart = target.replace(/\/+$/, '');
+  const pathPart = target;
   const isMeetingRecording =
     /^(\/me|\/users\/[^/]+)\/onlineMeetings\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(
       pathPart
@@ -877,20 +936,21 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      if (!target.startsWith('/')) {
+      let canonical: CanonicalBinaryTarget;
+      try {
+        canonical = canonicalizeBinaryTarget(target);
+      } catch (error) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must be a relative Microsoft Graph path starting with "/", e.g. /me/photo/$value or /drives/{drive-id}/items/{driveItem-id}/content. Absolute URLs are not accepted; if you have an @microsoft.graph.downloadUrl, use the equivalent /content or /$value path instead (Graph 302-redirects to the same bytes).',
-              }),
+              text: JSON.stringify({ error: (error as Error).message }),
             },
           ],
           isError: true,
         };
       }
+      const { target: canonicalTarget, classification } = canonical;
       try {
         const accountModeError = await checkAccountParamInBearerMode(accountParam, authManager);
         if (accountModeError) {
@@ -909,9 +969,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         // /content targets retain the historical response path because HTTP mode does not
         // expose download-bytes-to-file. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to
         // disable the cutoff even for supported targets.
-        const downloadUrlKind = target.includes('?')
-          ? 'unsupported'
-          : classifyDownloadUrlTarget(target).kind;
+        const downloadUrlKind = classification.kind;
         const hasOutOfBandAlternative =
           downloadUrlKind === 'brokerable' || downloadUrlKind === 'drive-item';
         const maxInline =
@@ -920,7 +978,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             : 0;
         if (maxInline > 0) {
           try {
-            const download = await graphClient.downloadToBuffer(target, maxInline, {
+            const download = await graphClient.downloadToBuffer(canonicalTarget, maxInline, {
               accessToken: accountAccessToken,
             });
             return {
@@ -958,7 +1016,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
 
         // Without a usable broker, retain the historical byte-faithful response path.
-        const response = await graphClient.graphRequest(target, {
+        const response = await graphClient.graphRequest(canonicalTarget, {
           accessToken: accountAccessToken,
           rawResponse: true,
         });
@@ -1030,15 +1088,15 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      if (!target.startsWith('/')) {
+      let canonicalTarget: string;
+      try {
+        canonicalTarget = canonicalizeBinaryTarget(target).target;
+      } catch (error) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must be a relative Microsoft Graph path starting with "/", e.g. /me/photo/$value or /drives/{drive-id}/items/{driveItem-id}/content. Absolute URLs are not accepted; if you have an @microsoft.graph.downloadUrl, use the equivalent /content or /$value path instead (Graph 302-redirects to the same bytes).',
-              }),
+              text: JSON.stringify({ error: (error as Error).message }),
             },
           ],
           isError: true,
@@ -1105,7 +1163,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
         // Stream to disk instead of buffering: makeRequest holds the whole file
         // in memory as base64, which dies on big recordings (V8 max string length).
-        const result = await graphClient.downloadToFile(target, outputPath, {
+        const result = await graphClient.downloadToFile(canonicalTarget, outputPath, {
           accessToken: accountAccessToken,
         });
         return {
@@ -1176,38 +1234,21 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      if (!target.startsWith('/')) {
+      let canonical: CanonicalBinaryTarget;
+      try {
+        canonical = canonicalizeBinaryTarget(target);
+      } catch (error) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must be a relative Microsoft Graph path starting with "/", e.g. /drives/{drive-id}/items/{driveItem-id}/content.',
-              }),
+              text: JSON.stringify({ error: (error as Error).message }),
             },
           ],
           isError: true,
         };
       }
-      // Normalize: separate any query string and strip trailing slashes so the /content and
-      // /$value suffix checks are robust to e.g. "/content/" or "/content?select=id".
-      const queryIdx = target.indexOf('?');
-      if (queryIdx >= 0) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must not include query parameters. Pass the drive item /content path or item metadata path without $select, $expand, or other query options.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
-      const classification = classifyDownloadUrlTarget(target);
+      const { classification } = canonical;
       const { pathPart } = classification;
       // Recording content endpoints return authenticated bytes, not a pre-authenticated URL.
       if (classification.kind === 'meeting-recording') {

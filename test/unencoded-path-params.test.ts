@@ -61,20 +61,30 @@ describe('unencoded path parameter policies', () => {
     ]);
   });
 
-  it('allows the syntax each raw interpolation actually needs', () => {
+  it('encodes quoted literal content while preserving supported function syntax', () => {
     expect(
-      unencodedPathParameterError("/drives/{drive-id}/search(q='{q}')", 'q', 'quarterly report')
+      unencodedPathParameterError("/drives/{drive-id}/search(q='{q}')", 'q', 'Budget#1/? 100%')
     ).toBeUndefined();
     expect(
       prepareUnencodedPathParameter("/drives/{drive-id}/search(q='{q}')", 'q', "Stephen's report")
-    ).toBe("Stephen''s report");
+    ).toBe('Stephen%27%27s%20report');
     expect(
-      unencodedPathParameterError(
+      prepareUnencodedPathParameter("/drives/{drive-id}/search(q='{q}')", 'q', 'Budget#1/? 100%')
+    ).toBe('Budget%231%2F%3F%20100%25');
+    expect(
+      prepareUnencodedPathParameter(
         "/workbook/worksheets/{id}/range(address='{address}')",
         'address',
         '$A$1:Z99'
       )
-    ).toBeUndefined();
+    ).toBe('%24A%241%3AZ99');
+    expect(
+      prepareUnencodedPathParameter(
+        "/workbook/worksheets/{id}/range(address='{address}')",
+        'address',
+        'Table1[#All]'
+      )
+    ).toBe('Table1%5B%23All%5D');
     expect(
       unencodedPathParameterError('/rows/itemAt(index={index})', 'index', '12')
     ).toBeUndefined();
@@ -83,17 +93,17 @@ describe('unencoded path parameter policies', () => {
     ).toBeUndefined();
   });
 
-  it('rejects breakout syntax for quoted literals, integer functions, and relative paths', () => {
+  it('encodes quoted breakout syntax and rejects unsafe integer or relative-path syntax', () => {
     expect(
-      unencodedPathParameterError("/drives/{drive-id}/search(q='{q}')", 'q', "report')/children")
-    ).toMatch(/slash/);
+      prepareUnencodedPathParameter("/drives/{drive-id}/search(q='{q}')", 'q', "report')/children")
+    ).toBe('report%27%27)%2Fchildren');
     expect(
-      unencodedPathParameterError(
+      prepareUnencodedPathParameter(
         "/workbook/worksheets/{id}/range(address='{address}')",
         'address',
         'A1)/tables?x=1'
       )
-    ).toMatch(/slash|URL delimiter/);
+    ).toBe('A1)%2Ftables%3Fx%3D1');
     expect(
       unencodedPathParameterError('/rows/itemAt(index={index})', 'index', '0)/tables')
     ).toMatch(/nonnegative decimal integer/);
