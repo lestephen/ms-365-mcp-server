@@ -7,6 +7,7 @@ import {
   presetRequiresOrgMode,
   TOOL_CATEGORIES,
 } from '../src/tool-categories.js';
+import { UTILITY_TOOLS } from '../src/graph-tools.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,6 +57,14 @@ describe('presets from endpoints.json', () => {
     expect(tools).not.toContain('list-mail-folders');
     expect(tools).not.toContain('list-contact-folders');
     expect(tools).not.toContain('list-sharepoint-site-drives');
+  });
+
+  it('personal includes every Excel range formatter referenced by its guidance', () => {
+    const tools = matchedTools('personal');
+    expect(tools).toContain('format-excel-range');
+    expect(tools).toContain('format-excel-range-font');
+    expect(tools).toContain('format-excel-range-fill');
+    expect(tools).toContain('format-excel-range-border');
   });
 
   it('work covers org tools without leaking personal list-* tools', () => {
@@ -115,5 +124,76 @@ describe('presets from endpoints.json', () => {
 
   it('all matches everything', () => {
     expect(matchedTools('all')).toEqual(allToolNames);
+  });
+});
+
+describe('utility tools in presets', () => {
+  const namedPresets = Object.keys(TOOL_CATEGORIES).filter((name) => name !== 'all');
+  const inPreset = (preset: string, name: string) =>
+    new RegExp(TOOL_CATEGORIES[preset].pattern.source, 'i').test(name);
+
+  // Regression guard: utility tools (download-bytes, get-download-url, parse-teams-url) live in
+  // code, not endpoints.json, and used to belong to no preset - so any --preset filter stripped
+  // them. A newly added utility tool without preset membership fails this test.
+  it('every utility tool is reachable from at least one named preset', () => {
+    for (const util of UTILITY_TOOLS) {
+      const reachable = namedPresets.some((preset) => inPreset(preset, util.name));
+      expect(reachable, `utility tool ${util.name} is in no preset`).toBe(true);
+    }
+  });
+
+  // download-bytes and download-bytes-to-file are universal Graph binary readers (base64 vs stream
+  // to disk), so no preset - current or future - should be able to find a resource without being
+  // able to read its bytes.
+  it.each(['download-bytes', 'download-bytes-to-file'])(
+    '%s is available in every preset (universal binary reader)',
+    (tool) => {
+      for (const preset of namedPresets) {
+        expect(inPreset(preset, tool), `${tool} missing from ${preset}`).toBe(true);
+      }
+    }
+  );
+
+  // Pin the full get-download-url membership so every preset exposing a native-download or
+  // brokerable attachment resource keeps an out-of-band path in HTTP mode.
+  it('get-download-url is in every file and attachment preset it declares', () => {
+    for (const preset of [
+      'mail',
+      'calendar',
+      'files',
+      'personal',
+      'work',
+      'search',
+      'outlook',
+      'onedrive',
+    ]) {
+      expect(inPreset(preset, 'get-download-url'), `get-download-url missing from ${preset}`).toBe(
+        true
+      );
+    }
+  });
+
+  it('mail preset exposes both inline and brokered attachment downloads', () => {
+    expect(inPreset('mail', 'download-bytes')).toBe(true);
+    expect(inPreset('mail', 'get-download-url')).toBe(true);
+  });
+
+  it('parse-teams-url stays scoped to teams/work', () => {
+    expect(inPreset('teams', 'parse-teams-url')).toBe(true);
+    expect(inPreset('mail', 'parse-teams-url')).toBe(false);
+    expect(inPreset('files', 'parse-teams-url')).toBe(false);
+  });
+
+  it('scoped utilities do not leak into unrelated presets', () => {
+    // download-bytes is universal, so only the scoped helpers should be absent here.
+    expect(inPreset('contacts', 'get-download-url')).toBe(false);
+    expect(inPreset('onenote', 'parse-teams-url')).toBe(false);
+  });
+
+  it('combined presets surface the union of their utility tools', () => {
+    const re = new RegExp(getCombinedPresetPattern(['files', 'teams']), 'i');
+    expect(re.test('download-bytes')).toBe(true);
+    expect(re.test('get-download-url')).toBe(true);
+    expect(re.test('parse-teams-url')).toBe(true);
   });
 });

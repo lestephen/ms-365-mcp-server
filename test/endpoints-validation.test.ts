@@ -144,6 +144,15 @@ describe('endpoints.json validation', () => {
     expect(endpoint?.llmTip).toContain('call download-bytes');
   });
 
+  it('should route large mail attachments to the out-of-band broker', () => {
+    const endpoint = endpoints.find((e) => e.toolName === 'list-mail-attachments');
+
+    expect(endpoint, 'list-mail-attachments should exist').toBeDefined();
+    expect(endpoint?.llmTip).toContain('For large attachments, call get-download-url');
+    expect(endpoint?.llmTip).toContain('/$value');
+    expect(endpoint?.llmTip).toContain('For small inline reads, call download-bytes');
+  });
+
   it('should document the @mention shape on the Teams send/reply tools', () => {
     const mentionTools = [
       'send-chat-message',

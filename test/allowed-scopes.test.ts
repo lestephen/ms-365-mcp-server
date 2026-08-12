@@ -211,7 +211,11 @@ describe('allowed scope HTTP behavior', () => {
       expect.anything(),
       false,
       [],
-      'Mail.Read'
+      'Mail.Read',
+      // httpMode, then unset --blocked-tools and effective public URL
+      true,
+      undefined,
+      undefined
     );
   });
 });

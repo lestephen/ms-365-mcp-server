@@ -40,6 +40,9 @@ build/Release
 
 # Dependency directories
 node_modules/
+# Also match a symlink of that name: the directory-only form above does not, and a
+# worktree convenience symlink was committed once because of it.
+node_modules
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -140,6 +143,8 @@ dist
 # Token cache files
 .token-cache.json
 .selected-account.json
+.cache-key
+*.migrated
 
 # Server logs (may contain PII and token metadata)
 logs/
@@ -161,3 +166,6 @@ CLAUDE.md
 
 # Finder metadata files
 .DS_Store
+
+# Tako review-loop working state
+.tako/

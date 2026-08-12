@@ -126,6 +126,7 @@ interface AllowedScopeOptions {
   readOnly?: boolean;
   allowedScopes?: string;
   extraScopes?: string;
+  blockedTools?: string;
 }
 
 interface DisabledToolScope {
@@ -279,12 +280,36 @@ function collapseRedundantScopes(scopes: string[]): string[] {
   return Array.from(scopesSet);
 }
 
+/**
+ * Compile a --blocked-tools pattern for scope derivation.
+ *
+ * Deliberately non-fatal, unlike the registration-time guardrail: failing closed here
+ * would request no scopes at all and break sign-in. By the time scopes are built the
+ * pattern has already been validated at startup (parseArgs, and
+ * compileBlockedToolsRegex during registration), so an unparseable value at this point
+ * means a caller passed one directly.
+ */
+function compileBlockedForScopes(pattern?: string): RegExp | undefined {
+  if (!pattern) return undefined;
+  try {
+    return new RegExp(pattern, 'i');
+  } catch {
+    logger.error(
+      `Invalid blocked-tools regex pattern for scope derivation: ${pattern}. Deriving scopes without it.`
+    );
+    return undefined;
+  }
+}
+
 function buildScopesFromEndpoints(
   includeWorkAccountScopes: boolean = false,
   enabledToolsPattern?: string,
-  readOnly: boolean = false
+  readOnly: boolean = false,
+  blockedToolsPattern?: string,
+  includeAlternativeGroups: boolean = false
 ): string[] {
   const scopesSet = new Set<string>();
+  const blockedToolsRegex = compileBlockedForScopes(blockedToolsPattern);
 
   // Create regex for tool filtering if pattern is provided
   let enabledToolsRegex: RegExp | undefined;
@@ -307,6 +332,12 @@ function buildScopesFromEndpoints(
       }
     }
 
+    // A blocked tool is unreachable, so requesting its scopes would grant the token a
+    // capability the operator prohibited (#24).
+    if (blockedToolsRegex && blockedToolsRegex.test(endpoint.toolName)) {
+      return;
+    }
+
     // Skip endpoints that don't match the tool filter
     if (enabledToolsRegex && !enabledToolsRegex.test(endpoint.toolName)) {
       return;
@@ -317,9 +348,10 @@ function buildScopesFromEndpoints(
       return;
     }
 
-    getEndpointLoginScopes(endpoint, includeWorkAccountScopes).forEach((scope) =>
-      scopesSet.add(scope)
-    );
+    const endpointScopes = includeAlternativeGroups
+      ? getEndpointScopeGroups(endpoint, includeWorkAccountScopes).flat()
+      : getEndpointLoginScopes(endpoint, includeWorkAccountScopes);
+    endpointScopes.forEach((scope) => scopesSet.add(scope));
   });
 
   const scopes = collapseRedundantScopes(Array.from(scopesSet));
@@ -418,6 +450,8 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
     }
   }
 
+  const blockedToolsRegex = compileBlockedForScopes(options.blockedTools);
+
   const normalToolScopes = new Set<string>();
   const effectiveToolScopes = new Set<string>();
   // Union of every group's scopes for passing tools, used only to judge whether an
@@ -426,6 +460,9 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
   const disabledTools: DisabledToolScope[] = [];
 
   for (const endpoint of endpoints.default) {
+    // Same reasoning as buildScopesFromEndpoints: a blocked tool must not pull its
+    // scopes onto the token.
+    if (blockedToolsRegex && blockedToolsRegex.test(endpoint.toolName)) continue;
     if (
       !endpointMatchesNormalToolSurface(
         endpoint,
@@ -492,15 +529,279 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
 
 function resolveAuthScopes(options: AllowedScopeOptions = {}): string[] {
   const toolScopes = buildAllowedScopeDiagnostics(options).effectivePermissions;
-  // Extra scopes are appended verbatim to the token request, independent of the tool
-  // surface and the allowed-scopes filter. They let a user on their own app registration
-  // request scopes no bundled tool needs (e.g. CopilotPackages.ReadWrite.All) and then
-  // drive the matching endpoints via graph-batch.
+  // Extra scopes extend the token request independently of the tool surface and the
+  // allowed-scopes filter. They let a user on their own app registration request scopes
+  // no bundled tool needs (e.g. CopilotPackages.ReadWrite.All) and then drive matching
+  // endpoints via graph-batch. The blocked-tool policy is the exception and runs last:
+  // an extra may not restore a capability that the operator explicitly removed.
   const extraScopes = parseAllowedScopes(options.extraScopes);
-  if (!extraScopes || extraScopes.length === 0) {
-    return toolScopes;
+  const requested = Array.from(new Set([...toolScopes, ...(extraScopes ?? [])]));
+  return filterBlockedToolScopes(options, requested);
+}
+
+/**
+ * Reduce a scope to the permission name Entra will actually read.
+ *
+ * A scope may name its resource in several ways: `Mail.Send`,
+ * `https://graph.microsoft.com/Mail.Send`, the same on a sovereign-cloud host, or the
+ * resource app-id GUID form `00000003-0000-0000-c000-000000000000/Mail.Send`. In every
+ * case the permission is the segment after the LAST '/', and no Graph permission name
+ * contains a slash. Taking that segment therefore handles the resource URI, the GUID
+ * form, a doubled prefix and a stray double slash uniformly.
+ *
+ * Stripping a single `scheme://host/` prefix instead, which is what this did first, let
+ * the GUID form and `https://graph.microsoft.com//Mail.Send` straight through.
+ *
+ * Case is preserved here; canonicalScope lowercases for comparison.
+ */
+function stripScopeResourceUri(scope: string): string {
+  // Trailing slashes come off first. Without this, `Mail.Send/` puts the last slash at
+  // the end and reduces to an empty permission name, which matches nothing prohibited
+  // and sails through.
+  const trimmed = scope.trim().replace(/\/+$/, '');
+  const lastSlash = trimmed.lastIndexOf('/');
+  return lastSlash === -1 ? trimmed : trimmed.slice(lastSlash + 1);
+}
+
+/** Comparison form for a scope: no resource, no case, no surrounding space. */
+function canonicalScope(scope: string): string {
+  return stripScopeResourceUri(scope).toLowerCase();
+}
+
+/**
+ * Expand a canonical (lowercased) scope to everything it implies.
+ *
+ * `lowerScopesFor` matches `.ReadWrite`/`.Read.All` suffixes case-sensitively and reads
+ * SCOPE_HIERARCHY by exact key, so it silently expands to nothing on a lowercased
+ * string. Re-casing via the endpoint catalogue only helps for scopes the catalogue
+ * carries: `Files.ReadWrite.All` is a real delegated permission that is not in
+ * endpoints.json, so `files.readwrite.all` expanded to nothing, matched nothing
+ * prohibited, and was granted while the correctly-cased spelling was refused.
+ *
+ * These rules mirror lowerScopesFor, applied to canonical strings so casing cannot
+ * defeat them.
+ */
+function canonicalImpliedScopes(canonical: string): Set<string> {
+  const seen = new Set<string>([canonical]);
+  const pending = [canonical];
+
+  while (pending.length > 0) {
+    const scope = pending.pop()!;
+    const lower: string[] = [];
+
+    if (scope.endsWith('.fullcontrol.all')) {
+      // Not one of lowerScopesFor's rules, and deliberately so: this function feeds a
+      // security filter, where missing an implication grants capability. FullControl.All
+      // subsumes Manage.All and ReadWrite.All, which then cascade through the rules below.
+      const stem = scope.slice(0, -'.fullcontrol.all'.length);
+      lower.push(`${stem}.manage.all`, `${stem}.readwrite.all`, `${stem}.read.all`);
+    } else if (scope.endsWith('.readwrite.all')) {
+      const stem = scope.slice(0, -'.readwrite.all'.length);
+      lower.push(`${stem}.read.all`, `${stem}.readwrite`, `${stem}.read`);
+    } else if (scope.endsWith('.readwrite.shared')) {
+      lower.push(`${scope.slice(0, -'.readwrite.shared'.length)}.read.shared`);
+    } else if (scope.endsWith('.readwrite')) {
+      lower.push(`${scope.slice(0, -'.readwrite'.length)}.read`);
+    } else if (scope.endsWith('.read.all')) {
+      lower.push(`${scope.slice(0, -'.read.all'.length)}.read`);
+    }
+
+    for (const implied of lower) {
+      if (!seen.has(implied)) {
+        seen.add(implied);
+        pending.push(implied);
+      }
+    }
   }
-  return Array.from(new Set([...toolScopes, ...extraScopes]));
+
+  return seen;
+}
+
+/**
+ * Canonical scopes that exist only because a tool the operator blocked would have
+ * needed them. The difference between deriving with and without the blocklist IS the
+ * prohibited set, so this stays correct as the endpoint catalogue changes.
+ *
+ * Two things this got wrong, both of which quietly emptied the difference:
+ *
+ * `--read-only` was applied to BOTH sides. Read-only already strips write scopes from
+ * the unblocked side, so the delta cancelled and a tightening flag made the filter
+ * LOOSER: Mail.Send was refused under `--blocked-tools` alone and granted once
+ * `--read-only` was added. Both sides are now derived with read-only off, so the
+ * blocklist delta is whatever the blocklist itself removes, independent of it.
+ *
+ * Only the permitted side was hierarchy-expanded. buildScopesFromEndpoints emits the
+ * collapsed higher form (`Mail.ReadWrite`) and never the bare lower one, so `Mail.Read`
+ * was never in the unblocked side and never came out prohibited: with the entire
+ * catalogue blocked a client could still be granted Mail.Read, Files.Read and
+ * Calendars.Read. Both sides are expanded now.
+ *
+ * `--enabled-tools` was on both sides for the same reason, and had the same effect: with
+ * a preset that does not overlap the blocklist (say `--preset files` while blocking mail
+ * tools) both runs iterate an identical endpoint set, the delta is empty, and the whole
+ * filter degrades to a pass-through while the operator believes a blocklist is in force.
+ *
+ * So the delta is now measured over the FULL catalogue and reflects exactly what the
+ * blocklist removes. Dropping the preset here does not make out-of-preset scopes
+ * prohibited: they appear on both sides of the difference and cancel, so a client may
+ * still request them, which is the upstream behaviour test/allowed-scopes.test.ts pins.
+ */
+function blockedToolScopes(options: AllowedScopeOptions): Set<string> {
+  if (!options.blockedTools) {
+    return new Set();
+  }
+
+  // Both sides derive from the WIDEST possible surface: the blocklist must be the only
+  // difference, or an unrelated restriction cancels it out. That has now bitten once per
+  // flag, so all three are pinned here rather than forwarded from options.
+  //
+  // org mode was the third. buildScopesFromEndpoints skips endpoints declaring only
+  // workScopes when it is off, so those scopes appeared on neither side and cancelled: a
+  // non-org deployment with the whole catalogue blocked still handed out Sites.Read.All
+  // and Group.Read.All. Widening cannot over-reject, because any scope an unblocked tool
+  // still needs appears on both sides and cancels.
+  const ORG_MODE_ON = true;
+  const FULL_CATALOGUE = undefined;
+  const READ_ONLY_OFF = false;
+
+  const permitted = new Set(
+    collapseScopeHierarchy(
+      buildScopesFromEndpoints(
+        ORG_MODE_ON,
+        FULL_CATALOGUE,
+        READ_ONLY_OFF,
+        options.blockedTools,
+        true
+      )
+    ).map(canonicalScope)
+  );
+
+  return new Set(
+    collapseScopeHierarchy(
+      buildScopesFromEndpoints(ORG_MODE_ON, FULL_CATALOGUE, READ_ONLY_OFF, undefined, true)
+    )
+      .map(canonicalScope)
+      .filter((scope) => !permitted.has(scope))
+  );
+}
+
+/**
+ * Apply blocked-tool capability policy to any scope source. This is deliberately the
+ * final step for configured allowed scopes, extra scopes, derived alternative groups,
+ * and client-requested authorize scopes. No earlier allow decision may reintroduce a
+ * capability whose last remaining tool was blocked.
+ */
+function filterBlockedToolScopes(options: AllowedScopeOptions, requested: string[]): string[] {
+  if (!options.blockedTools) return requested;
+
+  const prohibited = blockedToolScopes(options);
+  // Use every spelling from every alternative group. This map only supplements the
+  // canonical suffix rules, but restricting it to the selected login group would make
+  // the security result depend on which allowed-scopes alternative happened to win.
+  const catalogueSpelling = new Map<string, string>(
+    buildScopesFromEndpoints(true, undefined, false, undefined, true).map((scope) => [
+      canonicalScope(scope),
+      scope,
+    ])
+  );
+
+  const granted = requested.filter((scope) => {
+    const canonical = canonicalScope(scope);
+
+    // `.default` is catalogue-independent: it asks for every statically consented app
+    // permission, which necessarily includes the ones the operator blocked.
+    if (canonical === '.default') return false;
+
+    const implied = canonicalImpliedScopes(canonical);
+    const catalogued = catalogueSpelling.get(canonical);
+    if (catalogued) {
+      for (const impliedScope of collapseScopeHierarchy([catalogued])) {
+        implied.add(canonicalScope(impliedScope));
+      }
+    }
+
+    for (const impliedScope of implied) {
+      if (prohibited.has(impliedScope)) return false;
+    }
+
+    for (const blocked of prohibited) {
+      if (canonical.startsWith(`${blocked}.`)) return false;
+    }
+
+    return true;
+  });
+
+  if (granted.length !== requested.length) {
+    const grantedSet = new Set(granted);
+    const dropped = requested.filter((scope) => !grantedSet.has(scope));
+    logger.warn(`Ignoring requested scope(s) for blocked tools: ${dropped.join(', ')}`);
+  }
+
+  return granted;
+}
+
+/**
+ * Resolve the scopes the /authorize redirect may request, given what the client asked
+ * for.
+ *
+ * A client-supplied `scope` is still honoured, which is deliberate upstream behaviour:
+ * an operator who has constrained nothing lets the client choose. What a client may NOT
+ * do is name a scope that exists only to serve a tool the operator blocked. Forwarding
+ * the list verbatim let a caller ask for Mail.Send while every send tool was blocked,
+ * and the bearer token the client receives is usable directly against Graph, outside
+ * the tool surface the blocklist guards (#24).
+ *
+ * So the filter is narrow on purpose: it subtracts exactly the blocked-tool scopes and
+ * leaves every other client request alone.
+ */
+function resolveAuthorizeScopes(
+  options: AllowedScopeOptions = {},
+  clientScope?: string | null
+): string[] {
+  // An explicit --allowed-scopes already pins the surface, and that path never consulted
+  // the client's request. Unchanged.
+  if (parseAllowedScopes(options.allowedScopes) !== undefined) {
+    return resolveAuthScopes(options);
+  }
+
+  // Preserve the established no-allowlist derivation and its primary-group choices.
+  // Configured extras still join that result, but the block policy runs last across both.
+  const derived = filterBlockedToolScopes(
+    options,
+    Array.from(
+      new Set([
+        ...buildScopesFromEndpoints(
+          options.orgMode,
+          options.enabledTools,
+          options.readOnly,
+          options.blockedTools
+        ),
+        ...(parseAllowedScopes(options.extraScopes) ?? []),
+      ])
+    )
+  );
+
+  const requested = parseAllowedScopes(clientScope ?? undefined);
+  if (!requested || requested.length === 0) {
+    return derived;
+  }
+
+  if (!options.blockedTools) {
+    // The operator prohibited nothing, so there is nothing to subtract and upstream's
+    // behaviour of honouring the client's request applies unchanged.
+    //
+    // Gate on the FLAG, not on the delta being non-empty. An empty delta means the
+    // blocklist happened to remove no scope, not that policy is absent, and `.default`
+    // below must still be refused: it ignores the catalogue entirely and asks for every
+    // consented permission, so no amount of delta reasoning bounds it.
+    return requested;
+  }
+
+  const granted = filterBlockedToolScopes(options, requested);
+
+  // Falling back keeps sign-in working when a client asks only for prohibited scopes,
+  // rather than requesting an empty scope list.
+  return granted.length > 0 ? granted : derived;
 }
 
 function buildScopeDiagnostics(
@@ -1308,6 +1609,7 @@ export {
   getSelectedAccountPath,
   parseAllowedScopes,
   resolveAuthScopes,
+  resolveAuthorizeScopes,
   wrapCache,
   unwrapCache,
   pickNewest,

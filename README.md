@@ -27,6 +27,7 @@ This server supports multiple Microsoft cloud environments:
 - Comprehensive Microsoft 365 service integration
 - Read-only mode support for safe operations
 - Tool filtering for granular access control
+- [Tool presets](#tool-presets) and [dynamic discovery](#dynamic-tool-discovery) to shrink the tool surface and token usage
 
 ## Output Format: JSON vs TOON
 
@@ -94,7 +95,7 @@ MS365_MCP_OUTPUT_FORMAT=toon npx @softeria/ms-365-mcp-server
 
 ## Supported Services & Tools
 
-The server provides 200+ tools covering most of the Microsoft Graph API surface. Each tool maps 1-to-1 to a Graph API endpoint and is defined declaratively in [`src/endpoints.json`](src/endpoints.json).
+The server provides 300+ tools covering most of the Microsoft Graph API surface. Each tool maps 1-to-1 to a Graph API endpoint and is defined declaratively in [`src/endpoints.json`](src/endpoints.json).
 
 ### Personal Account Tools (Available by default)
 
@@ -148,6 +149,21 @@ CLI value takes precedence over `MS365_MCP_ALLOWED_SCOPES`; if neither is set, t
 
 Scope coverage is hierarchy-aware: for example, `Mail.ReadWrite` covers tools that require `Mail.Read`, and `Files.ReadWrite.All` covers tools that require `Files.Read`.
 
+SharePoint supports two enterprise permission models:
+
+- Broad tenant scopes such as `Sites.Read.All`, `Sites.ReadWrite.All`, and `Sites.Manage.All`.
+- Microsoft Graph `Sites.Selected`, where SharePoint site access is granted to the app on specific site collections and Graph evaluates the signed-in user's own permissions at request time.
+
+The default org-mode behavior continues to request the broad SharePoint scopes used by existing deployments. Enterprises that want selected-site SharePoint access can set an allowlist containing `Sites.Selected` instead of broad `Sites.*.All` scopes. Direct site/list/item tools that target an explicit SharePoint site can run with `Sites.Selected`; tenant-wide SharePoint discovery and search tools still require broad SharePoint scopes.
+
+```bash
+npx @softeria/ms-365-mcp-server \
+  --org-mode \
+  --read-only \
+  --enabled-tools 'sharepoint|site|drive|planner' \
+  --allowed-scopes 'User.Read Files.Read Notes.Read Tasks.Read Sites.Selected'
+```
+
 In HTTP mode, OAuth discovery advertises the effective filtered permissions so clients request the same consent surface. On-Behalf-Of mode (`--obo`) still advertises `api://<clientId>/access_as_user` for protected-resource metadata; `--allowed-scopes` does not override OBO.
 
 ### Requesting extra scopes
@@ -185,7 +201,9 @@ account features (email, calendar, OneDrive, etc.) are available.
 To access shared mailboxes, you need:
 
 1. **Organization mode**: Shared mailbox tools require `--org-mode` flag (work/school accounts only)
-2. **Delegated permissions**: `Mail.Read.Shared` or `Mail.Send.Shared` scopes
+2. **Delegated permissions**: `Mail.Read.Shared` to read, `Mail.ReadWrite.Shared` to create, update or move
+   messages, `Mail.Send.Shared` to send, reply or forward, and `Calendars.Read.Shared` for the shared calendar
+   tools
 3. **Exchange permissions**: The signed-in user must have been granted access to the shared mailbox
 4. **Usage**: Use the shared mailbox's email address as the `user-id` parameter in the shared mailbox tools
 
@@ -424,6 +442,11 @@ registration:
 
 With these configured, the server will use your custom Azure app instead of the built-in one.
 
+> **Note**: `.env` is read from the directory the server is started in, and the MCP client decides what
+> that is. Only `MS365_MCP_CLIENT_ID`, `MS365_MCP_CLIENT_SECRET`, `MS365_MCP_TENANT_ID` and
+> `MS365_MCP_CLOUD_TYPE` are read from it. Every other variable listed above must be set in your shell
+> or MCP client config; anything else found in a `.env` is ignored with a warning on stderr.
+
 #### 3. Bring Your Own Token (BYOT)
 
 If you are running ms-365-mcp-server as part of a larger system that manages Microsoft OAuth tokens externally, you can
@@ -509,7 +532,7 @@ Pinning is opt-in and local-MSAL only:
 
 ## Tool Presets
 
-To reduce initial connection overhead, use preset tool categories instead of loading all 90+ tools:
+To reduce initial connection overhead and token usage, use preset tool categories instead of loading the full tool set:
 
 ```bash
 npx @softeria/ms-365-mcp-server --preset mail
@@ -518,7 +541,7 @@ npx @softeria/ms-365-mcp-server --list-presets  # See all available presets
 
 Available presets: `mail`, `calendar`, `files`, `personal`, `work`, `excel`, `contacts`, `tasks`, `onenote`, `search`, `users`, `outlook`, `onedrive`, `teams`, `all`
 
-Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`).
+Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`). The universal binary reader `download-bytes` is included in every preset, so whatever an app returns (a file, an attachment, a photo, a recording) can always be fetched; `get-download-url` (a pre-authenticated URL for drive/SharePoint files) rides with the drive-backed presets. So a preset that can find a file can always read its bytes.
 
 The `outlook`, `onedrive` and `teams` presets are app-scoped: they expose exactly one Microsoft app. Use these for "expose exactly one app" deployments:
 
@@ -532,7 +555,7 @@ npx @softeria/ms-365-mcp-server --org-mode --preset teams
 
 ## Dynamic Tool Discovery
 
-Instead of loading all 90+ tools upfront, use dynamic discovery so the LLM finds and loads tools only when it needs them:
+Instead of loading every tool upfront, use dynamic discovery so the LLM finds and loads tools only when it needs them:
 
 ```bash
 npx @softeria/ms-365-mcp-server --discovery
@@ -595,7 +618,7 @@ Environment variables:
 - `MS365_MCP_CLOUD_TYPE=global|china`: Microsoft cloud environment (alternative to --cloud flag)
 - `LOG_LEVEL`: Set logging level (default: 'info')
 - `SILENT=true|1`: Disable console output
-- `MS365_MCP_REDACT_PII=true|1`: Scrub JWTs, Bearer headers, OAuth token fields, and email addresses from log messages before they are written (default: disabled). Useful when logs are shipped to a central store or shared host.
+- `MS365_MCP_REDACT_PII=false|0`: Disable scrubbing of JWTs, Bearer headers, OAuth token fields, and email addresses from log messages (default: enabled). The server handles live Graph bearer tokens, so redaction is on unless you opt out for fully verbose local debugging.
 - `MS365_MCP_CLIENT_ID`: Custom Azure app client ID (defaults to built-in app)
 - `MS365_MCP_TENANT_ID`: Custom tenant ID (defaults to 'common' for multi-tenant). **Personal Microsoft accounts should set this to `consumers`** - as of June 2026, refresh tokens issued via the default 'common' authority are rejected at the first refresh, so sessions die roughly an hour after login
 - `MS365_MCP_OAUTH_TOKEN`: Pre-existing OAuth token for Microsoft Graph API (BYOT method)
@@ -609,11 +632,23 @@ Environment variables:
 
 ## Token Storage
 
-Authentication tokens are stored using the OS credential store (via keytar) when available. If keytar is not installed or fails (common on headless Linux), the server falls back to file-based storage.
+Authentication tokens are stored in an encrypted file (AES-256-GCM). Only the 32-byte encryption key goes to the OS credential store via keytar.
 
-**Default fallback paths** are relative to the installed package directory. This means tokens can be lost when the package is reinstalled or updated via npm.
+The cache itself is too big for some credential stores to hold - a Windows Credential Manager blob caps out at 2560 bytes and a real token cache is several times that, so on Windows the write could never succeed. A key is 32 bytes regardless of how many accounts are signed in, so this works the same way on every platform.
 
-To persist tokens across updates, set custom paths outside the package directory:
+**Default paths** are in the per-user config directory:
+
+| Platform | Location                                                                  |
+| -------- | ------------------------------------------------------------------------- |
+| Windows  | `%APPDATA%\ms-365-mcp-server\`                                            |
+| macOS    | `~/Library/Application Support/ms-365-mcp-server/`                        |
+| Linux    | `$XDG_CONFIG_HOME/ms-365-mcp-server/` (or `~/.config/ms-365-mcp-server/`) |
+
+Earlier versions defaulted to a path inside the installed package, which under `npx` resolves to a content-hashed cache directory that `npm cache clean` or a version bump throws away. A cache still sitting in the package directory is moved to the new location on first run.
+
+That covers global and local installs, and `npx` when the hash has not changed. It cannot reach a cache left behind in a _previous_ `npx` hash directory, so upgrading an `npx` install one last time means signing in again. Adopting a cache from another directory would mean trusting a directory this package cannot prove it wrote, which is not worth one saved sign-in.
+
+Override the paths if you need to:
 
 ```bash
 export MS365_MCP_TOKEN_CACHE_PATH="$HOME/.config/ms365-mcp/.token-cache.json"
@@ -622,7 +657,11 @@ export MS365_MCP_SELECTED_ACCOUNT_PATH="$HOME/.config/ms365-mcp/.selected-accoun
 
 Parent directories are created automatically. Files are written with `0600` permissions.
 
-> **Security note**: File-based token storage writes sensitive credentials to disk. Ensure the chosen directory has appropriate access controls. The OS credential store (keytar) is preferred when available.
+**Without a credential store** (headless Linux, most containers) the key is written to `.cache-key` next to the cache file, with `0600` permissions. That stops the tokens showing up in a stray `cat`, a backup or an accidental commit. It does not protect against anyone who can already read the directory - the key is right there. Use `MS365_MCP_AUTH_CACHE_COMMAND` below if you need the cache in a real secret store.
+
+If the cache cannot be decrypted - key lost, keychain locked, file modified - you are asked to sign in again rather than the server failing to start. The cache file is left exactly as it was: not deleted, and not overwritten by that new sign-in either. A keychain that is merely locked usually reads fine on the next start, and the cache is still there when it does.
+
+The cost is that the new session is not saved while this lasts, so each start asks you to sign in again. If the key is genuinely gone and the cache will never open, delete `.token-cache.json` to start over - the log says so, and names the path.
 
 > **Hosted/sandboxed environments** (e.g. Anthropic Cowork): Set `MS365_MCP_TOKEN_CACHE_PATH` and `MS365_MCP_SELECTED_ACCOUNT_PATH` to a persistent mount so tokens survive between sessions.
 
