@@ -178,6 +178,8 @@ function extractBatchMetadata(data: unknown): Partial<GraphResponseMetadata> {
 
 export interface GraphBufferResult extends GraphDownloadResult {
   bytes: Buffer;
+  /** Bytes retained by the backing allocation, which can exceed logical contentLength. */
+  allocatedBytes: number;
 }
 
 export class GraphDownloadSizeLimitError extends Error {
@@ -424,45 +426,60 @@ class GraphClient {
       }
 
       const contentLengthHeader = response.headers.get('content-length');
+      let declaredLength: number | undefined;
       if (contentLengthHeader !== null && contentLengthHeader.trim() !== '') {
-        const declaredLength = Number(contentLengthHeader);
-        if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+        const parsedLength = Number(contentLengthHeader);
+        if (Number.isFinite(parsedLength) && parsedLength > maximumBytes) {
           await response.body?.cancel().catch(() => undefined);
           throw new GraphDownloadSizeLimitError(
-            `Microsoft Graph content is ${declaredLength} bytes, exceeding the configured limit of ${maximumBytes} bytes.`,
+            `Microsoft Graph content is ${parsedLength} bytes, exceeding the configured limit of ${maximumBytes} bytes.`,
             maximumBytes,
-            declaredLength
+            parsedLength
           );
         }
+        if (Number.isSafeInteger(parsedLength) && parsedLength >= 0) declaredLength = parsedLength;
       }
       if (!response.body) {
         throw new Error('Microsoft Graph returned an empty response body');
       }
 
       const reader = response.body.getReader();
-      const chunks: Buffer[] = [];
+      // One unpooled backing allocation avoids both the chunk array and Buffer.concat's
+      // second full-size allocation. With no trustworthy Content-Length, allocate the
+      // caller's already-reserved maximum. The returned view retains this allocation,
+      // so allocatedBytes lets the broker keep charging the real memory until expiry.
+      const allocatedBytes = declaredLength ?? maximumBytes;
+      const destination = Buffer.allocUnsafeSlow(allocatedBytes);
       let contentLength = 0;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          contentLength += value.byteLength;
-          if (contentLength > maximumBytes) {
+          const nextLength = contentLength + value.byteLength;
+          if (nextLength > maximumBytes) {
             await reader.cancel().catch(() => undefined);
             throw new GraphDownloadSizeLimitError(
               `Microsoft Graph content exceeded the configured limit of ${maximumBytes} bytes while streaming.`,
               maximumBytes,
-              contentLength
+              nextLength
             );
           }
-          chunks.push(Buffer.from(value));
+          if (nextLength > allocatedBytes) {
+            await reader.cancel().catch(() => undefined);
+            throw new Error(
+              `Microsoft Graph response exceeded its declared Content-Length of ${allocatedBytes} bytes while streaming (${nextLength} bytes received).`
+            );
+          }
+          destination.set(value, contentLength);
+          contentLength = nextLength;
         }
       } finally {
         reader.releaseLock();
       }
 
       return {
-        bytes: Buffer.concat(chunks, contentLength),
+        bytes: destination.subarray(0, contentLength),
+        allocatedBytes,
         contentType: response.headers.get('content-type') || 'application/octet-stream',
         contentLength,
       };
