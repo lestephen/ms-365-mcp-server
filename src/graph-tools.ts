@@ -305,12 +305,26 @@ interface CanonicalBinaryTarget {
   classification: DownloadUrlTargetClassification;
 }
 
-const ENCODED_BINARY_ROUTE_DELIMITER = /%(?:23|2f|3a|3f|5c)/i;
+const ENCODED_BINARY_ROUTE_DELIMITER = /%(?:2f|3a|3f|5c)/i;
+const ENCODED_FRAGMENT_DELIMITER = /%23/i;
+
+function encodedHashesAreDrivePathData(target: string): boolean {
+  const drivePath = /\/root:\/(.+):(?:\/content)?\/?$/i.exec(target);
+  if (!drivePath) return !ENCODED_FRAGMENT_DELIMITER.test(target);
+
+  const filenameStart = drivePath.index + '/root:/'.length;
+  const filenameEnd = filenameStart + drivePath[1].length;
+  for (const match of target.matchAll(/%23/gi)) {
+    const index = match.index;
+    if (index < filenameStart || index >= filenameEnd) return false;
+  }
+  return true;
+}
 
 function validateBinaryTargetEncoding(target: string): void {
   let layer = target;
   for (let depth = 0; depth < 16; depth++) {
-    if (ENCODED_BINARY_ROUTE_DELIMITER.test(layer)) {
+    if (ENCODED_BINARY_ROUTE_DELIMITER.test(layer) || !encodedHashesAreDrivePathData(layer)) {
       throw new Error('target must not contain encoded route, query, or fragment delimiters.');
     }
 

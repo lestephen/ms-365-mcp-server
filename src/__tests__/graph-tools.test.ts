@@ -1471,6 +1471,100 @@ describe('graph-tools', () => {
       });
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
     });
+
+    it('preserves an encoded hash inside a drive root path for every binary utility', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/drive/root:/Reports/Budget%231.pdf:/content';
+      const itemTarget = '/me/drive/root:/Reports/Budget%231.pdf:';
+      const outputDir = mkdtempSync(join(tmpdir(), 'binary-hash-'));
+      const outputPath = join(outputDir, 'Budget#1.pdf');
+      const graphClient = {
+        graphRequest: vi.fn().mockImplementation(async (_path: string, options?: any) => {
+          if (options?.rawResponse) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ contentType: 'application/pdf', contentBytes: 'cGRm' }),
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  '@microsoft.graph.downloadUrl': 'https://download.example/file',
+                  name: 'Budget#1.pdf',
+                }),
+              },
+            ],
+          };
+        }),
+        downloadToFile: vi
+          .fn()
+          .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      try {
+        const byteResult = await server.tools.get('download-bytes')!.handler({ target });
+        const fileResult = await server.tools.get('download-bytes-to-file')!.handler({
+          target,
+          outputPath,
+          confirm: true,
+        });
+        const urlResult = await server.tools.get('get-download-url')!.handler({ target });
+
+        expect(byteResult.isError).toBeFalsy();
+        expect(fileResult.isError).toBeFalsy();
+        expect(urlResult.isError).toBeFalsy();
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
+          accessToken: undefined,
+          rawResponse: true,
+        });
+        expect(graphClient.downloadToFile).toHaveBeenCalledWith(target, outputPath, {
+          accessToken: undefined,
+        });
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(itemTarget, {
+          accessToken: undefined,
+          forceJsonOutput: true,
+        });
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('still rejects an encoded fragment after a drive path-addressed resource', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToFile: vi.fn(),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      const target = '/me/drive/root:/Reports/Budget.pdf:/content%23ignored';
+
+      const results = await Promise.all([
+        server.tools.get('download-bytes')!.handler({ target }),
+        server.tools.get('download-bytes-to-file')!.handler({
+          target,
+          outputPath: join(tmpdir(), 'should-not-be-created.bin'),
+          confirm: true,
+        }),
+        server.tools.get('get-download-url')!.handler({ target }),
+      ]);
+
+      expect(results.every((result) => result.isError === true)).toBe(true);
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+    });
   });
 
   // ---- 9. download-bytes utility tool ----
