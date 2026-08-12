@@ -246,7 +246,9 @@ interface UtilityTool {
   searchKeywords?: string;
   buildSchema: (ctx: UtilityToolContext) => Record<string, z.ZodTypeAny>;
   execute: (params: Record<string, unknown>, ctx: UtilityToolContext) => Promise<CallToolResult>;
-  readOnlyHint?: boolean;
+  // This is policy, not merely an MCP annotation. Registration, read-only
+  // filtering, confirmation, and annotations must all derive from this value.
+  mutatesState: boolean;
   openWorldHint?: boolean;
   // When true, this tool writes to the server's local filesystem and is only
   // registered in stdio mode — never in HTTP/OAuth mode, where a remote client
@@ -440,7 +442,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     path: 'tool:parse-teams-url',
     description:
       'Converts any Teams meeting URL format (short /meet/, full /meetup-join/, or recap ?threadId=) into a standard joinWebUrl. Use this before list-online-meetings when the user provides a recap or short URL.',
-    readOnlyHint: true,
+    mutatesState: false,
     openWorldHint: false,
     buildSchema: () => ({
       url: z.string().describe('Teams meeting URL in any format'),
@@ -470,7 +472,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     path: 'tool:download-bytes',
     description:
       'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large content, prefer get-download-url, which returns native pre-authenticated URLs for drive/SharePoint files and brokered URLs for supported attachments when the broker is configured.',
-    readOnlyHint: true,
+    mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
       const schema: Record<string, z.ZodTypeAny> = {
@@ -615,7 +617,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     // get-download-url own the high-signal "drive"/"sharepoint" search terms.
     description:
       'Write authenticated Microsoft Graph byte content to a local file on the server, returning { path, contentType, bytesWritten } instead of base64. Handles mail attachments, meeting recordings, profile photos, and Teams hosted content. Writes to an absolute outputPath and never overwrites an existing file. Stdio mode only, not available over HTTP. Prefer get-download-url when available because it returns native or brokered URLs for fully out-of-band download; download-bytes-to-file remains the out-of-band path for meeting recordings.',
-    readOnlyHint: true,
+    mutatesState: true,
     openWorldHint: true,
     stdioOnly: true,
     buildSchema: (ctx) => {
@@ -768,7 +770,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       'download file download drive file download onedrive file sharepoint file download large drive file large sharepoint file large file out-of-band download pre-authenticated url',
     description:
       "Resolve a short-lived download URL for Microsoft Graph binary content. Drive/SharePoint file content returns Graph's native pre-authenticated URL. When the EKI out-of-band broker is configured, mail attachments and other /$value byte endpoints are fetched server-side and served through a short-lived tokenless broker URL. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType?, brokered? }. NOTE: meeting recordings do NOT expose a pre-authenticated URL — Graph offers no such link for them; use download-bytes for small ones or a recording-specific tool where available.",
-    readOnlyHint: true,
+    mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
       const schema: Record<string, z.ZodTypeAny> = {
@@ -985,6 +987,17 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
 ];
 
+function buildUtilitySchema(
+  utility: UtilityTool,
+  ctx: UtilityToolContext
+): Record<string, z.ZodTypeAny> {
+  const schema = utility.buildSchema(ctx);
+  if (utility.mutatesState) {
+    schema.confirm = z.boolean().describe(CONFIRM_PARAM_DESCRIPTION).optional();
+  }
+  return schema;
+}
+
 function registerUtilityToolWithMcp(
   server: McpServer,
   utility: UtilityTool,
@@ -993,10 +1006,11 @@ function registerUtilityToolWithMcp(
   server.tool(
     utility.name,
     utility.description,
-    utility.buildSchema(ctx),
+    buildUtilitySchema(utility, ctx),
     {
       title: utility.name,
-      readOnlyHint: utility.readOnlyHint ?? true,
+      readOnlyHint: !utility.mutatesState,
+      destructiveHint: utility.mutatesState,
       openWorldHint: utility.openWorldHint ?? true,
     },
     async (params) => executeUtilityTool(utility, params, ctx, 'direct')
@@ -1011,6 +1025,27 @@ async function executeUtilityTool(
 ): Promise<CallToolResult> {
   const startedAt = Date.now();
   const elapsed = () => (Date.now() - startedAt) / 1000;
+  if (isConfirmGateEnabled() && utility.mutatesState && params.confirm !== true) {
+    logger.warn(`Refusing destructive utility ${utility.name}: missing confirm: true`);
+    const response: CallToolResult = {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            error: 'confirmation_required',
+            tool: utility.name,
+            method: utility.method.toUpperCase(),
+            destructive: true,
+            message:
+              'This tool modifies user data or local state. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
+          }),
+        },
+      ],
+      isError: true,
+    };
+    recordToolCall(utility.name, route, 'blocked', elapsed());
+    return response;
+  }
   try {
     const response = await utility.execute(params, ctx);
     recordToolCall(utility.name, route, response.isError ? 'error' : 'ok', elapsed());
@@ -2076,7 +2111,7 @@ export function registerGraphTools(
     publicBaseUrl,
   };
   for (const utility of UTILITY_TOOLS) {
-    if (readOnly && !utility.readOnlyHint) continue;
+    if (readOnly && utility.mutatesState) continue;
     if (httpMode && utility.stdioOnly) continue;
     if (enabledToolsMatches && !enabledToolsMatches(utility.name)) continue;
     if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
@@ -2337,7 +2372,7 @@ export function registerDiscoveryTools(
     );
   }
   const utilityTools = UTILITY_TOOLS.filter((u) => {
-    if (readOnly && !u.readOnlyHint) return false;
+    if (readOnly && u.mutatesState) return false;
     if (httpMode && u.stdioOnly) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
     if (blockedToolsRegex && blockedToolsRegex.test(u.name)) return false;
@@ -2474,7 +2509,10 @@ export function registerDiscoveryTools(
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
-        const schema = describeUtilityToolSchema(utility, utilityCtx);
+        const schema = describeUtilityToolSchema(
+          { ...utility, buildSchema: () => buildUtilitySchema(utility, utilityCtx) },
+          utilityCtx
+        );
         return {
           content: [
             {
