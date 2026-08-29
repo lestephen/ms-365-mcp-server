@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs';
 import { describe, expect, it } from 'vitest';
 import {
   buildScopesFromEndpoints,
@@ -16,6 +17,17 @@ import {
  * passthrough (that is the other half of #24) but it does mean the token cannot
  * perform the operation the operator prohibited.
  */
+/** Tool names whose scope groups mention `scope`, read from the real catalogue. */
+function OWNERS_OF(scope: string): string[] {
+  const raw = JSON.parse(
+    readFileSync(new URL('../src/endpoints.json', import.meta.url), 'utf8')
+  ) as Array<Record<string, unknown>>;
+  const list = Array.isArray(raw) ? raw : ((raw as never as { endpoints: [] }).endpoints ?? []);
+  return list
+    .filter((e) => JSON.stringify([e.scopes ?? null, e.workScopes ?? null]).includes(scope))
+    .map((e) => String(e.toolName));
+}
+
 describe('blocked tools do not contribute scopes', () => {
   const SENDS = [
     'send-mail',
@@ -27,6 +39,9 @@ describe('blocked tools do not contribute scopes', () => {
     'reply-mail-message',
     'reply-all-mail-message',
     'forward-mail-message',
+    // Upstream v0.148.0 (6ea0428). POST /users/{id}/messages/{id}/send: the
+    // shared-mailbox twin of send-draft-message, so it belongs in "every send tool".
+    'send-shared-mailbox-draft',
   ];
   const BLOCKED = `^(${SENDS.join('|')})$`;
 
@@ -121,7 +136,7 @@ describe('blocked tools do not contribute scopes', () => {
  */
 describe('authorize-route scopes cannot exceed what the tool surface permits', () => {
   const BLOCKED =
-    '^(send-mail|send-draft-message|send-shared-mailbox-mail|reply-shared-mailbox-mail|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
+    '^(send-mail|send-draft-message|send-shared-mailbox-mail|send-shared-mailbox-draft|reply-shared-mailbox-mail|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail|reply-mail-message|reply-all-mail-message|forward-mail-message)$';
 
   it('drops a client-requested scope the blocklist prohibits', () => {
     const scopes = resolveAuthorizeScopes(
@@ -325,12 +340,21 @@ describe('authorize-route scopes cannot exceed what the tool surface permits', (
     });
 
     it('refuses scopes from every alternative permission group', () => {
-      const options = { orgMode: true, blockedTools: '^(list-chats|get-chat)$' };
+      // The owners are derived from the live catalogue rather than hard-coded. This test
+      // used to pin list-chats/get-chat, whose workScopes were
+      // [['Chat.Read'], ['Chat.ReadBasic']]; upstream v0.148.0 flattened them to
+      // ['Chat.ReadBasic'], leaving the fixture with no second group to exercise and the
+      // assertion passing for the wrong reason. Deriving the fixture keeps the property
+      // under test even when upstream reshapes the data again.
+      const owners = OWNERS_OF('Sites.Selected');
+      expect(owners.length).toBeGreaterThan(0);
+      const options = { orgMode: true, blockedTools: `^(${owners.join('|')})$` };
 
-      // Chat.Read remains valid for other unblocked chat tools. Chat.ReadBasic is unique
-      // to these endpoints and must still be removed even though it is their second group.
-      expect(resolveAuthorizeScopes(options, 'Chat.Read')).toContain('Chat.Read');
-      expect(resolveAuthorizeScopes(options, 'Chat.ReadBasic')).not.toContain('Chat.ReadBasic');
+      // Sites.Read.All is these endpoints' FIRST group and is declared by unblocked tools
+      // too, so it survives. Sites.Selected is their SECOND group and is declared nowhere
+      // else, so blocking every owner must remove it.
+      expect(resolveAuthorizeScopes(options, 'Sites.Read.All')).toContain('Sites.Read.All');
+      expect(resolveAuthorizeScopes(options, 'Sites.Selected')).not.toContain('Sites.Selected');
     });
   });
 

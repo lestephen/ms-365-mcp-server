@@ -483,45 +483,6 @@ function thrownErrorAuditFields(error: unknown): Pick<AuditEvent, 'http_status' 
   };
 }
 
-async function executeUtilityTool(
-  utility: UtilityTool,
-  ctx: UtilityToolContext,
-  params: Record<string, unknown>
-): Promise<CallToolResult> {
-  const requestId = randomUUID();
-  const startTime = Date.now();
-  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
-
-  try {
-    const response = await utility.execute(params, ctx);
-    auditLog({
-      event: 'tool.call',
-      request_id: requestId,
-      user_principal_name: upn,
-      tool: utility.name,
-      http_method: utility.method.toUpperCase(),
-      status: response.isError ? 'error' : 'success',
-      duration_ms: Date.now() - startTime,
-      ...graphResponseAuditFields(response),
-    });
-    return response;
-  } catch (error) {
-    const err = error as { name?: string };
-    auditLog({
-      event: 'tool.call',
-      request_id: requestId,
-      user_principal_name: upn,
-      tool: utility.name,
-      http_method: utility.method.toUpperCase(),
-      status: 'error',
-      duration_ms: Date.now() - startTime,
-      error_type: err?.name || 'Error',
-      ...thrownErrorAuditFields(error),
-    });
-    throw error;
-  }
-}
-
 interface UtilityToolContext {
   graphClient: GraphClient;
   authManager?: AuthManager;
@@ -598,7 +559,8 @@ function deniedToolPolicyForGraphTool(
 function collectDeniedToolPolicies(options: {
   readOnly: boolean;
   orgMode: boolean;
-  enabledToolsRegex?: RegExp;
+  // A predicate, not a RegExp: --direct-tools intersection yields a function.
+  enabledToolsMatches?: (name: string) => boolean;
   allowedScopesValue?: string;
   httpMode: boolean;
 }): Map<string, DeniedToolPolicy> {
@@ -616,7 +578,7 @@ function collectDeniedToolPolicies(options: {
       continue;
     }
 
-    if (options.enabledToolsRegex && !options.enabledToolsRegex.test(tool.alias)) {
+    if (options.enabledToolsMatches && !options.enabledToolsMatches(tool.alias)) {
       deniedTools.set(
         tool.alias,
         deniedToolPolicyForGraphTool(tool, endpointConfig, 'tool_allowlist')
@@ -640,9 +602,9 @@ function collectDeniedToolPolicies(options: {
   }
 
   for (const utility of UTILITY_TOOLS) {
-    if (options.readOnly && !utility.readOnlyHint) continue;
+    if (options.readOnly && utility.mutatesState) continue;
     if (options.httpMode && utility.stdioOnly) continue;
-    if (options.enabledToolsRegex && !options.enabledToolsRegex.test(utility.name)) {
+    if (options.enabledToolsMatches && !options.enabledToolsMatches(utility.name)) {
       deniedTools.set(utility.name, {
         toolName: utility.name,
         reason: 'tool_allowlist',
@@ -703,6 +665,8 @@ function installDeniedToolAuditHandler(
 
     return original(request, extra);
   });
+}
+
 const DEFAULT_DOWNLOAD_BYTES_MAX_INLINE = 256 * 1024;
 
 function downloadBytesMaxInline(): number {
@@ -1479,8 +1443,14 @@ async function executeUtilityTool(
   ctx: UtilityToolContext,
   route: ToolRoute
 ): Promise<CallToolResult> {
+  // Merged at the v0.148.0 rebase: upstream grew its own executeUtilityTool for audit
+  // logging while this fork had one for Prometheus metrics, both wrapping the same
+  // utility.execute. This is the union, on EKI's signature because `route` must survive
+  // (a utility reached through execute-tool is not a direct call).
+  const requestId = randomUUID();
   const startedAt = Date.now();
   const elapsed = () => (Date.now() - startedAt) / 1000;
+  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
   if (isConfirmGateEnabled() && utility.mutatesState && params.confirm !== true) {
     logger.warn(`Refusing destructive utility ${utility.name}: missing confirm: true`);
     const response: CallToolResult = {
@@ -1505,9 +1475,31 @@ async function executeUtilityTool(
   try {
     const response = await utility.execute(params, ctx);
     recordToolCall(utility.name, route, response.isError ? 'error' : 'ok', elapsed());
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: response.isError ? 'error' : 'success',
+      duration_ms: Date.now() - startedAt,
+      ...graphResponseAuditFields(response),
+    });
     return response;
   } catch (error) {
+    const err = error as { name?: string };
     recordToolCall(utility.name, route, 'error', elapsed());
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: 'error',
+      duration_ms: Date.now() - startedAt,
+      error_type: err?.name || 'Error',
+      ...thrownErrorAuditFields(error),
+    });
     throw error;
   }
 }
@@ -2335,7 +2327,7 @@ export function registerGraphTools(
   const deniedTools = collectDeniedToolPolicies({
     readOnly,
     orgMode,
-    enabledToolsRegex,
+    enabledToolsMatches,
     allowedScopesValue,
     httpMode,
   });
@@ -2848,7 +2840,7 @@ export function registerDiscoveryTools(
   const deniedTools = collectDeniedToolPolicies({
     readOnly,
     orgMode,
-    enabledToolsRegex,
+    enabledToolsMatches: enabledToolsRegex ? (name) => enabledToolsRegex.test(name) : undefined,
     allowedScopesValue,
     httpMode,
   });

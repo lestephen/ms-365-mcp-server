@@ -490,6 +490,7 @@ class GraphClient {
         allocatedBytes,
         contentType: response.headers.get('content-type') || 'application/octet-stream',
         contentLength,
+        httpStatus: response.status,
       };
     } catch (error) {
       logger.error('Microsoft Graph bounded download failed:', error);
