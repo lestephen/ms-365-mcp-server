@@ -485,9 +485,28 @@ class GraphClient {
         reader.releaseLock();
       }
 
+      // Right-size before returning. `destination` is the caller's whole maximum whenever
+      // Content-Length was absent or untrustworthy, and a subarray RETAINS its backing
+      // allocation, so handing that view out charges the broker the maximum for every
+      // download regardless of the file's real size (EnviroKinetics/ms365-mcp#61). Node's
+      // fetch sends `accept-encoding: gzip, deflate` by default, so Graph responses are
+      // typically compressed and declaredLength is undefined on essentially every
+      // brokered download - this is the normal path, not an edge case.
+      //
+      // Copy rather than re-account: charging bytes.length while still holding the
+      // oversized allocation would turn a refusal into an OOM.
+      let bytes = destination.subarray(0, contentLength);
+      let retainedBytes = allocatedBytes;
+      if (contentLength < allocatedBytes) {
+        const exact = Buffer.allocUnsafeSlow(contentLength);
+        destination.copy(exact, 0, 0, contentLength);
+        bytes = exact;
+        retainedBytes = contentLength;
+      }
+
       return {
-        bytes: destination.subarray(0, contentLength),
-        allocatedBytes,
+        bytes,
+        allocatedBytes: retainedBytes,
         contentType: response.headers.get('content-type') || 'application/octet-stream',
         contentLength,
         httpStatus: response.status,
