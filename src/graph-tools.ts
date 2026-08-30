@@ -8,11 +8,13 @@ import {
   recordBlockedOperation,
   recordDiscoveryStage,
   recordToolCall,
+  metricsEnabled,
   type ToolRoute,
   type ToolOutcome,
   initBlockedOperationSeries,
 } from './metrics.js';
 import {
+  allOperationMatchers,
   buildBlockedOperationMatchers,
   describeBlockedSubrequests,
   findBlockedSubrequests,
@@ -1583,10 +1585,14 @@ function describeParamsForLog(params: Record<string, unknown>): string {
  * resource ids.
  */
 function recordBatchSubrequestsFor(body: unknown, blocked: BlockedOperationMatcher[]): void {
+  // recordBatchSubrequest already no-ops when metrics are off, but it does so AFTER this
+  // function has labelled every subrequest, so all of that work was thrown away in the
+  // default configuration (EnviroKinetics/ms365-mcp#54). Check before doing it.
+  if (!metricsEnabled()) return;
   if (!body || typeof body !== 'object') return;
   const requests = (body as { requests?: unknown }).requests;
   if (!Array.isArray(requests)) return;
-  const all = buildBlockedOperationMatchers('.*');
+  const all = allOperationMatchers();
   for (const entry of requests) {
     if (!entry || typeof entry !== 'object') continue;
     const sub = entry as { method?: unknown; url?: unknown };

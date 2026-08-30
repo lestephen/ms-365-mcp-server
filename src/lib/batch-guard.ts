@@ -216,3 +216,21 @@ export function describeBlockedSubrequests(hits: BlockedSubrequest[]): string {
     'through graph-batch does not bypass it. Remove those subrequests and retry.'
   );
 }
+
+/**
+ * The matcher list for the WHOLE catalogue, built once.
+ *
+ * `buildBlockedOperationMatchers('.*')` compiles a path regex for all 330 endpoints, and
+ * endpointsData is read once at module load, so the result can never change between
+ * calls. Rebuilding it per graph-batch call was pure waste
+ * (EnviroKinetics/ms365-mcp#54).
+ */
+let allMatchersMemo: BlockedOperationMatcher[] | undefined;
+export function allOperationMatchers(): BlockedOperationMatcher[] {
+  return (allMatchersMemo ??= buildBlockedOperationMatchers('.*'));
+}
+
+/** Test seam: drop the memo so a test can observe a rebuild. */
+export function resetOperationMatcherMemoForTests(): void {
+  allMatchersMemo = undefined;
+}

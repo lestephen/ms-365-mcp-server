@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildBlockedOperationMatchers, findBlockedSubrequests } from '../src/lib/batch-guard.js';
+import {
+  allOperationMatchers,
+  buildBlockedOperationMatchers,
+  findBlockedSubrequests,
+  resetOperationMatcherMemoForTests,
+} from '../src/lib/batch-guard.js';
 
 /**
  * EnviroKinetics/ms365-mcp#24, narrowed to the route that actually matters.
@@ -180,5 +185,27 @@ describe('findBlockedSubrequests', () => {
     expect(
       findBlockedSubrequests({ requests: [{ method: 'POST', url: '/me/sendMail' }] }, [])
     ).toEqual([]);
+  });
+});
+
+describe('full-catalogue matcher list is built once (#54)', () => {
+  it('returns the same array instance on repeated calls', () => {
+    resetOperationMatcherMemoForTests();
+    const first = allOperationMatchers();
+    const second = allOperationMatchers();
+
+    // Identity, not deep equality: the point is that no rebuild happened. Each rebuild
+    // compiles a path regex for every endpoint in the catalogue, and this ran once per
+    // graph-batch call.
+    expect(second).toBe(first);
+    expect(first.length).toBeGreaterThan(300);
+  });
+
+  it('matches what an explicit catch-all build produces', () => {
+    resetOperationMatcherMemoForTests();
+    const memoized = allOperationMatchers().map((m) => `${m.method} ${m.toolName}`);
+    const rebuilt = buildBlockedOperationMatchers('.*').map((m) => `${m.method} ${m.toolName}`);
+
+    expect(memoized).toEqual(rebuilt);
   });
 });
