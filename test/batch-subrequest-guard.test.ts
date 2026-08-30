@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildBlockedOperationMatchers, findBlockedSubrequests } from '../src/lib/batch-guard.js';
+import {
+  allOperationMatchers,
+  buildBlockedOperationMatchers,
+  findBlockedSubrequests,
+  resetOperationMatcherMemoForTests,
+} from '../src/lib/batch-guard.js';
 
 /**
  * EnviroKinetics/ms365-mcp#24, narrowed to the route that actually matters.
@@ -180,5 +185,55 @@ describe('findBlockedSubrequests', () => {
     expect(
       findBlockedSubrequests({ requests: [{ method: 'POST', url: '/me/sendMail' }] }, [])
     ).toEqual([]);
+  });
+});
+
+describe('full-catalogue matcher list is built once (#54)', () => {
+  it('returns the same array instance on repeated calls', () => {
+    resetOperationMatcherMemoForTests();
+    const first = allOperationMatchers();
+    const second = allOperationMatchers();
+
+    // Identity, not deep equality: the point is that no rebuild happened. Each rebuild
+    // compiles a path regex for every endpoint in the catalogue, and this ran once per
+    // graph-batch call.
+    expect(second).toBe(first);
+    expect(first.length).toBeGreaterThan(300);
+  });
+
+  it('matches what an explicit catch-all build produces', () => {
+    resetOperationMatcherMemoForTests();
+    const memoized = allOperationMatchers().map((m) => `${m.method} ${m.toolName}`);
+    const rebuilt = buildBlockedOperationMatchers('.*').map((m) => `${m.method} ${m.toolName}`);
+
+    expect(memoized).toEqual(rebuilt);
+  });
+});
+
+describe('version-prefixed subrequest URLs cannot dodge the blocklist (#24)', () => {
+  const SENDS = '^(send|reply|reply-all|forward)-[a-z-]*(mail|draft)[a-z-]*$';
+  const matchers = buildBlockedOperationMatchers(SENDS);
+  const refuses = (method: string, url: string) =>
+    findBlockedSubrequests({ requests: [{ method, url }] }, matchers).length > 0;
+
+  // A batch subrequest URL may be absolute or relative, and a relative one may still
+  // carry the API version. The prefix used to be stripped only for the absolute form, so
+  // /v1.0/me/sendMail reached Graph while /me/sendMail and the absolute form were both
+  // refused. That is a bypass of the whole point of this guard.
+  it.each([
+    ['/me/sendMail'],
+    ['https://graph.microsoft.com/v1.0/me/sendMail'],
+    ['/v1.0/me/sendMail'],
+    ['/beta/me/sendMail'],
+    ['v1.0/me/sendMail'],
+    ['/V1.0/me/sendMail'],
+    ['/v1.0/users/someone@example.com/messages/AAA/send'],
+  ])('refuses POST %s', (url) => {
+    expect(refuses('POST', url)).toBe(true);
+  });
+
+  it('does not over-block: a read of the same resource still passes', () => {
+    expect(refuses('GET', '/me/messages')).toBe(false);
+    expect(refuses('GET', '/v1.0/me/messages')).toBe(false);
   });
 });

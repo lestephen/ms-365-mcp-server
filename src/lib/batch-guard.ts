@@ -1,4 +1,5 @@
 import { readFileSync } from 'fs';
+import { stripGraphVersionSegment } from './graph-version-prefix.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from '../logger.js';
@@ -149,10 +150,11 @@ function normalizeSubrequestUrl(url: string): NormalizedSubrequestUrl {
     canonicalSegments.push(decoded);
   }
 
-  if (absolute && /^(v1\.0|beta)$/i.test(canonicalSegments[0] ?? '')) {
-    canonicalSegments.shift();
-  }
-  return { resource: canonicalSegments.length > 0 ? `/${canonicalSegments.join('/')}` : '/' };
+  // Unconditionally, not just for absolute URLs. A relative `/v1.0/me/sendMail` is a
+  // valid batch subrequest URL and used to slip past the blocklist that both
+  // `/me/sendMail` and the absolute form hit.
+  const versionless = stripGraphVersionSegment(canonicalSegments);
+  return { resource: versionless.length > 0 ? `/${versionless.join('/')}` : '/' };
 }
 
 /**
@@ -215,4 +217,22 @@ export function describeBlockedSubrequests(hits: BlockedSubrequest[]): string {
     'The blocklist applies to the operation, not just the tool name, so routing it ' +
     'through graph-batch does not bypass it. Remove those subrequests and retry.'
   );
+}
+
+/**
+ * The matcher list for the WHOLE catalogue, built once.
+ *
+ * `buildBlockedOperationMatchers('.*')` compiles a path regex for all 330 endpoints, and
+ * endpointsData is read once at module load, so the result can never change between
+ * calls. Rebuilding it per graph-batch call was pure waste
+ * (EnviroKinetics/ms365-mcp#54).
+ */
+let allMatchersMemo: BlockedOperationMatcher[] | undefined;
+export function allOperationMatchers(): BlockedOperationMatcher[] {
+  return (allMatchersMemo ??= buildBlockedOperationMatchers('.*'));
+}
+
+/** Test seam: drop the memo so a test can observe a rebuild. */
+export function resetOperationMatcherMemoForTests(): void {
+  allMatchersMemo = undefined;
 }

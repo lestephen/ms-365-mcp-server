@@ -383,11 +383,68 @@ describe('GraphClient bounded memory downloads', () => {
       const result = await client.downloadToBuffer('/me/photo/$value', 8);
 
       expect(result.bytes).toEqual(Buffer.from([1, 2, 3, 4]));
-      expect(result.allocatedBytes).toBe(8);
-      expect(result.bytes.buffer.byteLength).toBe(8);
+      // Right-sized on the way out (#61). Streaming still uses one reserved backing
+      // buffer, which is what `concat` not being called pins; what must NOT survive the
+      // return is the oversized allocation, because the broker charges what is retained.
+      expect(result.allocatedBytes).toBe(4);
+      expect(result.bytes.buffer.byteLength).toBe(4);
       expect(concat).not.toHaveBeenCalled();
     } finally {
       concat.mockRestore();
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('does not charge the broker the whole maximum for a small download', async () => {
+    // EnviroKinetics/ms365-mcp#61, at the real magnitudes. Node's fetch sends
+    // `accept-encoding: gzip, deflate`, so Graph responses are typically compressed and
+    // the wire Content-Length is not a usable bound. That put every brokered download on
+    // the `?? maximumBytes` path, and a subarray retains its backing allocation, so a
+    // 12-byte attachment was charged the full 50MB per-item cap. Ten downloads of any
+    // size then exhausted the 500MB aggregate budget and wedged the binary path for every
+    // user for a whole TTL window. 500MB / 50MB = 10 is exactly what the reported error
+    // showed.
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const body = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: body })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/octet-stream',
+          'content-encoding': 'gzip',
+        }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        { clientId: 'x', tenantId: 'common', cloudType: 'global' } as Parameters<
+          typeof GraphClient
+        >[1],
+        'json'
+      );
+
+      const FIFTY_MB = 50 * 1024 * 1024;
+      const result = await client.downloadToBuffer('/me/messages/x/attachments/y/$value', FIFTY_MB);
+
+      expect(result.contentLength).toBe(12);
+      // What the broker charges. Must track the file, not the cap.
+      expect(result.allocatedBytes).toBe(12);
+      expect(result.bytes.buffer.byteLength).toBe(12);
+      expect(result.allocatedBytes).toBeLessThan(FIFTY_MB);
+    } finally {
       global.fetch = originalFetch;
     }
   });
@@ -432,8 +489,10 @@ describe('GraphClient bounded memory downloads', () => {
       const result = await client.downloadToBuffer('/me/photo/$value', 8);
 
       expect(result.bytes).toEqual(Buffer.from(decodedBytes));
-      expect(result.allocatedBytes).toBe(8);
-      expect(result.bytes.buffer.byteLength).toBe(8);
+      // The compressed Content-Length is still not trusted as a bound, but the caller's
+      // maximum is no longer retained afterwards (#61).
+      expect(result.allocatedBytes).toBe(6);
+      expect(result.bytes.buffer.byteLength).toBe(6);
       expect(reader.cancel).not.toHaveBeenCalled();
     } finally {
       global.fetch = originalFetch;

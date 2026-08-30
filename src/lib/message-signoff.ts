@@ -17,6 +17,7 @@
  */
 
 import { parseFragment, serialize } from 'parse5';
+import { stripGraphVersionPath } from './graph-version-prefix.js';
 
 /** A signable request whose body the signoff could not be applied to. */
 export class MessageSignoffError extends Error {
@@ -299,7 +300,7 @@ const SIGNOFF_RULES: SignoffRule[] = [
  */
 function normalizePath(path: string): string {
   let clean = path.split('?')[0];
-  clean = clean.replace(/^\/(?:v1\.0|beta)(?=\/)/, '');
+  clean = stripGraphVersionPath(clean);
   if (!clean.startsWith('/')) clean = `/${clean}`;
   if (clean.length > 1 && clean.endsWith('/')) clean = clean.slice(0, -1);
   return clean;

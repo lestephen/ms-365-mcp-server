@@ -8,11 +8,13 @@ import {
   recordBlockedOperation,
   recordDiscoveryStage,
   recordToolCall,
+  metricsEnabled,
   type ToolRoute,
   type ToolOutcome,
   initBlockedOperationSeries,
 } from './metrics.js';
 import {
+  allOperationMatchers,
   buildBlockedOperationMatchers,
   describeBlockedSubrequests,
   findBlockedSubrequests,
@@ -1583,10 +1585,14 @@ function describeParamsForLog(params: Record<string, unknown>): string {
  * resource ids.
  */
 function recordBatchSubrequestsFor(body: unknown, blocked: BlockedOperationMatcher[]): void {
+  // recordBatchSubrequest already no-ops when metrics are off, but it does so AFTER this
+  // function has labelled every subrequest, so all of that work was thrown away in the
+  // default configuration (EnviroKinetics/ms365-mcp#54). Check before doing it.
+  if (!metricsEnabled()) return;
   if (!body || typeof body !== 'object') return;
   const requests = (body as { requests?: unknown }).requests;
   if (!Array.isArray(requests)) return;
-  const all = buildBlockedOperationMatchers('.*');
+  const all = allOperationMatchers();
   for (const entry of requests) {
     if (!entry || typeof entry !== 'object') continue;
     const sub = entry as { method?: unknown; url?: unknown };
@@ -2439,9 +2445,19 @@ export function registerGraphTools(
       const key = paramSchema['$search'] !== undefined ? '$search' : 'search';
       paramSchema[key] = z.string().describe(SEARCH_PARAM_DESCRIPTION).optional();
     }
+    // Accept an array as well as a comma-separated string (EnviroKinetics/ms365-mcp#48).
+    // The query serializer interpolates the value, and JS joins an array with commas, so
+    // both shapes already reach Graph correctly; forcing z.string() here only meant the
+    // SDK rejected a real array locally, and the model's workaround was to send the JSON
+    // TEXT `["id","subject"]`, which passed through verbatim and produced Graph's
+    // 400 "An identifier was expected at position 0". $expand below is already an array,
+    // so this makes the OData params consistent rather than introducing a new shape.
     if (paramSchema['select'] !== undefined || paramSchema['$select'] !== undefined) {
       const key = paramSchema['$select'] !== undefined ? '$select' : 'select';
-      paramSchema[key] = z.string().describe(SELECT_PARAM_DESCRIPTION).optional();
+      paramSchema[key] = z
+        .union([z.string(), z.array(z.string())])
+        .describe(SELECT_PARAM_DESCRIPTION)
+        .optional();
     }
     // The spec describes every $expand as "Expand related entities", which says nothing about
     // what is expandable. Models pass non-navigation properties — message body is the one I
@@ -2454,7 +2470,10 @@ export function registerGraphTools(
     }
     if (paramSchema['orderby'] !== undefined || paramSchema['$orderby'] !== undefined) {
       const key = paramSchema['$orderby'] !== undefined ? '$orderby' : 'orderby';
-      paramSchema[key] = z.string().describe(ORDERBY_PARAM_DESCRIPTION).optional();
+      paramSchema[key] = z
+        .union([z.string(), z.array(z.string())])
+        .describe(ORDERBY_PARAM_DESCRIPTION)
+        .optional();
     }
     // The calendar delta tools don't support $top (see TOP_UNSUPPORTED_DELTA_TOOLS) —
     // page size is controlled via Prefer: odata.maxpagesize. Strip top/$top from

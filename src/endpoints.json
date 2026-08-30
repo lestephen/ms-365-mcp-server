@@ -252,7 +252,7 @@
     "toolName": "create-mail-attachment-upload-session",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "For attachments 3MB to 150MB. Graph rejects smaller files with ErrorAttachmentSizeShouldNotBeLessThanMinimumSize, so under 3MB use add-mail-attachment instead. Body: { AttachmentItem: { attachmentType: 'file', name: 'report.pdf', size: 5000000 } }. Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself in ranges up to 4MB. This server does not perform the PUT."
+    "llmTip": "The supported path for ALL Outlook attachments, at any size. Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself in ranges up to 4MB, streaming from disk. This server does not perform the PUT. Body: { AttachmentItem: { attachmentType: 'file', name: 'report.pdf', size: 5000000 } }. Do NOT fall back to add-mail-attachment for small files: passing file bytes as a tool argument is prohibited here at any size, because the base64 lands in the transcript where it has caused corruption, truncation, and automated misuse misclassification. Microsoft documents a 3MB minimum for this session (ErrorAttachmentSizeShouldNotBeLessThanMinimumSize) but publishes no threshold in the API reference, and a 192KB attachment has been verified through this path end-to-end, so treat that minimum as unconfirmed rather than as a reason to inline."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments",
