@@ -1,4 +1,5 @@
 import { readFileSync } from 'fs';
+import { stripGraphVersionSegment } from './graph-version-prefix.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from '../logger.js';
@@ -149,10 +150,11 @@ function normalizeSubrequestUrl(url: string): NormalizedSubrequestUrl {
     canonicalSegments.push(decoded);
   }
 
-  if (absolute && /^(v1\.0|beta)$/i.test(canonicalSegments[0] ?? '')) {
-    canonicalSegments.shift();
-  }
-  return { resource: canonicalSegments.length > 0 ? `/${canonicalSegments.join('/')}` : '/' };
+  // Unconditionally, not just for absolute URLs. A relative `/v1.0/me/sendMail` is a
+  // valid batch subrequest URL and used to slip past the blocklist that both
+  // `/me/sendMail` and the absolute form hit.
+  const versionless = stripGraphVersionSegment(canonicalSegments);
+  return { resource: versionless.length > 0 ? `/${versionless.join('/')}` : '/' };
 }
 
 /**

@@ -209,3 +209,31 @@ describe('full-catalogue matcher list is built once (#54)', () => {
     expect(memoized).toEqual(rebuilt);
   });
 });
+
+describe('version-prefixed subrequest URLs cannot dodge the blocklist (#24)', () => {
+  const SENDS = '^(send|reply|reply-all|forward)-[a-z-]*(mail|draft)[a-z-]*$';
+  const matchers = buildBlockedOperationMatchers(SENDS);
+  const refuses = (method: string, url: string) =>
+    findBlockedSubrequests({ requests: [{ method, url }] }, matchers).length > 0;
+
+  // A batch subrequest URL may be absolute or relative, and a relative one may still
+  // carry the API version. The prefix used to be stripped only for the absolute form, so
+  // /v1.0/me/sendMail reached Graph while /me/sendMail and the absolute form were both
+  // refused. That is a bypass of the whole point of this guard.
+  it.each([
+    ['/me/sendMail'],
+    ['https://graph.microsoft.com/v1.0/me/sendMail'],
+    ['/v1.0/me/sendMail'],
+    ['/beta/me/sendMail'],
+    ['v1.0/me/sendMail'],
+    ['/V1.0/me/sendMail'],
+    ['/v1.0/users/someone@example.com/messages/AAA/send'],
+  ])('refuses POST %s', (url) => {
+    expect(refuses('POST', url)).toBe(true);
+  });
+
+  it('does not over-block: a read of the same resource still passes', () => {
+    expect(refuses('GET', '/me/messages')).toBe(false);
+    expect(refuses('GET', '/v1.0/me/messages')).toBe(false);
+  });
+});
