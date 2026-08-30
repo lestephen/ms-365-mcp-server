@@ -639,7 +639,7 @@
     "toolName": "upload-file-content",
     "presets": ["files", "onedrive", "personal"],
     "scopes": ["Files.ReadWrite"],
-    "llmTip": "Body is a base64-encoded string of the file bytes; the server decodes it before PUT. Graph accepts up to 250MB here, but the whole string travels as a tool argument and a truncated one decodes to a truncated file with no error, so use create-upload-session rather than emitting a large base64 string. For new files use path format: /items/root:/path/to/file.txt:/content. Overwrites existing files without warning."
+    "llmTip": "Body is a base64-encoded string of the file bytes; the server decodes it before PUT. Graph accepts up to 250MB here, but the whole string travels as a tool argument and a truncated one decodes to a truncated file with no error, so use create-upload-session rather than emitting a large base64 string. For a new file, driveItem-id is the item path only, root:/path/to/file.txt: with the trailing colon. Do not include /items/ or /content: the tool's own path already supplies both, so passing a full path yields /drives/{id}/items//items/...:/content/content. Overwrites existing files without warning."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/createUploadSession",
@@ -647,7 +647,7 @@
     "toolName": "create-upload-session",
     "presets": ["files", "onedrive", "personal"],
     "scopes": ["Files.ReadWrite"],
-    "llmTip": "For large file uploads (no size limit, and no minimum unlike the Outlook attachment session). Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself. This server does not perform the PUT. For new files use path: /items/{parentId}:/{fileName}:/createUploadSession. Body (optional): { item: { '@microsoft.graph.conflictBehavior': 'rename' } }."
+    "llmTip": "For large file uploads (no size limit, and no minimum unlike the Outlook attachment session). Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself. This server does not perform the PUT. For a new file, driveItem-id is the item path only, {parentId}:/{fileName}: with the trailing colon. Do not include /items/ or /createUploadSession: the tool's own path already supplies both. Body (optional): { item: { '@microsoft.graph.conflictBehavior': 'rename' } }."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}",
