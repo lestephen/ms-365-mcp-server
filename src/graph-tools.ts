@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { CallToolRequestSchema, type ServerResult } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'crypto';
 import logger from './logger.js';
 import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
@@ -17,7 +18,7 @@ import {
   findBlockedSubrequests,
   type BlockedOperationMatcher,
 } from './lib/batch-guard.js';
-import { auditLog, getUserIdentityForAudit } from './audit-log.js';
+import { auditLog, getUserIdentityForAudit, type AuditEvent } from './audit-log.js';
 import GraphClient, { GraphDownloadSizeLimitError } from './graph-client.js';
 import { isDestructiveOperation } from './lib/destructive-ops.js';
 import { describePathParam } from './lib/path-params.js';
@@ -227,6 +228,261 @@ interface CallToolResult {
   [key: string]: unknown;
 }
 
+function auditHttpStatus(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value)) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+  return undefined;
+}
+
+function auditErrorCode(value: unknown): string | number | undefined {
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+function auditNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function auditStringNumberMap(value: unknown): Record<string, number> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, number] =>
+      typeof entry[1] === 'number' && Number.isInteger(entry[1]) && entry[1] >= 0
+  );
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function graphResponseAuditFields(
+  response: Pick<CallToolResult, '_meta' | 'isError'>
+): Pick<
+  AuditEvent,
+  | 'http_status'
+  | 'error_code'
+  | 'graph_batch_subrequest_count'
+  | 'graph_batch_http_status_counts'
+  | 'graph_batch_error_code_counts'
+> {
+  const httpStatus = auditHttpStatus(response._meta?.http_status);
+  const errorCode = response.isError ? auditErrorCode(response._meta?.error_code) : undefined;
+  const graphBatchSubrequestCount = auditNonNegativeInteger(
+    response._meta?.graph_batch_subrequest_count
+  );
+  const graphBatchHttpStatusCounts = auditStringNumberMap(
+    response._meta?.graph_batch_http_status_counts
+  );
+  const graphBatchErrorCodeCounts = auditStringNumberMap(
+    response._meta?.graph_batch_error_code_counts
+  );
+
+  return {
+    ...(httpStatus !== undefined ? { http_status: httpStatus } : {}),
+    ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+    ...(graphBatchSubrequestCount !== undefined
+      ? { graph_batch_subrequest_count: graphBatchSubrequestCount }
+      : {}),
+    ...(graphBatchHttpStatusCounts !== undefined
+      ? { graph_batch_http_status_counts: graphBatchHttpStatusCounts }
+      : {}),
+    ...(graphBatchErrorCodeCounts !== undefined
+      ? { graph_batch_error_code_counts: graphBatchErrorCodeCounts }
+      : {}),
+  };
+}
+
+// Graph is inconsistent about casing: entity creation (POST /me/messages) uses
+// camelCase body fields, while action endpoints (POST .../forward, /me/sendMail)
+// use PascalCase. Matched case-insensitively so both are covered.
+const RECIPIENT_FIELDS = new Set([
+  'torecipients',
+  'ccrecipients',
+  'bccrecipients',
+  'attendees',
+  // driveItem /invite mails an outsider a link to the file
+  'recipients',
+]);
+// Worst shape the docstring below promises to cover is 7, not 4: a graph-batch
+// sub-request carrying an itemAttachment lands at requests -> request -> body -> message
+// -> attachments -> attachment -> item, and the attached message's own toRecipients match
+// there. That leaves one level spare, so this can't be trimmed without giving that case
+// up - there's a test pinning it. Arrays charge depth too - traversing them for free
+// leaves an array-only path unbounded, and this runs inside the catch handler where a
+// stack overflow would take the audit record with it.
+const MAX_BODY_DEPTH = 8;
+// A big distribution list would otherwise dump every domain into one audit line, at
+// a length the caller picks. recipient_count is untouched, so we never lose how many.
+const MAX_RECIPIENT_DOMAINS = 50;
+
+// Graph matches property names case-insensitively, so we have to as well - or a
+// PascalCase payload sends mail the log never sees
+function lookupCaseInsensitive(node: unknown, lowerName: string): unknown {
+  if (!node || typeof node !== 'object') return undefined;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key.toLowerCase() === lowerName) return value;
+  }
+  return undefined;
+}
+
+// Recipients are not one shape: mail and events use emailAddress.address, driveItem
+// /invite uses email, meeting participants use upn. alias/objectId name someone with
+// no domain at all - those still count, they just don't add one.
+function readAddress(entry: unknown): string | undefined {
+  // Graph 400s a bare string in a recipient array, but the attempt is the signal and
+  // everything else here reads high - this shouldn't be the one place that reads low
+  if (typeof entry === 'string') return entry;
+
+  const emailAddress = lookupCaseInsensitive(entry, 'emailaddress');
+  const candidates = [
+    typeof emailAddress === 'string'
+      ? emailAddress
+      : lookupCaseInsensitive(emailAddress, 'address'),
+    lookupCaseInsensitive(entry, 'email'),
+    lookupCaseInsensitive(entry, 'upn'),
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate) return candidate;
+  }
+  return undefined;
+}
+
+// Positive check, not suffix-stripping. Everything after the last @ is caller-controlled
+// and Graph tolerates enough junk that subtracting kept losing - "example.com/path" and
+// "evil<script" both got through. Anything that isn't a plain dotted hostname gets dropped.
+const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+// Longest a domain can legally be (RFC 1035). The pattern accepts any length, and the
+// 50-entry cap only bounds how many domains land in a record, not how long each one is -
+// without this one address picks the size of the audit line. Tested before the pattern so
+// a caller can't make us scan a huge string either.
+const MAX_DOMAIN_LENGTH = 253;
+
+function addRecipient(entry: unknown, domains: Set<string>, counter: { count: number }): void {
+  // Count the entry, not our ability to parse it
+  counter.count += 1;
+
+  const address = readAddress(entry);
+  if (address === undefined) return;
+  const at = address.lastIndexOf('@');
+  if (at <= 0 || at >= address.length - 1) return;
+  // Peel the wrappers Graph tolerates, then let the pattern decide
+  const domain = address
+    .slice(at + 1)
+    .trim()
+    .split(/\s/)[0]
+    .replace(/[>.]+$/, '')
+    .toLowerCase();
+  if (domain.length <= MAX_DOMAIN_LENGTH && DOMAIN_PATTERN.test(domain)) domains.add(domain);
+}
+
+function collectRecipients(
+  node: unknown,
+  domains: Set<string>,
+  counter: { count: number },
+  depth = 0
+): void {
+  if (!node || typeof node !== 'object' || depth > MAX_BODY_DEPTH) return;
+
+  if (Array.isArray(node)) {
+    for (const item of node) collectRecipients(item, domains, counter, depth + 1);
+    return;
+  }
+
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (RECIPIENT_FIELDS.has(key.toLowerCase()) && Array.isArray(value)) {
+      for (const entry of value) addRecipient(entry, domains, counter);
+      continue;
+    }
+    // Walk everything, not an allowlist of container names - a recipient list
+    // nested somewhere we didn't think of still sends real mail
+    collectRecipients(value, domains, counter, depth + 1);
+  }
+}
+
+// A body that failed schema parsing goes to Graph as a raw string, and mail sent that way
+// would record nothing. Only a JSON-shaped string can carry recipients though: the binary
+// upload tools send base64, and parsing that threw on every single upload.
+function bodyForRecipientWalk(body: unknown): unknown {
+  if (typeof body !== 'string') return body;
+  if (!/^\s*[{[]/.test(body)) return undefined;
+  return JSON.parse(body);
+}
+
+/**
+ * Derives recipient metadata from an outgoing request body for the audit trail.
+ *
+ * A send, forward or meeting invite records that the tool ran but not who it
+ * reached, so an instruction injected via message content that quietly addresses
+ * something outside the organisation looks identical in the log to a legitimate
+ * reply.
+ *
+ * Domains, not addresses. The detection question is "did this leave the
+ * organisation", which a domain answers; the full address is message content and
+ * logging it by default would be a heavier privacy cost than the signal
+ * justifies. Counts alone cannot distinguish internal from external.
+ *
+ * Covers mail recipients, event attendees and driveItem /invite recipients, at
+ * any casing and up to MAX_BODY_DEPTH levels down, including inside a
+ * graph-batch sub-request and inside a body forwarded as a raw JSON string.
+ *
+ * recipient_count is entries in a recipient-shaped array; a driveRecipient given
+ * only as alias or objectId counts but yields no domain. Keyed on body shape,
+ * not on the endpoint, so drafts and event edits count like real sends, and so
+ * does an attached message's own toRecipients inside an itemAttachment. Reads
+ * high rather than low, which is the safe direction for a detection signal.
+ *
+ * Gaps remain, so absence of these fields is NOT evidence that nothing left
+ * the organisation:
+ *  - On `reply` / `replyAll`, recipients added via the optional `Message` are
+ *    recorded, but the original thread's are resolved server-side by Graph and
+ *    never appear. A plain reply-all to a wide external thread records nothing.
+ *  - `POST /me/messages/{id}/send` carries no body. Its recipients were logged
+ *    when the draft was created, but only if the draft was created through this
+ *    server; one composed in Outlook and sent here records nothing.
+ *
+ * Policy-denied attempts (`tool.denied`) also record none, but nothing was sent.
+ */
+function recipientAuditFields(
+  body: unknown
+): Pick<AuditEvent, 'recipient_count' | 'recipient_domains' | 'recipient_domains_truncated'> {
+  const domains = new Set<string>();
+  const counter = { count: 0 };
+  // Broader than a recursion guard on purpose: this also runs on the catch path, where
+  // throwing would cost the audit record AND the caller's error response. Losing the
+  // fields beats losing both.
+  try {
+    collectRecipients(bodyForRecipientWalk(body), domains, counter);
+  } catch (error) {
+    logger.warn(
+      `Skipped recipient audit metadata: ${error instanceof Error ? error.message : 'unknown error'}`
+    );
+    return {};
+  }
+
+  if (counter.count === 0) return {};
+  const sorted = [...domains].sort();
+  const capped = sorted.slice(0, MAX_RECIPIENT_DOMAINS);
+  return {
+    recipient_count: counter.count,
+    ...(capped.length > 0 ? { recipient_domains: capped } : {}),
+    ...(sorted.length > capped.length ? { recipient_domains_truncated: true } : {}),
+  };
+}
+
+function thrownErrorAuditFields(error: unknown): Pick<AuditEvent, 'http_status' | 'error_code'> {
+  const err = error as {
+    code?: string | number;
+    status?: string | number;
+    httpStatus?: string | number;
+    graphErrorCode?: string | number;
+  };
+  const httpStatus = auditHttpStatus(err?.httpStatus ?? err?.status);
+  const errorCode = auditErrorCode(err?.graphErrorCode ?? err?.code ?? err?.status);
+
+  return {
+    ...(httpStatus !== undefined ? { http_status: httpStatus } : {}),
+    ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+  };
+}
+
 interface UtilityToolContext {
   graphClient: GraphClient;
   authManager?: AuthManager;
@@ -268,6 +524,15 @@ interface DisabledToolScope {
   missingScopes: string[];
 }
 
+type ToolDeniedReason = 'allowed_scopes' | 'tool_allowlist';
+
+interface DeniedToolPolicy {
+  toolName: string;
+  reason: ToolDeniedReason;
+  missingScopes?: string[];
+  pathPattern?: string;
+}
+
 function formatDisabledToolsForLog(disabledTools: DisabledToolScope[]): string {
   const shown = disabledTools
     .slice(0, 20)
@@ -275,6 +540,131 @@ function formatDisabledToolsForLog(disabledTools: DisabledToolScope[]): string {
   const suffix =
     disabledTools.length > shown.length ? `, ... +${disabledTools.length - shown.length} more` : '';
   return `${shown.join('; ')}${suffix}`;
+}
+
+function deniedToolPolicyForGraphTool(
+  tool: (typeof allEndpoints)[number],
+  config: EndpointConfig | undefined,
+  reason: ToolDeniedReason,
+  missingScopes?: string[]
+): DeniedToolPolicy {
+  return {
+    toolName: tool.alias,
+    reason,
+    ...(missingScopes && missingScopes.length > 0 ? { missingScopes } : {}),
+    pathPattern: config?.pathPattern ?? tool.path,
+  };
+}
+
+function collectDeniedToolPolicies(options: {
+  readOnly: boolean;
+  orgMode: boolean;
+  // A predicate, not a RegExp: --direct-tools intersection yields a function.
+  enabledToolsMatches?: (name: string) => boolean;
+  allowedScopesValue?: string;
+  httpMode: boolean;
+}): Map<string, DeniedToolPolicy> {
+  const deniedTools = new Map<string, DeniedToolPolicy>();
+  const allowedScopes = parseAllowedScopes(options.allowedScopesValue);
+
+  for (const tool of allEndpoints) {
+    const endpointConfig = endpointsData.find((e) => e.toolName === tool.alias);
+    if (!options.orgMode && endpointConfig && !endpointConfig.scopes && endpointConfig.workScopes) {
+      continue;
+    }
+
+    const method = tool.method.toUpperCase();
+    if (options.readOnly && method !== 'GET' && !(method === 'POST' && endpointConfig?.readOnly)) {
+      continue;
+    }
+
+    if (options.enabledToolsMatches && !options.enabledToolsMatches(tool.alias)) {
+      deniedTools.set(
+        tool.alias,
+        deniedToolPolicyForGraphTool(tool, endpointConfig, 'tool_allowlist')
+      );
+      continue;
+    }
+
+    const missingScopes =
+      allowedScopes !== undefined && !endpointConfig
+        ? ['endpoint scope metadata']
+        : getMissingAllowedScopesForGroups(
+            getEndpointScopeGroups(endpointConfig, options.orgMode),
+            allowedScopes
+          );
+    if (missingScopes.length > 0) {
+      deniedTools.set(
+        tool.alias,
+        deniedToolPolicyForGraphTool(tool, endpointConfig, 'allowed_scopes', missingScopes)
+      );
+    }
+  }
+
+  for (const utility of UTILITY_TOOLS) {
+    if (options.readOnly && utility.mutatesState) continue;
+    if (options.httpMode && utility.stdioOnly) continue;
+    if (options.enabledToolsMatches && !options.enabledToolsMatches(utility.name)) {
+      deniedTools.set(utility.name, {
+        toolName: utility.name,
+        reason: 'tool_allowlist',
+      });
+    }
+  }
+
+  return deniedTools;
+}
+
+function auditToolDenied(policy: DeniedToolPolicy, params: Record<string, unknown> = {}): void {
+  const targetResource = policy.pathPattern
+    ? deriveTargetResource({ pathPattern: policy.pathPattern, params })
+    : undefined;
+
+  auditLog({
+    event: 'tool.denied',
+    request_id: randomUUID(),
+    user_principal_name: getUserIdentityForAudit(getRequestTokens()?.accessToken),
+    tool: policy.toolName,
+    status: 'denied',
+    reason: policy.reason,
+    ...(policy.missingScopes ? { missing_scopes: policy.missingScopes } : {}),
+    ...(targetResource ? { target_resource: targetResource } : {}),
+  });
+}
+
+function installDeniedToolAuditHandler(
+  server: McpServer,
+  deniedTools: ReadonlyMap<string, DeniedToolPolicy>
+): void {
+  if (deniedTools.size === 0) return;
+
+  const lowLevel = server.server;
+  const handlers = (
+    lowLevel as unknown as {
+      _requestHandlers?: Map<
+        string,
+        (request: unknown, extra: unknown) => Promise<ServerResult> | ServerResult
+      >;
+    }
+  )._requestHandlers;
+  const original = handlers?.get('tools/call');
+  if (!original) {
+    logger.warn('Skipping denied-tool audit hook: tools/call handler not found');
+    return;
+  }
+
+  lowLevel.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const policy = deniedTools.get(request.params.name);
+    if (policy) {
+      const params =
+        request.params.arguments && typeof request.params.arguments === 'object'
+          ? (request.params.arguments as Record<string, unknown>)
+          : {};
+      auditToolDenied(policy, params);
+    }
+
+    return original(request, extra);
+  });
 }
 
 const DEFAULT_DOWNLOAD_BYTES_MAX_INLINE = 256 * 1024;
@@ -776,11 +1166,14 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
               }),
             },
           ],
+          ...(result.httpStatus !== undefined ? { _meta: { http_status: result.httpStatus } } : {}),
         };
       } catch (error) {
+        const metadata = thrownErrorAuditFields(error);
         return {
           content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
           isError: true,
+          ...(Object.keys(metadata).length > 0 ? { _meta: metadata } : {}),
         };
       }
     },
@@ -984,6 +1377,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
               },
             ],
             isError: true,
+            _meta: response._meta,
           };
         }
         const file = item?.file as { mimeType?: string } | undefined;
@@ -999,11 +1393,14 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
               }),
             },
           ],
+          _meta: response._meta,
         };
       } catch (error) {
+        const metadata = thrownErrorAuditFields(error);
         return {
           content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
           isError: true,
+          ...(Object.keys(metadata).length > 0 ? { _meta: metadata } : {}),
         };
       }
     },
@@ -1046,8 +1443,14 @@ async function executeUtilityTool(
   ctx: UtilityToolContext,
   route: ToolRoute
 ): Promise<CallToolResult> {
+  // Merged at the v0.148.0 rebase: upstream grew its own executeUtilityTool for audit
+  // logging while this fork had one for Prometheus metrics, both wrapping the same
+  // utility.execute. This is the union, on EKI's signature because `route` must survive
+  // (a utility reached through execute-tool is not a direct call).
+  const requestId = randomUUID();
   const startedAt = Date.now();
   const elapsed = () => (Date.now() - startedAt) / 1000;
+  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
   if (isConfirmGateEnabled() && utility.mutatesState && params.confirm !== true) {
     logger.warn(`Refusing destructive utility ${utility.name}: missing confirm: true`);
     const response: CallToolResult = {
@@ -1072,9 +1475,31 @@ async function executeUtilityTool(
   try {
     const response = await utility.execute(params, ctx);
     recordToolCall(utility.name, route, response.isError ? 'error' : 'ok', elapsed());
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: response.isError ? 'error' : 'success',
+      duration_ms: Date.now() - startedAt,
+      ...graphResponseAuditFields(response),
+    });
     return response;
   } catch (error) {
+    const err = error as { name?: string };
     recordToolCall(utility.name, route, 'error', elapsed());
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: 'error',
+      duration_ms: Date.now() - startedAt,
+      error_type: err?.name || 'Error',
+      ...thrownErrorAuditFields(error),
+    });
     throw error;
   }
 }
@@ -1139,6 +1564,18 @@ function hasOwn(obj: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
+// JSON.stringify recurses, so a params object nested deeply enough overflows the stack -
+// on Node 20 well before Node 26. It runs before the try below, so an unguarded throw
+// escapes executeGraphTool entirely: the caller gets a protocol error instead of a tool
+// error, and no audit record is written at all. Nesting depth is caller-controlled.
+function describeParamsForLog(params: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(params);
+  } catch (error) {
+    return `[unserializable: ${error instanceof Error ? error.name : 'unknown error'}]`;
+  }
+}
+
 /**
  * Label each subrequest in a batch with the tool whose operation it matches, so the
  * metric shows what batching is used for. Unmatched subrequests are counted as
@@ -1168,7 +1605,7 @@ async function executeGraphTool(
   blockedOperations: BlockedOperationMatcher[] = [],
   route: ToolRoute = 'direct'
 ): Promise<CallToolResult> {
-  logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
+  logger.info(`Tool ${tool.alias} called with params: ${describeParamsForLog(params)}`);
   const startedAt = Date.now();
   const elapsed = () => (Date.now() - startedAt) / 1000;
   let metricsRecorded = false;
@@ -1214,6 +1651,10 @@ async function executeGraphTool(
   const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
   const httpMethod = tool.method.toUpperCase();
   let targetResource: AuditTargetResource | undefined;
+  // Hoisted alongside targetResource so the catch-path audit can still report
+  // recipients. A send that times out or trips the breaker is exactly the
+  // ambiguous case: a thrown request is not proof that nothing was delivered.
+  let body: unknown = null;
 
   try {
     const accountParam = params.account as string | undefined;
@@ -1253,7 +1694,6 @@ async function executeGraphTool(
     let path = tool.path;
     const queryParams: Record<string, string> = {};
     const headers: Record<string, string> = {};
-    let body: unknown = null;
 
     // Body fields the client passed as top-level params (#569) - merged into the
     // request body after the loop
@@ -1720,6 +2160,11 @@ async function executeGraphTool(
             const nextOptions = { ...options };
 
             const nextResponse = await graphClient.graphRequest(nextPath, nextOptions);
+            if (nextResponse?.isError) {
+              response = nextResponse;
+              combinedResponse = undefined;
+              break;
+            }
             if (nextResponse?.content?.[0]?.text) {
               const nextJsonResponse = JSON.parse(nextResponse.content[0].text) as ODataPage;
               if (Array.isArray(nextJsonResponse.value)) {
@@ -1735,27 +2180,29 @@ async function executeGraphTool(
             }
           }
 
-          if (pageCount >= maxPages) {
-            logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
-          }
-          if (allItems.length >= maxItems) {
-            logger.warn(
-              `Reached maximum item limit (${maxItems}) for pagination — truncated at ${allItems.length} items`
+          if (combinedResponse !== undefined) {
+            if (pageCount >= maxPages) {
+              logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
+            }
+            if (allItems.length >= maxItems) {
+              logger.warn(
+                `Reached maximum item limit (${maxItems}) for pagination — truncated at ${allItems.length} items`
+              );
+            }
+
+            combinedResponse.value = allItems;
+            if (combinedResponse['@odata.count']) {
+              combinedResponse['@odata.count'] = allItems.length;
+            }
+            delete combinedResponse['@odata.nextLink'];
+            if (deltaLink) {
+              combinedResponse['@odata.deltaLink'] = deltaLink;
+            }
+
+            logger.info(
+              `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
             );
           }
-
-          combinedResponse.value = allItems;
-          if (combinedResponse['@odata.count']) {
-            combinedResponse['@odata.count'] = allItems.length;
-          }
-          delete combinedResponse['@odata.nextLink'];
-          if (deltaLink) {
-            combinedResponse['@odata.deltaLink'] = deltaLink;
-          }
-
-          logger.info(
-            `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
-          );
         }
       } catch (e) {
         logger.error(`Error during pagination: ${e}`);
@@ -1801,6 +2248,8 @@ async function executeGraphTool(
       status: response.isError ? 'error' : 'success',
       duration_ms: Date.now() - startTime,
       ...(targetResource ? { target_resource: targetResource } : {}),
+      ...graphResponseAuditFields(response),
+      ...recipientAuditFields(body),
     });
     return finish({
       content,
@@ -1820,7 +2269,8 @@ async function executeGraphTool(
       duration_ms: Date.now() - startTime,
       ...(targetResource ? { target_resource: targetResource } : {}),
       error_type: err?.name || 'Error',
-      error_code: err?.status ?? err?.code,
+      ...thrownErrorAuditFields(error),
+      ...recipientAuditFields(body),
     });
     return finish({
       content: [
@@ -1874,6 +2324,13 @@ export function registerGraphTools(
   let failedCount = 0;
   const allowedScopes = parseAllowedScopes(allowedScopesValue);
   const disabledByAllowedScopes: DisabledToolScope[] = [];
+  const deniedTools = collectDeniedToolPolicies({
+    readOnly,
+    orgMode,
+    enabledToolsMatches,
+    allowedScopesValue,
+    httpMode,
+  });
 
   for (const tool of allEndpoints) {
     const endpointConfig = endpointsData.find((e) => e.toolName === tool.alias);
@@ -2153,6 +2610,7 @@ export function registerGraphTools(
   logger.info(
     `Tool registration complete: ${registeredCount} registered, ${skippedCount} skipped, ${failedCount} failed`
   );
+  installDeniedToolAuditHandler(server, deniedTools);
   return registeredCount;
 }
 
@@ -2379,6 +2837,13 @@ export function registerDiscoveryTools(
   }
 
   const disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [];
+  const deniedTools = collectDeniedToolPolicies({
+    readOnly,
+    orgMode,
+    enabledToolsMatches: enabledToolsRegex ? (name) => enabledToolsRegex.test(name) : undefined,
+    allowedScopesValue,
+    httpMode,
+  });
   const toolsRegistry = buildToolsRegistry(
     readOnly,
     orgMode,
@@ -2596,6 +3061,10 @@ export function registerDiscoveryTools(
       if (utility) {
         return executeUtilityTool(utility, parameters, utilityCtx, 'execute_tool');
       }
+      const deniedPolicy = deniedTools.get(tool_name);
+      if (deniedPolicy) {
+        auditToolDenied(deniedPolicy, parameters);
+      }
       return {
         content: [
           {
@@ -2610,6 +3079,8 @@ export function registerDiscoveryTools(
       };
     }
   );
+
+  installDeniedToolAuditHandler(server, deniedTools);
 
   // Layer 3 (list-accounts) is registered by registerAuthTools — no duplicate here.
 }

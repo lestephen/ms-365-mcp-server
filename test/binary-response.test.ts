@@ -338,6 +338,9 @@ describe('GraphClient bounded memory downloads', () => {
         allocatedBytes: 4,
         contentType: 'application/pdf',
         contentLength: 4,
+        // Upstream v0.144.0 (0ce5587) added httpStatus to GraphDownloadResult so the
+        // audit log can record the Graph outcome; downloadToBuffer reports it too.
+        httpStatus: 200,
       });
     } finally {
       global.fetch = originalFetch;
@@ -477,6 +480,7 @@ describe('GraphClient file downloads', () => {
       expect(result).toEqual({
         contentType: 'application/pdf',
         contentLength: fileBytes.byteLength,
+        httpStatus: 200,
       });
       expect(await readFile(destination)).toEqual(Buffer.from(fileBytes));
     } finally {

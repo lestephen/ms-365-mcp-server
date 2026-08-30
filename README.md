@@ -539,9 +539,9 @@ npx @softeria/ms-365-mcp-server --preset mail
 npx @softeria/ms-365-mcp-server --list-presets  # See all available presets
 ```
 
-Available presets: `mail`, `calendar`, `files`, `personal`, `work`, `excel`, `contacts`, `tasks`, `onenote`, `search`, `users`, `outlook`, `onedrive`, `teams`, `all`
+Available presets: `mail`, `calendar`, `files`, `personal`, `work`, `excel`, `contacts`, `tasks`, `onenote`, `search`, `users`, `outlook`, `onedrive`, `teams`, `teams-write`, `all`
 
-Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`). The universal binary reader `download-bytes` is included in every preset, so whatever an app returns (a file, an attachment, a photo, a recording) can always be fetched; `get-download-url` (a pre-authenticated URL for drive/SharePoint files) rides with the drive-backed presets. So a preset that can find a file can always read its bytes.
+Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`). The universal binary reader `download-bytes` is included in every preset except `teams-write`, so whatever an app returns (a file, an attachment, a photo, a recording) can always be fetched; `get-download-url` (a pre-authenticated URL for drive/SharePoint files) rides with the drive-backed presets. So a preset that can find a file can always read its bytes.
 
 The `outlook`, `onedrive` and `teams` presets are app-scoped: they expose exactly one Microsoft app. Use these for "expose exactly one app" deployments:
 
@@ -551,6 +551,12 @@ npx @softeria/ms-365-mcp-server --preset outlook
 
 # Teams only (requires --org-mode)
 npx @softeria/ms-365-mcp-server --org-mode --preset teams
+```
+
+The `teams-write` preset is the send-only counterpart to `--read-only`: send in chats, send/reply in channels, list chats/teams/channels by name, and activity notifications - no message reading and no byte downloaders. The requested token is minimal by construction (`Chat.ReadBasic`, the `*.Send` scopes, and basic team/channel listing - nothing that can read message content):
+
+```bash
+npx @softeria/ms-365-mcp-server --org-mode --preset teams-write
 ```
 
 ## Dynamic Tool Discovery
@@ -613,6 +619,8 @@ Environment variables:
 - `MS365_MCP_MAX_ITEMS=<n>`: Maximum number of items accumulated when `fetchAllPages: true` (positive integer, default `10000`). Pagination stops and the response is truncated once this many items are collected.
 - `MS365_MCP_ALLOW_PAGINATION=0|false|no`: Disable multi-page following entirely. When set, the `fetchAllPages` parameter is not advertised on tools, and any request that still passes it returns only the first page (default: pagination enabled).
 - `MS365_MCP_BODY_FORMAT=html`: Return email bodies as HTML instead of plain text (default: text)
+- `MS365_MCP_MESSAGE_SIGNOFF_PREFIX=<text>`: Signoff prepended to outgoing messages so recipients can tell they were agent-sent, e.g. `🤖`. Default: none. CLI equivalent: `--message-signoff-prefix <text>` (see Message Signoff below)
+- `MS365_MCP_MESSAGE_SIGNOFF_SUFFIX=<text>`: Signoff appended to outgoing messages. Default: none. CLI equivalent: `--message-signoff-suffix <text>`. `--no-message-signoff` disables both (see Message Signoff below)
 - `MS365_MCP_RATE_LIMIT_DISABLED=true|1`: Disable per-IP rate limiting in HTTP mode (default: enabled — 30 req/min on `/authorize`, `/token`, `/register`; 120 req/min on `/mcp`)
 - `MS365_MCP_TRUST_PROXY_HOPS=<n>`: Number of trusted reverse-proxy hops in HTTP mode (default `1`). Accurate per-IP rate limiting depends on this matching your deployment — set to the number of proxies in front of the server, `0` to use the raw socket peer IP, or a comma-separated subnet list
 - `MS365_MCP_CLOUD_TYPE=global|china`: Microsoft cloud environment (alternative to --cloud flag)
@@ -658,6 +666,20 @@ export MS365_MCP_SELECTED_ACCOUNT_PATH="$HOME/.config/ms365-mcp/.selected-accoun
 Parent directories are created automatically. Files are written with `0600` permissions.
 
 **Without a credential store** (headless Linux, most containers) the key is written to `.cache-key` next to the cache file, with `0600` permissions. That stops the tokens showing up in a stray `cat`, a backup or an accidental commit. It does not protect against anyone who can already read the directory - the key is right there. Use `MS365_MCP_AUTH_CACHE_COMMAND` below if you need the cache in a real secret store.
+
+**Skipping the credential store on purpose:**
+
+```bash
+export MS365_MCP_USE_KEYTAR=0   # also accepts false, no or off
+```
+
+The key then goes to `.cache-key` on every platform, exactly as it does where no credential store exists, and nothing in the server calls keytar. Useful when the credential store prompts on each start - macOS re-asks whenever the calling binary changes, which under `npx` is every version bump - or when the native module misbehaves on your platform rather than simply failing to load. Any other value leaves the credential store in use, and an unrecognised one is warned about rather than passed over silently.
+
+Switching it off strands a cache that was encrypted under a key already in the credential store, since nothing can reach that key any more. The server says so and replaces that cache on the next sign-in, which signs out **every** account it held, not just the one you sign back in as. Unset the variable first if that cache is worth keeping.
+
+Only a cache that nothing on the machine can open is replaced. One that fails to decrypt while a usable key is sitting right there - a truncated file, a downgrade to an older build, a cache from somewhere else - is damage rather than a stranded cache, and is left alone exactly as it is by default.
+
+Two things it deliberately does not do. It never deletes what this server already put in the credential store, on logout or otherwise, because reaching the store is the thing you just asked it to stop doing - clear the `ms-365-mcp-server` entries by hand if you want them gone. And a `.cache-key` that exists but cannot be read (wrong owner on a bind-mounted config directory, say) is treated as recoverable rather than missing: the server refuses both to overwrite a cache and to mint a replacement key, and says so, rather than deleting a key that would work again once the permissions are fixed. Fix the permissions, or delete `.cache-key` yourself to start over - which does mean signing in again.
 
 If the cache cannot be decrypted - key lost, keychain locked, file modified - you are asked to sign in again rather than the server failing to start. The cache file is left exactly as it was: not deleted, and not overwritten by that new sign-in either. A keychain that is merely locked usually reads fine on the next start, and the cache is still there when it does.
 
@@ -767,6 +789,14 @@ The Key Vault integration uses `DefaultAzureCredential` from the Azure Identity 
 ### Optional Dependencies
 
 The Azure Key Vault packages (`@azure/identity` and `@azure/keyvault-secrets`) are optional dependencies. They are only loaded when `MS365_MCP_KEYVAULT_URL` is configured. If you don't use Key Vault, these packages are not required.
+
+## Message Signoff
+
+Outgoing messages can be wrapped in a configurable signoff (e.g. a `🤖` prefix) so recipients can tell agent-sent messages from ones you typed yourself. Off by default — enable it with `--message-signoff-prefix` / `--message-signoff-suffix` (env: `MS365_MCP_MESSAGE_SIGNOFF_PREFIX` / `MS365_MCP_MESSAGE_SIGNOFF_SUFFIX`); `--no-message-signoff` or an empty env value turns it back off.
+
+Once configured, it applies to all Teams messages (sends, replies and edits, including via `graph-batch`), to direct mail sends (`send-mail`, reply/forward, their shared-mailbox variants, and group thread replies), and to mail drafts as their content is written — `send-draft-message` sends a draft as-is, so a draft you wrote yourself goes out untouched. A message that already carries the marker is not signed twice, and a send whose body cannot take the signoff is refused rather than sent unsigned.
+
+Markers may contain markup (e.g. a coloured `<span>`) as long as it renders visible text. Note that the signoff is a guardrail against an agent misusing the tools it was given, not a hard security boundary — an agent with shell access on the same machine could simply restart the server without it.
 
 ## Production Deployment
 
