@@ -13,6 +13,7 @@ import {
   type ToolOutcome,
   initBlockedOperationSeries,
 } from './metrics.js';
+import { describeInlineBytes, findInlineByteFields } from './lib/inline-bytes-guard.js';
 import {
   allOperationMatchers,
   buildBlockedOperationMatchers,
@@ -1941,6 +1942,43 @@ async function executeGraphTool(
     // the normalized body, not params.body: passthrough clients may flatten requests to
     // the top level, and the fallback above is what turns that shape into the payload
     // Graph will actually receive.
+    // Inline file bytes are refused at any size, on the same normalized body and for the
+    // same reason as the batch check below: the payload is what the policy is about, not
+    // the tool name. add-mail-attachment carries contentBytes only for a fileAttachment;
+    // a referenceAttachment has none and stays allowed, which name-blocking could not
+    // express. Recursive, so a contentBytes inside a graph-batch subrequest is caught here
+    // too.
+    const inlineBytes = findInlineByteFields(body);
+    if (inlineBytes.length > 0) {
+      recordBlockedOperation(tool.alias, route);
+      logger.warn(
+        `Refusing ${tool.alias}: request carries inline file bytes at ${describeInlineBytes(inlineBytes)}`
+      );
+      return finish(
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'inline_bytes_refused',
+                tool: tool.alias,
+                fields: inlineBytes.map((hit) => hit.path),
+                message:
+                  'This server refuses file bytes passed as a tool argument, at any size. ' +
+                  'Base64 in the transcript has caused corruption, truncation, and automated ' +
+                  'misuse misclassification. Create an upload session instead and PUT the ' +
+                  'bytes from disk: create-mail-attachment-upload-session for Outlook ' +
+                  'attachments, create-upload-session for drive files. A reference ' +
+                  'attachment (sourceUrl, no contentBytes) is also allowed.',
+              }),
+            },
+          ],
+          isError: true,
+        },
+        'blocked'
+      );
+    }
+
     if (tool.path === '/$batch') {
       // Count what batching is actually used for, so the question of whether graph-batch
       // earns its keep can be answered from data rather than by grepping skill text.

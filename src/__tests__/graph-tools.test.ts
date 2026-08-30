@@ -207,6 +207,79 @@ describe('graph-tools', () => {
     vi.clearAllMocks();
   });
 
+  // ---- 0. Inline bytes guard (payload-keyed, not name-keyed) ----
+  describe('inline file bytes are refused in the request path', () => {
+    const attachmentEndpoint = () =>
+      makeEndpoint({
+        method: 'post',
+        path: '/me/messages/{message-id}/attachments',
+        alias: 'add-mail-attachment',
+        parameters: [
+          { name: 'message-id', type: 'Path', schema: z.string() },
+          { name: 'body', type: 'Body', schema: z.any() },
+        ],
+      });
+
+    it('refuses a fileAttachment carrying contentBytes', async () => {
+      const endpoint = attachmentEndpoint();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig({ toolName: 'add-mail-attachment' })];
+
+      const graphClient = createMockGraphClient([{ content: [{ type: 'text', text: '{}' }] }]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      const result = await server.tools.get('add-mail-attachment')!.handler({
+        'message-id': 'AAA',
+        body: {
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: 'report.pdf',
+          contentBytes: 'JVBERi0xLjQK',
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('inline_bytes_refused');
+      // Refused BEFORE reaching Graph, so no request is made at all.
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('allows a reference attachment on the same tool', async () => {
+      // The whole reason the guard is payload-keyed. A referenceAttachment carries a
+      // sourceUrl and no bytes, and is the documented fallback when an upload-session
+      // PUT is unavailable. Name-blocking add-mail-attachment killed this too.
+      const endpoint = attachmentEndpoint();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig({ toolName: 'add-mail-attachment' })];
+
+      const graphClient = createMockGraphClient([{ content: [{ type: 'text', text: '{}' }] }]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      const result = await server.tools.get('add-mail-attachment')!.handler({
+        'message-id': 'AAA',
+        body: {
+          '@odata.type': '#microsoft.graph.referenceAttachment',
+          name: 'report.pdf',
+          sourceUrl: 'https://envirokinetics.sharepoint.com/x.pdf',
+          providerType: 'oneDriveBusiness',
+          permission: 'view',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.graphRequest).toHaveBeenCalled();
+    });
+  });
+
   // ---- 0. Audit outcome metadata ----
   describe('audit outcome metadata', () => {
     it('includes HTTP status on successful Graph tool calls', async () => {
