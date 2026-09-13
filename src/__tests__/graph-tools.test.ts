@@ -3369,6 +3369,61 @@ describe('graph-tools', () => {
       }
     });
 
+    it('brokers onto MS365_MCP_BROKER_PUBLIC_URL when it differs from the OAuth public URL', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const prev = process.env.MS365_MCP_PUBLIC_URL;
+      const prevBroker = process.env.MS365_MCP_BROKER_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://oauth.example.com';
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com/';
+      try {
+        const graphClient = {
+          graphRequest: vi.fn(),
+          downloadToBuffer: vi.fn().mockResolvedValue({
+            bytes: Buffer.from('PDF'),
+            allocatedBytes: 3,
+            contentType: 'application/pdf',
+            contentLength: 3,
+          }),
+        };
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        // The server hands tools the OAuth public URL; the override must still win.
+        registerGraphTools(
+          server as any,
+          graphClient as any,
+          false,
+          undefined,
+          false,
+          undefined,
+          false,
+          [],
+          undefined,
+          true,
+          undefined,
+          'https://oauth.example.com'
+        );
+
+        const result = await server.tools.get('get-download-url')!.handler({
+          target: '/me/messages/m1/attachments/a1/$value',
+        });
+
+        expect(result.isError).toBeFalsy();
+        const payload = JSON.parse(result.content[0].text);
+        expect(payload).toMatchObject({ brokered: true });
+        expect(payload.downloadUrl).toMatch(
+          /^https:\/\/broker\.example\.com\/download\/[A-Za-z0-9_-]+$/
+        );
+      } finally {
+        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = prev;
+        if (prevBroker === undefined) delete process.env.MS365_MCP_BROKER_PUBLIC_URL;
+        else process.env.MS365_MCP_BROKER_PUBLIC_URL = prevBroker;
+      }
+    });
+
     it('reserves aggregate broker capacity before concurrent downloads start', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];

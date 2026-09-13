@@ -51,8 +51,52 @@ function maxTotalBytes(): number {
   return readPositiveEnv('MS365_MCP_BROKER_MAX_TOTAL_BYTES', DEFAULT_MAX_TOTAL_BYTES);
 }
 
-/** The externally routable origin clients use to pull brokered bytes. */
+/**
+ * Optional broker-only origin, read from MS365_MCP_BROKER_PUBLIC_URL.
+ *
+ * Lets the tokenless /download route be published on a different host from the
+ * OAuth public URL, for example when a fronting proxy owns the original hostname
+ * and forwards only /download/* to this server. It feeds broker URLs and broker
+ * enablement only; OAuth metadata keeps using --public-url / MS365_MCP_PUBLIC_URL
+ * through resolvePublicBaseUrl in server.ts, which never reads this variable.
+ *
+ * Unset or blank means no override. A set value that is not an absolute http(s)
+ * URL without credentials, query, or fragment throws rather than minting links
+ * that cannot resolve; the HTTP server calls isBrokerEnabled while wiring routes,
+ * so a bad value fails at startup instead of at the first download.
+ */
+function getBrokerPublicUrlOverride(): string | undefined {
+  const raw = process.env.MS365_MCP_BROKER_PUBLIC_URL;
+  if (!raw || !raw.trim()) return undefined;
+  const value = raw.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('MS365_MCP_BROKER_PUBLIC_URL must be an absolute http(s) URL');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('MS365_MCP_BROKER_PUBLIC_URL must use http or https');
+  }
+  // WHATWG parsing leaves search and hash empty for a bare trailing `?` or `#`,
+  // which would still break minted links, so check the raw value as well.
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || /[?#]/.test(value)) {
+    throw new Error(
+      'MS365_MCP_BROKER_PUBLIC_URL must not carry credentials, a query string, or a fragment'
+    );
+  }
+  return value.replace(/\/+$/, '');
+}
+
+/**
+ * The externally routable origin clients use to pull brokered bytes.
+ *
+ * MS365_MCP_BROKER_PUBLIC_URL wins when set; otherwise this is the OAuth public
+ * URL, exactly as before the override existed.
+ */
 export function getPublicBaseUrl(configuredPublicUrl?: string | null): string | undefined {
+  const brokerOverride = getBrokerPublicUrlOverride();
+  if (brokerOverride) return brokerOverride;
   const url = configuredPublicUrl || process.env.MS365_MCP_PUBLIC_URL;
   return url && url.trim() ? url.trim().replace(/\/+$/, '') : undefined;
 }
