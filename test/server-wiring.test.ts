@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import MicrosoftGraphServer from '../src/server.js';
+import MicrosoftGraphServer, { resolvePublicBaseUrl } from '../src/server.js';
 import type AuthManager from '../src/auth.js';
 import GraphClient from '../src/graph-client.js';
 import { getCombinedPresetPattern } from '../src/tool-categories.js';
@@ -164,6 +164,30 @@ describe('registerGraphTools wiring', () => {
     } finally {
       if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
       else process.env.MS365_MCP_PUBLIC_URL = previous;
+    }
+  });
+
+  it('keeps the OAuth public URL independent of MS365_MCP_BROKER_PUBLIC_URL', () => {
+    // The broker override is resolved inside attachment-broker. The OAuth public URL,
+    // which feeds the authorization-server and protected-resource metadata, must not
+    // pick it up, or moving the download host would move the OAuth issuer with it.
+    const previous = process.env.MS365_MCP_PUBLIC_URL;
+    const previousBroker = process.env.MS365_MCP_BROKER_PUBLIC_URL;
+    process.env.MS365_MCP_PUBLIC_URL = 'https://oauth.example.com/';
+    process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
+    try {
+      expect(resolvePublicBaseUrl({})).toBe('https://oauth.example.com');
+
+      buildServer({ http: '3000', enabledTools: DIRECT });
+      expect(registerGraphTools.mock.calls[0][PUBLIC_BASE_URL]).toBe('https://oauth.example.com');
+
+      delete process.env.MS365_MCP_PUBLIC_URL;
+      expect(resolvePublicBaseUrl({})).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+      else process.env.MS365_MCP_PUBLIC_URL = previous;
+      if (previousBroker === undefined) delete process.env.MS365_MCP_BROKER_PUBLIC_URL;
+      else process.env.MS365_MCP_BROKER_PUBLIC_URL = previousBroker;
     }
   });
 });

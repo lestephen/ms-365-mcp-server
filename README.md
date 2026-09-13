@@ -624,6 +624,7 @@ Environment variables:
 - `MS365_MCP_RATE_LIMIT_DISABLED=true|1`: Disable per-IP rate limiting in HTTP mode (default: enabled — 30 req/min on `/authorize`, `/token`, `/register`; 120 req/min on `/mcp`)
 - `MS365_MCP_TRUST_PROXY_HOPS=<n>`: Number of trusted reverse-proxy hops in HTTP mode (default `1`). Accurate per-IP rate limiting depends on this matching your deployment — set to the number of proxies in front of the server, `0` to use the raw socket peer IP, or a comma-separated subnet list
 - `MS365_MCP_CLOUD_TYPE=global|china`: Microsoft cloud environment (alternative to --cloud flag)
+- `MS365_MCP_BROKER_PUBLIC_URL=<url>`: (EKI fork) Origin for the tokenless attachment-broker links (`<url>/download/<handle>`) in HTTP mode. When set and non-blank it takes precedence over `--public-url` / `MS365_MCP_PUBLIC_URL` for broker links and for enabling the broker, and it does not change OAuth metadata. Unset keeps the previous behavior. Must be an absolute http(s) URL with no credentials, query, or fragment; anything else fails at startup. See docs/deployment.md
 - `LOG_LEVEL`: Set logging level (default: 'info')
 - `SILENT=true|1`: Disable console output
 - `MS365_MCP_REDACT_PII=false|0`: Disable scrubbing of JWTs, Bearer headers, OAuth token fields, and email addresses from log messages (default: enabled). The server handles live Graph bearer tokens, so redaction is on unless you opt out for fully verbose local debugging.

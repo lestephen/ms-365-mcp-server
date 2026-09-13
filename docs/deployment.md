@@ -178,6 +178,16 @@ MS365_MCP_PUBLIC_URL=https://mcp.example.com
 
 Only browser-facing fields (`issuer`, `authorization_endpoint`, `authorization_servers`) are pinned to this URL. Server-to-server endpoints (`token_endpoint`, `registration_endpoint`, `resource`) stay on the request origin, so clients that reach the server over an internal network (e.g. another container on the same Docker network) don't have to round-trip back through the public URL.
 
+### Attachment-broker host (EKI fork)
+
+Brokered attachment links (`/download/<handle>`, returned by `get-download-url` for content with no native pre-authenticated URL) use the public URL above by default. To publish them on a different host, for example when a fronting proxy owns the original hostname and forwards only `/download/*` to this server, set:
+
+```bash
+MS365_MCP_BROKER_PUBLIC_URL=https://files.example.com
+```
+
+When set and non-blank, it takes precedence over `MS365_MCP_PUBLIC_URL` / `--public-url` for broker links and for enabling the broker. OAuth metadata is unaffected and keeps using the public URL. The value must be an absolute http(s) URL without credentials, query, or fragment; a path prefix is kept. Anything else stops the HTTP server at startup. Whatever serves that host must route `GET /download/*` to this server unchanged and without requiring authentication, because the handle is the credential.
+
 ## Client Configuration
 
 Once deployed, users connect by pointing their MCP client to the server URL:

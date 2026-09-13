@@ -9,6 +9,7 @@ import {
   mintDownloadUrl,
   downloadRouteHandler,
   parseRange,
+  getPublicBaseUrl,
   isBrokerEnabled,
   releaseBrokerCapacity,
   reserveBrokerCapacity,
@@ -50,6 +51,7 @@ describe('attachment-broker', () => {
   beforeEach(() => {
     __testing.reset();
     process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+    delete process.env.MS365_MCP_BROKER_PUBLIC_URL;
     delete process.env.MS365_MCP_BROKER_TTL_MS;
     delete process.env.MS365_MCP_BROKER_MAX_BYTES;
     delete process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES;
@@ -70,6 +72,77 @@ describe('attachment-broker', () => {
     });
     it('flags an unsatisfiable range', () => {
       expect(parseRange('bytes=200-300', 100)).toBe('invalid');
+    });
+  });
+
+  describe('MS365_MCP_BROKER_PUBLIC_URL', () => {
+    const input = { bytes: Buffer.from('hello'), contentType: 'text/plain', resourcePath: '/x' };
+
+    it('leaves the OAuth public URL in charge when unset', () => {
+      expect(getPublicBaseUrl()).toBe('https://mcp.example.com');
+      expect(getPublicBaseUrl('https://cli.example.com/')).toBe('https://cli.example.com');
+    });
+
+    it('treats a blank value as unset', () => {
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = '   ';
+      expect(getPublicBaseUrl()).toBe('https://mcp.example.com');
+      expect(mintHttp(input)).toMatch(/^https:\/\/mcp\.example\.com\/download\//);
+    });
+
+    it('wins over the environment public URL', () => {
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
+      const url = mintHttp(input)!;
+      expect(url).toMatch(/^https:\/\/broker\.example\.com\/download\/[A-Za-z0-9_-]+$/);
+
+      // The route does not care which host minted the link; the handle still redeems.
+      const res = mockRes();
+      downloadRouteHandler({ params: { handle: handleFromUrl(url) }, headers: {} } as any, res);
+      expect(res.statusCode).toBe(200);
+      expect((res.body as Buffer).toString()).toBe('hello');
+    });
+
+    it('wins over a CLI-resolved public URL', () => {
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
+      expect(getPublicBaseUrl('https://cli.example.com')).toBe('https://broker.example.com');
+      expect(mintDownloadUrl(input, true, 'https://cli.example.com')).toMatch(
+        /^https:\/\/broker\.example\.com\/download\//
+      );
+    });
+
+    it('enables the broker on its own when no OAuth public URL is configured', () => {
+      delete process.env.MS365_MCP_PUBLIC_URL;
+      expect(isBrokerEnabled(true)).toBe(false);
+
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
+      expect(isBrokerEnabled(true)).toBe(true);
+      expect(reserveBrokerCapacity(1, true)).toBeDefined();
+      expect(mintHttp(input)).toMatch(/^https:\/\/broker\.example\.com\/download\//);
+    });
+
+    it('strips trailing slashes and keeps a path prefix', () => {
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = ' https://broker.example.com/ms365// ';
+      expect(getPublicBaseUrl()).toBe('https://broker.example.com/ms365');
+      expect(mintHttp(input)).toMatch(/^https:\/\/broker\.example\.com\/ms365\/download\//);
+    });
+
+    it('stays disabled in stdio', () => {
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
+      expect(isBrokerEnabled(false)).toBe(false);
+      expect(mintDownloadUrl(input, false)).toBeUndefined();
+      expect(__testing.store.size).toBe(0);
+    });
+
+    it.each([
+      ['not a URL', 'broker.example.com'],
+      ['a non-http scheme', 'ftp://broker.example.com'],
+      ['a query string', 'https://broker.example.com/?x=1'],
+      ['a fragment', 'https://broker.example.com/#x'],
+      ['credentials', 'https://user:pw@broker.example.com'],
+    ])('refuses %s instead of minting an unusable link', (_label, value) => {
+      process.env.MS365_MCP_BROKER_PUBLIC_URL = value;
+      expect(() => isBrokerEnabled(true)).toThrow(/MS365_MCP_BROKER_PUBLIC_URL/);
+      expect(() => mintHttp(input)).toThrow(/MS365_MCP_BROKER_PUBLIC_URL/);
+      expect(__testing.store.size).toBe(0);
     });
   });
 
