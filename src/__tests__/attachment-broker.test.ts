@@ -137,6 +137,8 @@ describe('attachment-broker', () => {
       ['a non-http scheme', 'ftp://broker.example.com'],
       ['a query string', 'https://broker.example.com/?x=1'],
       ['a fragment', 'https://broker.example.com/#x'],
+      ['a bare query delimiter', 'https://broker.example.com/?'],
+      ['a bare fragment delimiter', 'https://broker.example.com/#'],
       ['credentials', 'https://user:pw@broker.example.com'],
     ])('refuses %s instead of minting an unusable link', (_label, value) => {
       process.env.MS365_MCP_BROKER_PUBLIC_URL = value;

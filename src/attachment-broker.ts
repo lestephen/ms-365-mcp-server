@@ -78,7 +78,9 @@ function getBrokerPublicUrlOverride(): string | undefined {
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new Error('MS365_MCP_BROKER_PUBLIC_URL must use http or https');
   }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+  // WHATWG parsing leaves search and hash empty for a bare trailing `?` or `#`,
+  // which would still break minted links, so check the raw value as well.
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || /[?#]/.test(value)) {
     throw new Error(
       'MS365_MCP_BROKER_PUBLIC_URL must not carry credentials, a query string, or a fragment'
     );
