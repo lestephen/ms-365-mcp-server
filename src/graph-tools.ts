@@ -1236,7 +1236,7 @@ async function mintUploadUrl(
   const minting = getAttachmentMinting();
   if (!minting) {
     return uploadError(
-      'This server is not running with --enable-attachment-urls, so no upload URL can be minted. Attach small files with add-mail-attachment (base64 contentBytes).'
+      'This server is not running with --enable-attachment-urls, so no upload URL can be minted. Use create-mail-attachment-upload-session and PUT the bytes from disk to its uploadUrl.'
     );
   }
   if (!UPLOAD_TARGET.test(target) || !isPlainGraphPath(target)) {

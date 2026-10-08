@@ -244,7 +244,7 @@
     "toolName": "add-mail-attachment",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "The only path for attachments under 3MB. contentBytes must carry the complete base64 verbatim; a truncated argument fails with 400 UnableToDeserializePostBody. At 3MB and above use create-mail-attachment-upload-session, which rejects anything smaller. Body requires @odata.type: {\"@odata.type\": \"#microsoft.graph.fileAttachment\", \"name\": \"file.pdf\", \"contentBytes\": \"<base64>\"}."
+    "llmTip": "This server refuses a fileAttachment here at any size, because inline contentBytes puts the file in the transcript. To attach a file, use get-upload-url (PUT the bytes from disk to the returned URL) or create-mail-attachment-upload-session. Still usable for a referenceAttachment or itemAttachment, which carry no contentBytes; body requires @odata.type, e.g. {\"@odata.type\": \"#microsoft.graph.referenceAttachment\", ...}."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments/createUploadSession",
