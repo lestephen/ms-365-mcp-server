@@ -23,8 +23,8 @@ import { getCombinedPresetPattern } from '../src/tool-categories.js';
  * every behavioural assertion still passed, and tsup does not typecheck.
  *
  * Upstream v0.160 moved both registrars to an options object, which retires the
- * positional hazard itself. These still assert that the call sites hand the blocklist,
- * httpMode and public URL through, because omitting a property from an object is the
+ * positional hazard itself. These still assert that the call sites hand the blocklist
+ * and httpMode through, because omitting a property from an object is the
  * same silent failure as omitting an argument: the type makes every one optional.
  */
 
@@ -138,50 +138,19 @@ describe('registerGraphTools wiring', () => {
     expect(typeof options.httpMode).toBe('boolean');
   });
 
-  it('passes the CLI public URL into broker-aware tools', () => {
-    buildServer({
-      http: '3000',
-      publicUrl: 'https://cli.example.com/',
-      enabledTools: DIRECT,
-    });
-
-    expect(optionsOf(registerGraphTools).publicBaseUrl).toBe('https://cli.example.com');
-  });
-
-  it('passes the environment public URL when the CLI option is absent', () => {
+  it('resolves the OAuth public URL from the CLI option or the environment', () => {
     const previous = process.env.MS365_MCP_PUBLIC_URL;
-    process.env.MS365_MCP_PUBLIC_URL = 'https://env.example.com/';
-    try {
-      buildServer({ http: '3000', enabledTools: DIRECT });
-
-      expect(optionsOf(registerGraphTools).publicBaseUrl).toBe('https://env.example.com');
-    } finally {
-      if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
-      else process.env.MS365_MCP_PUBLIC_URL = previous;
-    }
-  });
-
-  it('keeps the OAuth public URL independent of MS365_MCP_BROKER_PUBLIC_URL', () => {
-    // The broker override is resolved inside attachment-broker. The OAuth public URL,
-    // which feeds the authorization-server and protected-resource metadata, must not
-    // pick it up, or moving the download host would move the OAuth issuer with it.
-    const previous = process.env.MS365_MCP_PUBLIC_URL;
-    const previousBroker = process.env.MS365_MCP_BROKER_PUBLIC_URL;
     process.env.MS365_MCP_PUBLIC_URL = 'https://oauth.example.com/';
-    process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
     try {
       expect(resolvePublicBaseUrl({})).toBe('https://oauth.example.com');
-
-      buildServer({ http: '3000', enabledTools: DIRECT });
-      expect(optionsOf(registerGraphTools).publicBaseUrl).toBe('https://oauth.example.com');
-
+      expect(resolvePublicBaseUrl({ publicUrl: 'https://cli.example.com/' })).toBe(
+        'https://cli.example.com'
+      );
       delete process.env.MS365_MCP_PUBLIC_URL;
       expect(resolvePublicBaseUrl({})).toBeUndefined();
     } finally {
       if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
       else process.env.MS365_MCP_PUBLIC_URL = previous;
-      if (previousBroker === undefined) delete process.env.MS365_MCP_BROKER_PUBLIC_URL;
-      else process.env.MS365_MCP_BROKER_PUBLIC_URL = previousBroker;
     }
   });
 });

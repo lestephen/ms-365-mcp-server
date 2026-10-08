@@ -128,6 +128,19 @@ async function loadModule() {
   return mod;
 }
 
+/**
+ * EKI: turn on upstream's ticket store (--enable-attachment-urls) in the module graph
+ * loadModule just reset, so it cannot leak into the next case. Call it after loadModule.
+ */
+async function enableAttachmentUrls() {
+  const { configureAttachmentMinting } = await import('../lib/attachment-minting.js');
+  const { AttachmentTicketStore } = await import('../lib/attachment-tickets.js');
+  configureAttachmentMinting({
+    store: new AttachmentTicketStore(120),
+    config: { base: 'http://m365:3000', key: 'k', keyId: '1', ttlSeconds: 120 },
+  });
+}
+
 /** Minimal McpServer mock that captures registered tools */
 function createMockServer() {
   const tools = new Map<
@@ -2993,13 +3006,13 @@ describe('graph-tools', () => {
       };
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
+      await enableAttachmentUrls();
       registerGraphTools(server as any, graphClient as any, {
         readOnly: false,
         orgMode: false,
         multiAccount: false,
         accountNames: [],
         httpMode: true,
-        publicBaseUrl: 'https://mcp.example.com',
       });
 
       const result = await server.tools.get('download-bytes')!.handler({ target });
@@ -3249,13 +3262,11 @@ describe('graph-tools', () => {
       expect(payload.error).toMatch(/relative Microsoft Graph path/);
     });
 
-    it('refuses oversized inline content and points to get-download-url when the broker is enabled', async () => {
+    it('refuses oversized inline content and points to get-download-url when attachment URLs are enabled', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
-      const prev = process.env.MS365_MCP_PUBLIC_URL;
-      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
-      try {
+      {
         const graphClient = {
           graphRequest: vi.fn(),
           downloadToBuffer: vi.fn(),
@@ -3263,6 +3274,7 @@ describe('graph-tools', () => {
 
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
+        await enableAttachmentUrls();
         const { GraphDownloadSizeLimitError } = await import('../graph-client.js');
         graphClient.downloadToBuffer.mockRejectedValue(
           new GraphDownloadSizeLimitError(
@@ -3292,9 +3304,6 @@ describe('graph-tools', () => {
           { accessToken: undefined }
         );
         expect(graphClient.graphRequest).not.toHaveBeenCalled();
-      } finally {
-        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
-        else process.env.MS365_MCP_PUBLIC_URL = prev;
       }
     });
 
@@ -3312,13 +3321,13 @@ describe('graph-tools', () => {
       };
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
+      await enableAttachmentUrls();
       registerGraphTools(server as any, graphClient as any, {
         readOnly: false,
         orgMode: false,
         multiAccount: false,
         accountNames: [],
         httpMode: true,
-        publicBaseUrl: 'https://cli.example.com',
       });
 
       const result = await server.tools
@@ -3341,11 +3350,6 @@ describe('graph-tools', () => {
     });
 
     it.each([
-      [
-        'meeting recording',
-        '/me/onlineMeetings/meeting1/recordings/recording1/content',
-        'video/mp4',
-      ],
       [
         'unsupported authenticated content',
         '/me/onlineMeetings/meeting1/transcripts/transcript1/content',
@@ -3375,13 +3379,13 @@ describe('graph-tools', () => {
         };
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
+        await enableAttachmentUrls();
         registerGraphTools(server as any, graphClient as any, {
           readOnly: false,
           orgMode: false,
           multiAccount: false,
           accountNames: [],
           httpMode: true,
-          publicBaseUrl: 'https://cli.example.com',
         });
 
         const result = await server.tools.get('download-bytes')!.handler({ target });
@@ -3397,7 +3401,7 @@ describe('graph-tools', () => {
       }
     );
 
-    it('passes oversized content through in stdio even when a public URL is configured', async () => {
+    it('passes oversized content through in stdio, where attachment URLs are off', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
@@ -3435,7 +3439,7 @@ describe('graph-tools', () => {
       }
     });
 
-    it('passes oversized content through when the broker is disabled', async () => {
+    it('passes oversized content through when attachment URLs are disabled', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
@@ -3890,7 +3894,7 @@ describe('graph-tools', () => {
       expect(result.isError).toBe(true);
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.error).toMatch(/out-of-band broker is not configured/);
+      expect(payload.error).toMatch(/--enable-attachment-urls/);
     });
 
     it('rejects group mailbox attachment paths (no pre-authed URL exists)', async () => {
@@ -3910,7 +3914,7 @@ describe('graph-tools', () => {
       expect(result.isError).toBe(true);
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.error).toMatch(/out-of-band broker is not configured/);
+      expect(payload.error).toMatch(/--enable-attachment-urls/);
     });
 
     it('rejects list-item driveItem relationships until callers provide a drive item path', async () => {
@@ -4053,176 +4057,7 @@ describe('graph-tools', () => {
       expect(payload.downloadUrl).toBe(downloadUrl);
     });
 
-    it('brokers a mail attachment to a tokenless URL when the broker is enabled', async () => {
-      mockEndpoints.length = 0;
-      mockEndpointsJson = [];
-
-      const prev = process.env.MS365_MCP_PUBLIC_URL;
-      const previousMaxBytes = process.env.MS365_MCP_BROKER_MAX_BYTES;
-      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
-      process.env.MS365_MCP_BROKER_MAX_BYTES = '4';
-      try {
-        const graphClient = {
-          graphRequest: vi.fn(),
-          downloadToBuffer: vi.fn().mockResolvedValue({
-            bytes: Buffer.from('PDF'),
-            allocatedBytes: 4,
-            contentType: 'application/pdf',
-            contentLength: 3,
-          }),
-        };
-
-        const server = createMockServer();
-        const { registerGraphTools } = await loadModule();
-        registerGraphTools(server as any, graphClient as any, {
-          readOnly: false,
-          orgMode: false,
-          multiAccount: false,
-          accountNames: [],
-          httpMode: true,
-        });
-
-        const tool = server.tools.get('get-download-url');
-        const result = await tool!.handler({
-          target: '/me/messages/m1/attachments/a1/$value',
-        });
-
-        expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(
-          '/me/messages/m1/attachments/a1/$value',
-          4,
-          { accessToken: undefined }
-        );
-        expect(graphClient.graphRequest).not.toHaveBeenCalled();
-
-        const payload = JSON.parse(result.content[0].text);
-        expect(payload).toMatchObject({ brokered: true });
-        expect(payload.contentType).toBe('application/pdf');
-        expect(payload.downloadUrl).toMatch(
-          /^https:\/\/mcp\.example\.com\/download\/[A-Za-z0-9_-]+$/
-        );
-      } finally {
-        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
-        else process.env.MS365_MCP_PUBLIC_URL = prev;
-        if (previousMaxBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_BYTES;
-        else process.env.MS365_MCP_BROKER_MAX_BYTES = previousMaxBytes;
-      }
-    });
-
-    it('brokers onto MS365_MCP_BROKER_PUBLIC_URL when it differs from the OAuth public URL', async () => {
-      mockEndpoints.length = 0;
-      mockEndpointsJson = [];
-
-      const prev = process.env.MS365_MCP_PUBLIC_URL;
-      const prevBroker = process.env.MS365_MCP_BROKER_PUBLIC_URL;
-      process.env.MS365_MCP_PUBLIC_URL = 'https://oauth.example.com';
-      process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com/';
-      try {
-        const graphClient = {
-          graphRequest: vi.fn(),
-          downloadToBuffer: vi.fn().mockResolvedValue({
-            bytes: Buffer.from('PDF'),
-            allocatedBytes: 3,
-            contentType: 'application/pdf',
-            contentLength: 3,
-          }),
-        };
-
-        const server = createMockServer();
-        const { registerGraphTools } = await loadModule();
-        // The server hands tools the OAuth public URL; the override must still win.
-        registerGraphTools(server as any, graphClient as any, {
-          readOnly: false,
-          orgMode: false,
-          multiAccount: false,
-          accountNames: [],
-          httpMode: true,
-          publicBaseUrl: 'https://oauth.example.com',
-        });
-
-        const result = await server.tools.get('get-download-url')!.handler({
-          target: '/me/messages/m1/attachments/a1/$value',
-        });
-
-        expect(result.isError).toBeFalsy();
-        const payload = JSON.parse(result.content[0].text);
-        expect(payload).toMatchObject({ brokered: true });
-        expect(payload.downloadUrl).toMatch(
-          /^https:\/\/broker\.example\.com\/download\/[A-Za-z0-9_-]+$/
-        );
-      } finally {
-        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
-        else process.env.MS365_MCP_PUBLIC_URL = prev;
-        if (prevBroker === undefined) delete process.env.MS365_MCP_BROKER_PUBLIC_URL;
-        else process.env.MS365_MCP_BROKER_PUBLIC_URL = prevBroker;
-      }
-    });
-
-    it('reserves aggregate broker capacity before concurrent downloads start', async () => {
-      mockEndpoints.length = 0;
-      mockEndpointsJson = [];
-
-      const previousPublicUrl = process.env.MS365_MCP_PUBLIC_URL;
-      const previousMaxBytes = process.env.MS365_MCP_BROKER_MAX_BYTES;
-      const previousTotalBytes = process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES;
-      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
-      process.env.MS365_MCP_BROKER_MAX_BYTES = '4';
-      process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = '6';
-      try {
-        let finishDownload!: (value: {
-          bytes: Buffer;
-          allocatedBytes: number;
-          contentType: string;
-          contentLength: number;
-        }) => void;
-        const pendingDownload = new Promise<{
-          bytes: Buffer;
-          allocatedBytes: number;
-          contentType: string;
-          contentLength: number;
-        }>((resolve) => {
-          finishDownload = resolve;
-        });
-        const graphClient = {
-          graphRequest: vi.fn(),
-          downloadToBuffer: vi.fn().mockReturnValue(pendingDownload),
-        };
-        const server = createMockServer();
-        const { registerGraphTools } = await loadModule();
-        registerGraphTools(server as any, graphClient as any, {
-          readOnly: false,
-          orgMode: false,
-          multiAccount: false,
-          accountNames: [],
-          httpMode: true,
-        });
-        const tool = server.tools.get('get-download-url')!;
-
-        const first = tool.handler({ target: '/me/messages/m1/attachments/a1/$value' });
-        await vi.waitFor(() => expect(graphClient.downloadToBuffer).toHaveBeenCalledTimes(1));
-
-        const second = await tool.handler({ target: '/me/messages/m2/attachments/a2/$value' });
-        expect(second.isError).toBe(true);
-        expect(JSON.parse(second.content[0].text).error).toMatch(/memory budget exceeded/);
-        expect(graphClient.downloadToBuffer).toHaveBeenCalledTimes(1);
-
-        finishDownload({
-          bytes: Buffer.from('PDF'),
-          allocatedBytes: 4,
-          contentType: 'application/pdf',
-          contentLength: 3,
-        });
-        expect((await first).isError).toBeFalsy();
-      } finally {
-        if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
-        else process.env.MS365_MCP_PUBLIC_URL = previousPublicUrl;
-        if (previousMaxBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_BYTES;
-        else process.env.MS365_MCP_BROKER_MAX_BYTES = previousMaxBytes;
-        if (previousTotalBytes === undefined) delete process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES;
-        else process.env.MS365_MCP_BROKER_MAX_TOTAL_BYTES = previousTotalBytes;
-      }
-    });
-
-    it('does not mint broker URLs in stdio when a public URL remains configured', async () => {
+    it('does not mint a URL in stdio, where attachment URLs are off', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
@@ -4239,7 +4074,7 @@ describe('graph-tools', () => {
         });
 
         expect(result.isError).toBe(true);
-        expect(JSON.parse(result.content[0].text).error).toMatch(/broker is not configured/);
+        expect(JSON.parse(result.content[0].text).error).toMatch(/--enable-attachment-urls/);
         expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
       } finally {
         if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
@@ -4649,7 +4484,7 @@ describe('graph-tools', () => {
       expect(targetParam.description).toContain('authenticated recording bytes');
       expect(targetParam.description).not.toContain('returns a URL');
       expect(schema.description).toContain('For large content, prefer get-download-url');
-      expect(schema.description).toContain('brokered URLs for supported attachments');
+      expect(schema.description).toContain('--enable-attachment-urls');
     });
 
     it('execute-tool dispatches to download-bytes for a Graph path', async () => {

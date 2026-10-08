@@ -90,7 +90,7 @@ const PRESET_META: Record<
 const UNIVERSAL_UTILITY_TOOLS = ['download-bytes', 'download-bytes-to-file'];
 
 // Scoped utilities are only meaningful where the resources they act on appear. get-download-url
-// resolves native pre-authenticated URLs for drive/SharePoint files and brokered URLs for mail or
+// resolves native pre-authenticated URLs for drive/SharePoint files and server-minted URLs for mail or
 // calendar attachments, so every preset exposing those resources must carry it. parse-teams-url
 // only parses Teams meeting URLs.
 const SCOPED_UTILITY_TOOLS: Record<string, string[]> = {

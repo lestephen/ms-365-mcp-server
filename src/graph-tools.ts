@@ -92,13 +92,6 @@ import { TOOL_CATEGORIES } from './tool-categories.js';
 // by its endpoints.json config (apiVersion), so the generated clients stay version-agnostic
 // and the runtime picks the URL prefix per request. v1.0 endpoints are unchanged.
 const allEndpoints = [...api.endpoints, ...betaApi.endpoints];
-import {
-  getBrokerMaxBytes,
-  isBrokerEnabled,
-  mintDownloadUrl as mintBrokerDownloadUrl,
-  releaseBrokerCapacity,
-  reserveBrokerCapacity,
-} from './attachment-broker.js';
 export interface DiscoverySearchIndex {
   bm25: BM25Index;
   nameTokens: Map<string, Set<string>>;
@@ -847,7 +840,6 @@ interface UtilityToolContext {
   multiAccount: boolean;
   accountNames: string[];
   httpMode: boolean;
-  publicBaseUrl?: string;
   userFields?: string[];
 }
 
@@ -1504,7 +1496,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     method: 'GET',
     path: 'tool:download-bytes',
     description:
-      'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large content, prefer get-download-url, which returns native pre-authenticated URLs for drive/SharePoint files and brokered URLs for supported attachments when the broker is configured.',
+      'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large content, prefer get-download-url, which returns native pre-authenticated URLs for drive/SharePoint files and, on a server running with --enable-attachment-urls, single-use URLs for mail and calendar attachments and meeting recordings.',
     mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
@@ -1531,7 +1523,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       return schema;
     },
-    execute: async (params, { graphClient, authManager, httpMode, publicBaseUrl, userFields }) => {
+    execute: async (params, { graphClient, authManager, userFields }) => {
       const target = params.target;
       const accountParam = params.account as string | undefined;
       if (typeof target !== 'string' || target.length === 0) {
@@ -1584,11 +1576,11 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         // disable the cutoff even for supported targets.
         const downloadUrlKind = classification.kind;
         const hasOutOfBandAlternative =
-          downloadUrlKind === 'brokerable' || downloadUrlKind === 'drive-item';
+          downloadUrlKind === 'brokerable' ||
+          downloadUrlKind === 'drive-item' ||
+          downloadUrlKind === 'meeting-recording';
         const maxInline =
-          isBrokerEnabled(httpMode, publicBaseUrl) && hasOutOfBandAlternative
-            ? downloadBytesMaxInline()
-            : 0;
+          getAttachmentMinting() !== null && hasOutOfBandAlternative ? downloadBytesMaxInline() : 0;
         if (maxInline > 0) {
           try {
             const download = await graphClient.downloadToBuffer(canonicalTarget, maxInline, {
@@ -1628,7 +1620,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           }
         }
 
-        // Without a usable broker, retain the historical byte-faithful response path.
+        // Without a usable ticket store, retain the historical byte-faithful response path.
         const response = await graphClient.graphRequest(canonicalTarget, {
           accessToken: accountAccessToken,
           rawResponse: true,
@@ -1823,7 +1815,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     searchKeywords:
       'download file download drive file download onedrive file sharepoint file download large drive file large sharepoint file large file out-of-band download pre-authenticated url',
     description:
-      "Resolve a short-lived download URL for Microsoft Graph binary content. Drive/SharePoint file content returns Graph's native pre-authenticated URL. When the EKI out-of-band broker is configured, mail attachments and other /$value byte endpoints are fetched server-side and served through a short-lived tokenless broker URL. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType?, brokered? }. NOTE: meeting recordings do NOT expose a pre-authenticated URL — Graph offers no such link for them; use download-bytes for small ones or a recording-specific tool where available.",
+      "Resolve a short-lived download URL for Microsoft Graph binary content. Drive/SharePoint file content returns Graph's native pre-authenticated URL. Mail and calendar attachments, meeting recordings and other /$value byte endpoints have no URL from Graph; on a server running with --enable-attachment-urls this mints a single-use URL the server serves (fetch it once, straight to disk; it does not support resume). Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType? }.",
     mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
@@ -1834,7 +1826,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             'Relative Microsoft Graph path starting with "/". Either a driveItem content path or the item path itself, e.g. ' +
               '/drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}/content, ' +
               'or /sites/{site-id}/drive/items/{driveItem-id}. ' +
-              'A trailing /content is optional and is stripped automatically for drive items. Mail attachment $value paths and other /$value byte endpoints require the EKI broker; meeting recordings are not supported because Graph exposes authenticated bytes rather than a pre-authenticated URL.'
+              'A trailing /content is optional and is stripped automatically for drive items. Mail attachment $value paths, meeting recordings and other /$value byte endpoints are accepted on a server running with --enable-attachment-urls.'
           ),
       };
       if (ctx.multiAccount) {
@@ -1847,7 +1839,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       }
       return schema;
     },
-    execute: async (params, { graphClient, authManager, httpMode, publicBaseUrl, userFields }) => {
+    execute: async (params, { graphClient, authManager, userFields }) => {
       const target = params.target;
       const accountParam = params.account as string | undefined;
       if (typeof target !== 'string' || target.length === 0) {
@@ -1882,7 +1874,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       const { classification } = canonical;
       const { pathPart } = classification;
       // Recording content endpoints return authenticated bytes, not a pre-authenticated URL.
-      // Upstream's ticket store (--enable-attachment-urls) can serve them; the EKI broker cannot.
+      // Upstream's ticket store (--enable-attachment-urls) can serve them.
       if (classification.kind === 'meeting-recording') {
         const minted = await mintDownloadUrl(pathPart, accountParam, authManager);
         if (minted) return minted;
@@ -1921,60 +1913,24 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
 
         if (classification.kind === 'brokerable') {
-          if (!isBrokerEnabled(httpMode, publicBaseUrl)) {
-            // Fall back to upstream's ticket store when it is configured instead.
-            const fetchTarget = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
-            const minted = await mintDownloadUrl(fetchTarget, accountParam, authManager);
-            if (minted) return minted;
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error:
-                      'This resource does not expose a pre-authenticated download URL (mail attachments and other /$value byte endpoints do not expose a pre-authenticated one from Graph), and the out-of-band broker is not configured: neither the EKI broker nor --enable-attachment-urls is set. Use download-bytes to read these bytes.',
-                  }),
-                },
-              ],
-              isError: true,
-            };
-          }
-          const fetchPath = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
-          const maximumBytes = getBrokerMaxBytes();
-          const reservation = reserveBrokerCapacity(maximumBytes, httpMode, publicBaseUrl);
-          try {
-            const download = await graphClient.downloadToBuffer(fetchPath, maximumBytes, {
-              accessToken: accountAccessToken,
-            });
-            const { bytes, contentType } = download;
-            const downloadUrl = mintBrokerDownloadUrl(
+          // Graph has no pre-authenticated URL for these bytes, so upstream's ticket store
+          // (--enable-attachment-urls) mints a single-use URL this server serves. The EKI
+          // broker that used to do this, with Range/resume, was retired in favour of it.
+          const fetchTarget = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
+          const minted = await mintDownloadUrl(fetchTarget, accountParam, authManager);
+          if (minted) return minted;
+          return {
+            content: [
               {
-                bytes,
-                memoryBytes: download.allocatedBytes,
-                contentType,
-                userPrincipalName: getUserIdentityForAudit(getRequestTokens()?.accessToken),
-                resourcePath: fetchPath,
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'This resource does not expose a pre-authenticated download URL (mail attachments and other /$value byte endpoints do not expose a pre-authenticated one from Graph), and this server is not running with --enable-attachment-urls. Use download-bytes to read these bytes.',
+                }),
               },
-              httpMode,
-              publicBaseUrl,
-              reservation
-            );
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    downloadUrl,
-                    size: bytes.length,
-                    contentType,
-                    brokered: true,
-                  }),
-                },
-              ],
-            };
-          } finally {
-            releaseBrokerCapacity(reservation);
-          }
+            ],
+            isError: true,
+          };
         }
 
         if (classification.kind !== 'drive-item') {
@@ -3303,8 +3259,6 @@ export interface GraphToolRegistrationOptions {
   blockedTools?: string;
   /** EKI: tools registered by name in hybrid discovery mode; only steers discovery hints. */
   directTools?: ToolNameMatcher;
-  /** EKI: effective public base URL, used to mint EKI broker links. */
-  publicBaseUrl?: string;
 }
 
 export function registerGraphTools(
@@ -3323,7 +3277,6 @@ export function registerGraphTools(
     httpMode = false,
     userFields: userFieldsValue,
     blockedTools: blockedToolsPattern,
-    publicBaseUrl,
   } = options;
   const userFields = parseUserFields(userFieldsValue);
   const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
@@ -3587,7 +3540,6 @@ export function registerGraphTools(
     multiAccount,
     accountNames,
     httpMode,
-    publicBaseUrl,
     userFields,
   };
   for (const utility of UTILITY_TOOLS) {
@@ -3785,7 +3737,6 @@ export function registerDiscoveryTools(
     userFields: userFieldsValue,
     blockedTools: blockedToolsPattern,
     directTools: directToolsPattern,
-    publicBaseUrl,
   } = options;
   // Discovery filters by regex source. A predicate (what hybrid mode hands to
   // registerGraphTools) has no source to compile, and ignoring it would widen the
@@ -3890,7 +3841,6 @@ export function registerDiscoveryTools(
     multiAccount,
     accountNames,
     httpMode,
-    publicBaseUrl,
     userFields,
   };
   const utilityByName = new Map(utilityTools.map((u) => [u.name, u]));

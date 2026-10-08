@@ -29,10 +29,10 @@ describe('buildMcpServerInstructions', () => {
     expect(s).not.toContain('account parameter');
   });
 
-  it('routes large files and brokered attachments to get-download-url', () => {
+  it('routes large files and server-minted attachment URLs to get-download-url', () => {
     const s = buildMcpServerInstructions({ ...baseCtx, discovery: false });
     expect(s).toContain('prefer get-download-url for large content');
-    expect(s).toContain('brokered URLs for mail and calendar attachments');
+    expect(s).toContain('single-use URLs for mail and calendar attachments');
     expect(s).toContain('download-bytes for small authenticated byte reads');
     expect(s).toContain('out-of-band option for meeting recordings');
     expect(s).toContain('relative Microsoft Graph paths, not absolute URLs');

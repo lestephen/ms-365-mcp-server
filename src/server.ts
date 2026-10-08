@@ -36,7 +36,6 @@ import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validat
 import { withToolBlocklist } from './lib/tool-blocklist.js';
 import { withMetricsObserver, seedAdvertisedSurface } from './lib/metrics-transport.js';
 import { contentType, enableMetrics, metricsEnabled, metricsText } from './metrics.js';
-import { downloadRouteHandler, isBrokerEnabled } from './attachment-broker.js';
 import logger, { enableConsoleLogging } from './logger.js';
 import { buildMcpServerInstructions } from './mcp-instructions.js';
 import { installToolSchemaRefNormalization } from './normalize-tool-schema.js';
@@ -339,7 +338,6 @@ class MicrosoftGraphServer {
   }
 
   private createMcpServer(): McpServer {
-    const publicBaseUrl = resolvePublicBaseUrl(this.options);
     const server = new McpServer(
       {
         name: 'Microsoft365MCP',
@@ -379,7 +377,6 @@ class MicrosoftGraphServer {
       httpMode: this.hidesStdioOnlyTools(),
       userFields: this.options.userFields,
       blockedTools: this.options.blockedTools,
-      publicBaseUrl,
     };
 
     if (this.options.discovery) {
@@ -1262,11 +1259,6 @@ class MicrosoftGraphServer {
           }
         }
       );
-
-      if (isBrokerEnabled(true, publicBase)) {
-        app.get('/download/:handle', downloadRouteHandler);
-        logger.info('Attachment broker enabled: GET /download/:handle');
-      }
 
       // Server-minted attachment URLs (--enable-attachment-urls).
       //

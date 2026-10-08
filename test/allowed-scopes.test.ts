@@ -223,9 +223,8 @@ describe('allowed scope HTTP behavior', () => {
         allowedScopes: 'Mail.Read',
         httpMode: true,
         userFields: undefined,
-        // Unset --blocked-tools and no effective public URL.
+        // Unset --blocked-tools.
         blockedTools: undefined,
-        publicBaseUrl: undefined,
       })
     );
   });

@@ -579,7 +579,7 @@ class GraphClient {
       // One unpooled backing allocation avoids both the chunk array and Buffer.concat's
       // second full-size allocation. With no trustworthy Content-Length, allocate the
       // caller's already-reserved maximum. The returned view retains this allocation,
-      // so allocatedBytes lets the broker keep charging the real memory until expiry.
+      // so allocatedBytes reports the real memory a caller retains while it holds the bytes.
       const allocatedBytes = declaredLength ?? maximumBytes;
       const destination = Buffer.allocUnsafeSlow(allocatedBytes);
       let contentLength = 0;
@@ -611,11 +611,11 @@ class GraphClient {
 
       // Right-size before returning. `destination` is the caller's whole maximum whenever
       // Content-Length was absent or untrustworthy, and a subarray RETAINS its backing
-      // allocation, so handing that view out charges the broker the maximum for every
+      // allocation, so handing that view out would retain the maximum for every
       // download regardless of the file's real size (EnviroKinetics/ms365-mcp#61). Node's
       // fetch sends `accept-encoding: gzip, deflate` by default, so Graph responses are
       // typically compressed and declaredLength is undefined on essentially every
-      // brokered download - this is the normal path, not an edge case.
+      // download - this is the normal path, not an edge case.
       //
       // Copy rather than re-account: charging bytes.length while still holding the
       // oversized allocation would turn a refusal into an OOM.
