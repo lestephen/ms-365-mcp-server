@@ -2,16 +2,23 @@ import logger from './logger.js';
 import AuthManager from './auth.js';
 import { encode as toonEncode } from '@toon-format/toon';
 import type { AppSecrets } from './secrets.js';
-import { getCloudEndpoints } from './cloud-config.js';
+import { getGraphBaseUrl } from './cloud-config.js';
 import { getRequestTokens } from './request-context.js';
 import {
   fetchWithResilience,
   getSharedBreaker,
   loadResilienceConfig,
 } from './lib/graph-resilience.js';
+import { applyBatchContentType } from './lib/batch-content-type.js';
 import { applyMessageSignoffToRequest } from './lib/message-signoff.js';
+import { TRANSPORT_OK_MESSAGE } from './lib/select-projection.js';
 import { open, stat, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
+
+// Strict UTF-8: throws on any invalid sequence instead of substituting U+FFFD, and
+// keeps a leading byte-order mark so text round-trips byte for byte. The default
+// response.text() does neither, which is how a non-UTF-8 body turns into garbage.
+const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Returns true if the given HTTP Content-Type header indicates a binary
@@ -63,6 +70,13 @@ interface GraphRequestOptions {
   // Pin this response to JSON regardless of the configured format, so the
   // fetchAllPages merge can JSON.parse each page before re-encoding (#560).
   forceJsonOutput?: boolean;
+  // Treat the body as bytes whatever Content-Type Graph reports, so callers whose
+  // contract is "return the bytes" (download-bytes) never go through the lossy
+  // response.text() path. Without this, only types on the isBinaryContentType
+  // allowlist are read raw; application/msword, application/rtf, message/rfc822
+  // and any other unlisted type come back as UTF-8 text with every invalid byte
+  // sequence replaced by U+FFFD, and the file cannot be rebuilt.
+  forceBinary?: boolean;
 
   [key: string]: unknown;
 }
@@ -88,6 +102,9 @@ interface GraphResponseMetadata {
   graph_batch_subrequest_count?: number;
   graph_batch_http_status_counts?: Record<string, number>;
   graph_batch_error_code_counts?: Record<string, number>;
+  result_count?: number;
+  result_has_more?: boolean;
+  response_bytes?: number;
 }
 
 interface GraphRequestResult {
@@ -142,6 +159,30 @@ function extractGraphErrorCodeFromBody(body: unknown): string | undefined {
   const error = body.error;
   const code = isRecord(error) ? error.code : body.code;
   return typeof code === 'string' ? code : undefined;
+}
+
+/**
+ * Volume metadata for the audit trail, derived from the already-parsed response.
+ *
+ * Sits beside extractBatchMetadata for the same reason: the object is in hand
+ * here, so this costs nothing and is independent of the output format the caller
+ * eventually serialises to.
+ *
+ * result_has_more is emitted explicitly when the payload is a collection, so a
+ * consumer can tell "complete result" from "not a collection" rather than having
+ * both appear as the same absence.
+ *
+ * Counts the top-level `value` array only. Nested collections under-report:
+ * Microsoft Search returns `value: [{ hitsContainers: [{ hits: [...] }] }]`, so
+ * 500 hits appear as result_count 1, and the semantic `retrieval` tool has no
+ * top-level `value` at all. Do not threshold on result_count for search tools.
+ */
+function extractPayloadMetadata(data: unknown): Partial<GraphResponseMetadata> {
+  if (!isRecord(data) || !Array.isArray(data.value)) return {};
+  return {
+    result_count: data.value.length,
+    result_has_more: typeof data['@odata.nextLink'] === 'string',
+  };
 }
 
 function extractBatchMetadata(data: unknown): Partial<GraphResponseMetadata> {
@@ -236,47 +277,61 @@ class GraphClient {
       }
 
       const contentTypeHeader = response.headers?.get?.('content-type') || '';
-      const isBinaryResponse = isBinaryContentType(contentTypeHeader);
+      const isBinaryResponse =
+        options.forceBinary === true || isBinaryContentType(contentTypeHeader);
       let metadata: GraphResponseMetadata = { http_status: response.status };
 
       let result: any;
 
-      if (isBinaryResponse) {
-        // Binary payloads (images, video, pdf, octet-stream, etc.) must not be
-        // decoded with response.text() — that performs a lossy UTF-8 decode and
-        // replaces every high byte with U+FFFD, destroying the file. Read the
-        // raw bytes and return them as base64 so callers can reconstruct them.
-        const buffer = Buffer.from(await response.arrayBuffer());
+      // Every body is read as bytes first. A body is handed on as text only if the
+      // caller did not ask for bytes, the Content-Type is not on the binary
+      // allowlist, AND it decodes as strict UTF-8. Anything else is returned as
+      // base64. This is the invariant: the client never returns lossy text — a
+      // Content-Type we failed to list (application/msword, application/rtf,
+      // message/rfc822) or a text/* body in another encoding can no longer come
+      // back with its bytes replaced by U+FFFD.
+      const buffer = Buffer.from(await response.arrayBuffer());
+      // Bytes actually transferred, before base64 inflates them ~1.37x.
+      metadata = { ...metadata, response_bytes: buffer.byteLength };
+
+      let text: string | undefined;
+      if (!isBinaryResponse) {
+        try {
+          text = UTF8_STRICT.decode(buffer);
+        } catch {
+          text = undefined; // not UTF-8: fall through to bytes
+        }
+      }
+
+      if (text === undefined) {
         result = {
-          message: 'OK!',
+          message: TRANSPORT_OK_MESSAGE,
           contentType: contentTypeHeader,
           encoding: 'base64',
           contentLength: buffer.byteLength,
           contentBytes: buffer.toString('base64'),
         };
+      } else if (text === '') {
+        result = { message: TRANSPORT_OK_MESSAGE };
+      } else if (options.rawResponse) {
+        // download-bytes on /content wants the body verbatim. A JSON body
+        // would otherwise round-trip through JSON.parse -> JSON.stringify,
+        // which is lossy (whitespace, trailing newline, key order, number
+        // formatting). Return the raw text instead. (issue #546)
+        result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
       } else {
-        const text = await response.text();
-
-        if (text === '') {
-          result = { message: 'OK!' };
-        } else if (options.rawResponse) {
-          // download-bytes on /content wants the body verbatim. A JSON body
-          // would otherwise round-trip through JSON.parse -> JSON.stringify,
-          // which is lossy (whitespace, trailing newline, key order, number
-          // formatting). Return the raw text instead. (issue #546)
-          result = { message: 'OK!', rawResponse: text };
-        } else {
-          try {
-            result = JSON.parse(text);
-          } catch {
-            result = { message: 'OK!', rawResponse: text };
-          }
+        try {
+          // A UTF-8 BOM is kept in rawResponse for byte fidelity but is not JSON.
+          result = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+        } catch {
+          result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
         }
       }
 
       if (endpoint === '/$batch') {
         metadata = { ...metadata, ...extractBatchMetadata(result) };
       }
+      metadata = { ...metadata, ...extractPayloadMetadata(result) };
 
       // If includeHeaders is requested, add response headers to the result
       if (options.includeHeaders) {
@@ -308,6 +363,75 @@ class GraphClient {
    * memory or hit V8's max string length. Creates the file with wx + 0o600 (never
    * overwrites) and removes a partial file if the transfer fails.
    */
+  /**
+   * Fetch Graph binary content and hand back the undrained response stream.
+   *
+   * Same auth, same resilience and the same error mapping as `downloadToFile`,
+   * which is the reason this exists rather than the attachment route calling
+   * `fetch` for itself: token acquisition, the OBO/bearer context tokens, retry
+   * and the 403-scope special case are all in `performRequest`, which is
+   * private. Splitting them would give the route a second, quietly divergent
+   * copy of the auth path.
+   *
+   * The caller owns the body from here and MUST consume or cancel it -- an
+   * abandoned stream holds a socket open until the agent times out.
+   */
+  async downloadStream(
+    endpoint: string,
+    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion'> = {}
+  ): Promise<{
+    body: NonNullable<Response['body']>;
+    contentType: string;
+    contentLength: number | null;
+    contentDisposition: string | null;
+  }> {
+    const contextTokens = getRequestTokens();
+    const accessToken =
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    if (!accessToken) {
+      throw new Error('No access token available');
+    }
+
+    const response = await this.performRequest(endpoint, accessToken, options);
+    if (response.status === 403) {
+      const errorText = await response.text();
+      if (errorText.includes('scope') || errorText.includes('permission')) {
+        throw new Error(
+          `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
+        );
+      }
+      throw new Error(
+        `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+      );
+    }
+    if (!response.body) {
+      throw new Error('Microsoft Graph returned an empty response body');
+    }
+
+    // Absent is null, and `Number(null)` is 0, which `Number.isFinite` accepts -- so
+    // reading this with Number() alone reports a length of zero for a response that has
+    // one and simply did not declare it, and the route then sends `content-length: 0`
+    // ahead of a body it goes on to stream. Only an actual digit string is a length.
+    const rawLength = response.headers.get('content-length');
+    // fetch requests gzip by default and undici decodes the body, but leaves the header at
+    // the *compressed* size. Forwarding that caps the response short of the bytes actually
+    // being streamed, and the peer sees a 200 with a truncated file and no error anywhere,
+    // so a declared length is only usable when the body was not decoded on the way in.
+    const decoded = response.headers.get('content-encoding') !== null;
+    const declaredLength = !decoded && rawLength !== null && /^\d+$/.test(rawLength.trim());
+    return {
+      body: response.body,
+      contentType: response.headers.get('content-type') || 'application/octet-stream',
+      contentLength: declaredLength ? Number(rawLength) : null,
+      contentDisposition: response.headers.get('content-disposition'),
+    };
+  }
+
   async downloadToFile(
     endpoint: string,
     destinationPath: string,
@@ -522,9 +646,8 @@ class GraphClient {
     accessToken: string,
     options: GraphRequestOptions
   ): Promise<Response> {
-    const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
     const apiVersion = options.apiVersion || 'v1.0';
-    const url = `${cloudEndpoints.graphApi}/${apiVersion}${endpoint}`;
+    const url = `${getGraphBaseUrl(this.secrets.cloudType)}/${apiVersion}${endpoint}`;
 
     logger.info(`[GRAPH CLIENT] Final URL being sent to Microsoft: ${url}`);
 
@@ -532,7 +655,11 @@ class GraphClient {
     // Signoff gate sits at the outbound chokepoint, keyed on method + path, so
     // every route to a message write - tool aliases, PATCH edits and $batch
     // sub-requests alike - passes through it.
-    const body = applyMessageSignoffToRequest(method, endpoint, options.body);
+    const signedBody = applyMessageSignoffToRequest(method, endpoint, options.body);
+    // Graph 400s the whole batch when a write sub-request carries a body with
+    // no Content-Type, so fill it in rather than making every caller remember
+    // it (#677). After the gate, which has to judge the caller's own payload.
+    const body = applyBatchContentType(method, endpoint, signedBody);
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,

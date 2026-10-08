@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { registerGraphTools } from '../src/graph-tools.js';
 import type { GraphClient } from '../src/graph-client.js';
+import { registerGraphTools } from '../src/graph-tools.js';
 
 vi.mock('../src/logger.js', () => ({
   default: { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
@@ -26,19 +26,10 @@ describe('Misplaced request body wrapping (issue #620)', () => {
   });
 
   function getToolHandler(toolName: string, blockedToolsPattern?: string) {
-    registerGraphTools(
-      mockServer,
-      mockGraphClient,
-      false,
-      undefined,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      false,
-      blockedToolsPattern
-    );
+    registerGraphTools(mockServer, mockGraphClient, {
+      orgMode: true,
+      blockedTools: blockedToolsPattern,
+    });
     const call = mockServer.registerTool.mock.calls.find((c: unknown[]) => c[0] === toolName);
     expect(call).toBeDefined();
     return call![call!.length - 1] as (params: Record<string, unknown>) => Promise<unknown>;

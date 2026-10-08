@@ -1,6 +1,15 @@
 import { z } from 'zod';
 
-export type UnencodedPathParameterKind = 'quoted-literal' | 'nonnegative-integer' | 'relative-path';
+export type UnencodedPathParameterKind =
+  | 'quoted-literal'
+  | 'nonnegative-integer'
+  | 'relative-path'
+  | 'datetime-literal';
+
+// An OData DateTimeOffset literal as Graph's function parameters take it, unquoted:
+// 2026-10-08T00:00:00Z, with optional seconds, fraction and a numeric offset.
+const DATETIME_OFFSET =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,7})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 const URL_DELIMITERS = /[?#\\]/;
 const PERCENT_ESCAPE = /%[0-9a-f]{2}/i;
@@ -35,6 +44,10 @@ export function classifyUnencodedPathParameter(
   if (before.endsWith("='") && after.startsWith("')")) return 'quoted-literal';
   if (before.endsWith('index=') && after.startsWith(')')) return 'nonnegative-integer';
   if (before.endsWith(':/')) return 'relative-path';
+  // An unquoted DateTime function argument, e.g. getAllTranscripts(...,startDateTime={x},...).
+  if (/DateTime=$/.test(before) && (after.startsWith(',') || after.startsWith(')'))) {
+    return 'datetime-literal';
+  }
 
   throw new Error(
     `skipEncoding parameter ${JSON.stringify(paramName)} has an unsupported route context in ${JSON.stringify(pathPattern)}`
@@ -63,6 +76,11 @@ export function unencodedPathParameterError(
       return /^(0|[1-9]\d*)$/.test(value)
         ? undefined
         : `${paramName} must be a nonnegative decimal integer`;
+
+    case 'datetime-literal':
+      return DATETIME_OFFSET.test(value)
+        ? undefined
+        : `${paramName} must be an ISO 8601 date-time with a Z or numeric offset, e.g. 2026-10-08T00:00:00Z`;
 
     case 'relative-path': {
       if (PERCENT_ESCAPE.test(value)) return `${paramName} must not contain percent-encoded bytes`;
@@ -96,9 +114,15 @@ export function prepareUnencodedPathParameter(
   value: unknown
 ): string {
   assertSafeUnencodedPathParameter(pathPattern, paramName, value);
-  return classifyUnencodedPathParameter(pathPattern, paramName) === 'quoted-literal'
-    ? encodeURIComponent(value.replace(/'/g, "''")).replace(/'/g, '%27')
-    : value;
+  switch (classifyUnencodedPathParameter(pathPattern, paramName)) {
+    case 'quoted-literal':
+      return encodeURIComponent(value.replace(/'/g, "''")).replace(/'/g, '%27');
+    case 'datetime-literal':
+      // Validated above, so only ":" and a "+" offset change; a raw "+" would read as a space.
+      return encodeURIComponent(value);
+    default:
+      return value;
+  }
 }
 
 export function refineUnencodedPathParameterSchema(

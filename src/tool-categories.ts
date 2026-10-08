@@ -104,6 +104,7 @@ const SCOPED_UTILITY_TOOLS: Record<string, string[]> = {
     'outlook',
     'onedrive',
   ],
+  'get-upload-url': ['mail', 'calendar', 'outlook', 'personal', 'work'],
   'parse-teams-url': ['teams', 'teams-write', 'work'],
 };
 

@@ -16,6 +16,8 @@ This server supports multiple Microsoft cloud environments:
 | **Global** (default) | International Microsoft 365        | login.microsoftonline.com | graph.microsoft.com             |
 | **China** (21Vianet) | Microsoft 365 operated by 21Vianet | login.chinacloudapi.cn    | microsoftgraph.chinacloudapi.cn |
 
+To route Graph traffic through a proxy of your own (one that terminates the client's plain HTTP and originates TLS to Microsoft), set `MS365_MCP_GRAPH_BASE_URL` to its base URL; see the environment variable list under CLI Options, including what still bypasses it.
+
 ## Prerequisites
 
 - Node.js >= 20 (recommended)
@@ -105,6 +107,22 @@ Email (Outlook), Calendar, OneDrive Files, Excel, OneNote, To Do Tasks, Planner,
 
 Teams & Chats, Online Meetings, Transcripts & Recordings, Attendance Reports, SharePoint Sites & Lists, Shared Mailboxes & Calendars, User Management, Presence, Virtual Events
 
+Custom Teams emojis are available in organization mode through `list-custom-emojis`
+and `create-custom-emoji` (`teams` and `work` presets). These use the Microsoft Graph
+beta API and request the delegated permissions `TeamworkCustomEmoji.Read` and
+`TeamworkCustomEmoji.Create`, respectively. Read-only mode exposes only the list tool.
+Existing deployments may need consent for these new scopes and reauthentication;
+adding tool support does not upgrade an already-issued token.
+
+Listing can return `contentBytes: null` by default. To request base64 PNG/GIF images,
+pass `select: "displayName,contentBytes"` or `select: ["displayName", "contentBytes"]`.
+Use a small `top` to keep image responses manageable.
+To create an emoji, pass `body: { displayName, contentBytes }`
+with the exact approved name and base64 PNG/GIF file bytes. See Microsoft's
+[list](https://learn.microsoft.com/en-us/graph/api/teamworkmessaging-list-customemojis?view=graph-rest-beta)
+and [create](https://learn.microsoft.com/en-us/graph/api/teamworkmessaging-post-customemojis?view=graph-rest-beta)
+contracts. These tools do not post messages or reactions.
+
 ### Required Graph API Permissions
 
 Permissions are requested dynamically based on which tools are enabled. Use `--list-permissions` to see the exact permissions for your configuration:
@@ -154,7 +172,7 @@ SharePoint supports two enterprise permission models:
 - Broad tenant scopes such as `Sites.Read.All`, `Sites.ReadWrite.All`, and `Sites.Manage.All`.
 - Microsoft Graph `Sites.Selected`, where SharePoint site access is granted to the app on specific site collections and Graph evaluates the signed-in user's own permissions at request time.
 
-The default org-mode behavior continues to request the broad SharePoint scopes used by existing deployments. Enterprises that want selected-site SharePoint access can set an allowlist containing `Sites.Selected` instead of broad `Sites.*.All` scopes. Direct site/list/item tools that target an explicit SharePoint site can run with `Sites.Selected`; tenant-wide SharePoint discovery and search tools still require broad SharePoint scopes.
+The default org-mode behavior continues to request the broad SharePoint scopes used by existing deployments. Enterprises that want selected-site SharePoint access can set an allowlist containing `Sites.Selected` instead of broad `Sites.*.All` scopes. Direct site/list/item tools that target an explicit SharePoint site, and the `/drives/{drive-id}/...` item tools (list, get, upload, folder, move/rename, copy, versions) for drives of a granted site, can run with `Sites.Selected`; tenant-wide SharePoint discovery and search tools still require broad SharePoint scopes.
 
 ```bash
 npx @softeria/ms-365-mcp-server \
@@ -164,7 +182,81 @@ npx @softeria/ms-365-mcp-server \
   --allowed-scopes 'User.Read Files.Read Notes.Read Tasks.Read Sites.Selected'
 ```
 
-In HTTP mode, OAuth discovery advertises the effective filtered permissions so clients request the same consent surface. On-Behalf-Of mode (`--obo`) still advertises `api://<clientId>/access_as_user` for protected-resource metadata; `--allowed-scopes` does not override OBO.
+In HTTP mode, OAuth discovery advertises the effective filtered permissions so clients request the same consent surface. On-Behalf-Of mode (`--obo`) still advertises `<clientId>/access_as_user` for protected-resource metadata and requests it on `/authorize`; `--allowed-scopes` does not override OBO, it only narrows the tool surface.
+
+### Restricting user profile fields
+
+Deployments can set a comma-separated field filter for selected user-directory paths with
+`--user-fields` or `MS365_MCP_USER_FIELDS`. It narrows the `$select` sent to Microsoft Graph
+on `/users` reads and projects responses on the covered paths listed below. This is a
+path-specific data filter, **not a complete Graph authorization boundary**: other Graph
+routes and resource shapes can expose overlapping profile data.
+
+```bash
+npx @softeria/ms-365-mcp-server \
+  --org-mode \
+  --user-fields 'id,displayName,mail,userPrincipalName'
+```
+
+The filter is keyed on known Graph paths rather than tool names. It applies to direct tools,
+discovery mode's `execute-tool`, and matching `graph-batch` subrequests. Batch subrequest URLs
+are rewritten on covered `/users` reads, and responses are projected on all covered profile
+paths. The byte-passthrough tools (`download-bytes`, `download-bytes-to-file`,
+`get-download-url`) return responses verbatim and refuse targets matching the covered user
+profile paths while the filter is active.
+
+Two levels of enforcement apply, depending on what Graph returns:
+
+| Path                                                                                                                                  | Enforcement                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/users`, `/users/{id}`                                                                                                               | `$select` is narrowed on the request and the response is projected, so excluded fields never leave the tenant                                                                                                                            |
+| `/me/manager`, `/me/directReports`, `/users/{id}/manager`, `/users/{id}/directReports`, `/groups/{id}/members`, `/groups/{id}/owners` | The response is projected. These are typed as `directoryObject`, where Graph requires an OData cast before it will `$select` a user-only property such as `jobTitle`, so narrowing the request would risk breaking calls that work today |
+
+While the filter is active, `$expand` is removed from `/me`, `/groups`, and `/groups/{id}`
+requests because those resources can expand to related user profiles. This also applies to
+matching batch subrequests. The base `/me` and group responses are otherwise not projected.
+
+This does **not** cover every route that can return a user-shaped object. In particular,
+generic Graph access can still reach alternate routes or representations such as
+`/directoryObjects/{id}`, `/groups/{id}/transitiveMembers`, or `/users('{id}')`. Those are
+not currently normalized to the covered paths. If this setting is a security requirement,
+also restrict generic Graph access (for example `graph-batch`) and validate the effective
+tool surface for your deployment; do not rely on `--user-fields` alone as a tenant-wide
+data-access control.
+
+Resources below a user, such as `/users/{id}/messages` or `/users/{id}/photo/$value`, are
+mail, calendar and binary resources rather than profile properties, and are unaffected. The
+signed-in user's own `/me` profile is also unaffected, as are the Teams and chat member
+lists, which return `conversationMember` rather than user profiles.
+
+#### Known gap: `list-relevant-people`
+
+`list-relevant-people` (`/me/people`) is **not** covered. It returns `person` resources,
+a different type whose properties only partly overlap with `user` — it carries `jobTitle`,
+`department` and `officeLocation`, but addresses arrive as `scoredEmailAddresses` rather
+than `mail`. Applying a user-field allowlist to it would reject valid field names and
+narrow the result to something the tool could not use.
+
+Deployments that need the people surface closed as well should drop the tool from the
+surface, for example with `--enabled-tools` or by choosing a preset that excludes it:
+
+```bash
+npx @softeria/ms-365-mcp-server \
+  --org-mode \
+  --user-fields 'id,displayName,mail' \
+  --enabled-tools '^(?!list-relevant-people$).*'
+```
+
+CLI values take precedence over the environment variable. A value that names no fields fails
+at startup. When neither is configured, existing behavior is unchanged. Configure this in
+the LibreChat MCP server environment or command arguments; project-local `.env` files are
+intentionally restricted to application credentials and are not used for this setting.
+
+The allowlist is exhaustive for user properties: unlike an ordinary `$select`, `id` is only
+returned when it appears in the list, so include it if downstream tools need it to address a
+user. Collection annotations such as `@odata.nextLink` are retained so paging keeps working.
+If Graph returns none of the allowlisted properties, the response is projected to empty
+rather than returned untrimmed.
 
 ### Requesting extra scopes
 
@@ -596,8 +688,25 @@ When running as an MCP server, the following options can be used:
 -v                Enable verbose logging
 --read-only       Start server in read-only mode, disabling write operations
 --http [port]     Use Streamable HTTP transport instead of stdio (optionally specify port, default: 3000)
-                  Starts Express.js server with MCP endpoint at /mcp
+                  Starts Express.js server with MCP endpoint at /mcp. Bound to a loopback host
+                  (e.g. --http 127.0.0.1:3000 or --http [::1]:3000) with no --public-url, it
+                  rejects requests whose Host or Origin is not localhost (not applied to the
+                  --attachment-port listener)
+--http-local-file-tools Register download-bytes-to-file over HTTP. Anyone who can reach the port
+                  can write files as the server's user (without a valid token, only an empty
+                  file that is removed again), so enable it only on a single-user machine.
+                  Refused unless --http binds a loopback host with no --public-url and no
+                  --trust-proxy-auth
 --enable-auth-tools Enable login/logout tools when using HTTP mode (disabled by default in HTTP mode)
+--enable-attachment-urls Let get-download-url mint a server-served URL for byte resources Graph
+                  exposes no pre-authenticated URL for (see "Server-Minted Attachment URLs")
+--attachment-port <port> Serve /attachment on its own listener on this port instead of on the
+                  MCP app, so a fetcher that can read attachments cannot also reach /mcp
+                  (requires --enable-attachment-urls; see "Splitting the attachment listener")
+--attachment-host <host> Interface the --attachment-port listener binds. Defaults to whatever
+                  --http bound, which with a wildcard --http leaves BOTH ports on every
+                  interface and so isolates nothing — set this to make the split real
+                  (requires --attachment-port; see "Splitting the attachment listener")
 --no-dynamic-registration Disable OAuth Dynamic Client Registration (enabled by default in HTTP mode)
 --enabled-tools <pattern> Filter tools using regex pattern (e.g., "excel|contact" to enable Excel and Contact tools)
 --preset <names>  Use preset tool categories (comma-separated). See "Tool Presets" section above
@@ -623,8 +732,12 @@ Environment variables:
 - `MS365_MCP_MESSAGE_SIGNOFF_SUFFIX=<text>`: Signoff appended to outgoing messages. Default: none. CLI equivalent: `--message-signoff-suffix <text>`. `--no-message-signoff` disables both (see Message Signoff below)
 - `MS365_MCP_RATE_LIMIT_DISABLED=true|1`: Disable per-IP rate limiting in HTTP mode (default: enabled — 30 req/min on `/authorize`, `/token`, `/register`; 120 req/min on `/mcp`)
 - `MS365_MCP_TRUST_PROXY_HOPS=<n>`: Number of trusted reverse-proxy hops in HTTP mode (default `1`). Accurate per-IP rate limiting depends on this matching your deployment — set to the number of proxies in front of the server, `0` to use the raw socket peer IP, or a comma-separated subnet list
+- `MS365_MCP_ATTACHMENT_PORT=<port>`: Serve the attachment route on its own listener on this port (alternative to --attachment-port; requires `--enable-attachment-urls`)
+- `MS365_MCP_ATTACHMENT_HOST=<host>`: Interface the `MS365_MCP_ATTACHMENT_PORT` listener binds (alternative to --attachment-host; requires `--attachment-port`). Defaults to the host `--http` bound — which for a wildcard `--http` means both ports answer everywhere and the port split isolates nothing. See "Splitting the attachment listener"
+- `MS365_MCP_HTTP_LOCAL_FILE_TOOLS=true|1`: Register download-bytes-to-file over HTTP (alternative to --http-local-file-tools; same restrictions)
 - `MS365_MCP_CLOUD_TYPE=global|china`: Microsoft cloud environment (alternative to --cloud flag)
 - `MS365_MCP_BROKER_PUBLIC_URL=<url>`: (EKI fork) Origin for the tokenless attachment-broker links (`<url>/download/<handle>`) in HTTP mode. When set and non-blank it takes precedence over `--public-url` / `MS365_MCP_PUBLIC_URL` for broker links and for enabling the broker, and it does not change OAuth metadata. Unset keeps the previous behavior. Must be an absolute http(s) URL with no credentials, query, or fragment; anything else fails at startup. See docs/deployment.md
+- `MS365_MCP_GRAPH_BASE_URL=<url>`: Send Graph API requests to this base URL instead of the cloud's `graph.microsoft.com` (e.g. `http://127.0.0.1:10255/tenant-a/graph` for an egress proxy that originates TLS itself). Absolute http(s) URL without query or fragment; a path prefix is kept, so requests go to `<url>/v1.0/...`. The login authority and the On-Behalf-Of token resource are unchanged. Two things bypass it: `get-download-url` returns Graph's pre-authenticated SharePoint URL, and the `302` from `/content` points straight at SharePoint, so whoever follows either connects to SharePoint directly; if you control egress, allow those SharePoint hosts or disable those tools. Not read from `.env`
 - `LOG_LEVEL`: Set logging level (default: 'info')
 - `SILENT=true|1`: Disable console output
 - `MS365_MCP_REDACT_PII=false|0`: Disable scrubbing of JWTs, Bearer headers, OAuth token fields, and email addresses from log messages (default: enabled). The server handles live Graph bearer tokens, so redaction is on unless you opt out for fully verbose local debugging.
@@ -638,6 +751,204 @@ Environment variables:
 - `MS365_MCP_AUTH_CACHE_COMMAND_TIMEOUT_MS`: Per-invocation timeout for `MS365_MCP_AUTH_CACHE_COMMAND` (default: `10000`)
 - `MS365_MCP_EXPECTED_USERNAME`: Require local MSAL auth to use this Microsoft account username (case-insensitive; CLI flag takes precedence)
 - `MS365_MCP_EXPECTED_HOME_ACCOUNT_ID`: Require local MSAL auth to use this exact MSAL homeAccountId (CLI flag takes precedence)
+
+## Server-Minted Attachment URLs
+
+`get-download-url` returns Microsoft's own pre-authenticated `@microsoft.graph.downloadUrl`
+for OneDrive and SharePoint items. Graph publishes no such URL for **mail and calendar
+attachments, meeting recordings, or any other `/$value` byte endpoint** — for those, the
+only way to read the bytes has been `download-bytes`, which returns base64 into the
+agent's context. A 73 KB, 3-page PDF costs about 24,500 tokens that way, and the model
+cannot parse them anyway.
+
+`--enable-attachment-urls` (HTTP mode, off by default) closes that gap. When Graph has no
+URL of its own, `get-download-url` mints one this server serves:
+
+```
+GET /attachment?t=<ticket>&dgk=<key-id>&dgx=<expiry>&dgs=<signature>
+```
+
+The ticket is 32 bytes of CSPRNG output, **single-use**, memory-only, and expires after
+`MS365_MCP_ATTACHMENT_URL_TTL_S` seconds. Redeeming it streams the Graph bytes as the
+identity that minted it; the fetcher sends no Authorization header and holds no Microsoft
+credential.
+
+**This grants no authority the calling agent did not already have.** Every target that can
+be minted is one `download-bytes` would fetch for the same caller on the same account. The
+ticket only moves those bytes out of the context window and into a direct transfer.
+
+### Uploading attachments the same way
+
+The same ticket store works in the other direction. `get-upload-url` mints a URL for
+attaching a file to a draft message or an event, so the bytes go straight from the caller
+to Graph instead of passing as base64 `contentBytes` through the agent context:
+
+```
+PUT /attachment?t=<ticket>&dgk=<key-id>&dgx=<expiry>&dgs=<signature>
+Content-Length: <file size>
+
+<raw file bytes>
+```
+
+`target` is the item's attachments collection (`/me/messages/{id}/attachments` for a draft,
+`/me/events/{id}/attachments` for an event); `name` and `contentType` are recorded on the
+attachment. Files under 3 MB are attached inline; larger ones, up to Graph's 150 MB, stream
+through an upload session in 3.75 MiB chunks, so the server never holds more than one chunk.
+`Content-Length` is required. The ticket is single-use and burnt on first presentation
+whatever the outcome, and the upload is attached as the identity that minted it, exactly as
+downloads are fetched. An upload ticket presented to `GET` (or a download ticket to `PUT`)
+is refused with the same 404 as any other bad ticket.
+
+### Configuration
+
+```
+MS365_MCP_ATTACHMENT_URL_BASE=http://m365-mcp:3000   # required
+MS365_MCP_ATTACHMENT_URL_KEY=...                     # required (or _KEY_FILE=/path)
+MS365_MCP_ATTACHMENT_URL_KEY_ID=1                    # optional, default 1
+MS365_MCP_ATTACHMENT_URL_TTL_S=120                   # optional, default 120, max 300
+```
+
+`MS365_MCP_ATTACHMENT_URL_BASE` is deliberately **not** `MS365_MCP_PUBLIC_URL`: that one is
+browser-facing, for OAuth redirects, while this is fetched server-to-server and is
+commonly a container address. A missing or malformed setting fails at startup rather than
+per-request — a signing feature that comes up without a key would mint URLs nothing can
+verify, silently.
+
+### Splitting the attachment listener
+
+By default `/attachment` is served by the same Express app, on the same port, as `/mcp`.
+That is fine when callers are authenticated by a bearer token, and it is a problem when
+they are not. Under `--trust-proxy-auth` the MCP endpoint reads no `Authorization` header
+at all — **reachability is the authentication** — so one shared port means the sidecar you
+allowed through in order to fetch a PDF can also call every tool on the server.
+
+`--attachment-port <port>` (or `MS365_MCP_ATTACHMENT_PORT`) moves the route onto a listener
+of its own, and `--attachment-host <host>` (or `MS365_MCP_ATTACHMENT_HOST`) says which
+interface that listener binds:
+
+```
+ms-365-mcp-server --http 10.89.0.2:3000 --trust-proxy-auth \
+                  --enable-attachment-urls \
+                  --attachment-port 3001 --attachment-host 10.89.1.2
+MS365_MCP_ATTACHMENT_URL_BASE=http://m365-mcp:3001   # note: the attachment port
+```
+
+- `GET /attachment` on **3001** works; on 3000 it is **404** — the MCP app never mounts it.
+- `/mcp` on **3001** is **404**, as is everything else: the second app has the attachment
+  route and nothing more. No OAuth router, no body parsers, no CORS, no health check.
+- The 60 req/min limiter that guards the route follows it onto the new listener.
+- `trust proxy` is **off** on the attachment listener (and `MS365_MCP_TRUST_PROXY_HOPS` is
+  not read for it), unlike the MCP listener, which trusts one hop. This port is meant to be
+  dialled directly on a container network; honouring `X-Forwarded-For` on the server's one
+  uncredentialed surface would let a caller choose its own rate-limit bucket.
+
+The flag requires `--enable-attachment-urls` and refuses to start without it — on its own
+it would open a port with nothing on it while the operator believed the surfaces were
+separated. In stdio mode it warns and is ignored, like the flag it depends on.
+`--attachment-host` likewise requires `--attachment-port`: alone it would name an interface
+for a listener that does not exist.
+
+#### Two ports are not two surfaces unless they bind two interfaces
+
+**This is the part that decides whether any of the above is worth anything.** Read it
+before you deploy the split.
+
+`--attachment-port` on its own separates the two surfaces _inside the process_. It does not
+separate them _on the network_. Without `--attachment-host` the attachment listener inherits
+whatever host `--http` bound — and `--http 3000`, the common form, names no host at all, so
+Node binds the wildcard and **both** ports answer on **every** interface:
+
+```
+ms-365-mcp-server --http 3000 --trust-proxy-auth \
+                  --enable-attachment-urls --attachment-port 3001   # NOT isolated
+```
+
+Container networks grant a peer every port on a container, not one port. Put a
+document-conversion sidecar on a shared bridge so it can fetch `/attachment` on 3001, and
+that same sidecar can dial `:3000/mcp` — which under `--trust-proxy-auth` reads no
+`Authorization` header at all and hands back the full tool catalogue. Nothing fails, nothing
+is logged as an error, and the config looks exactly like the isolated one.
+
+To make it real, give the two listeners **different addresses**, and put only the attachment
+address on the network the fetcher is on:
+
+```yaml
+# docker compose — the MCP port on the agent's own bridge, the attachment port on the
+# bridge shared with the converter. The converter can reach 3001 and cannot route to 3000.
+services:
+  m365-mcp:
+    networks: { agent-net: { ipv4_address: 10.89.0.2 }, convert-net: { ipv4_address: 10.89.1.2 } }
+    command: >
+      --http 10.89.0.2:3000 --trust-proxy-auth
+      --enable-attachment-urls
+      --attachment-port 3001 --attachment-host 10.89.1.2
+  docglean:
+    networks: [convert-net]
+```
+
+The MCP port is then unreachable from `convert-net` **by binding** — there is no socket
+listening on that interface — rather than by a firewall rule that has to keep matching.
+
+The server warns at startup if you run `--trust-proxy-auth` with `--attachment-port` while
+both listeners still answer on a common interface (either sharing an address, or either one
+on the wildcard). Both bound addresses are logged, read back from the socket rather than
+from the flags, so `Server listening on …` and `Attachment listener on …` can be compared
+directly.
+
+`--attachment-host` takes a bare IPv4 address, IPv6 address (bracketed `[::1]` or bare
+`::1`) or hostname. It is refused rather than coerced — `--attachment-host 10.0.0.5:3001`
+is an error naming `--attachment-port`, not a bind to something else. Note that
+`MS365_MCP_ATTACHMENT_URL_BASE` still must not be an IPv6 literal (the URL signature covers
+the host and the two implementations normalise IPv6 differently); if you bind the listener
+to an IPv6 address, name it in the base by hostname.
+
+Point `MS365_MCP_ATTACHMENT_URL_BASE` at the attachment port. The server cannot check this
+for you: the base is usually a container name on a network this process cannot resolve, so
+a wrong port here shows up as a fetch failure in the sidecar, not an error here. Both the
+base and the bound port are logged at startup, one line apart, for exactly that comparison.
+
+### The signature, and who checks what
+
+`dgk`/`dgx`/`dgs` are **not** checked by this server on redemption, and that is deliberate.
+They exist for the fetcher: a document-conversion sidecar that refuses to dial a private
+address unless the URL carries a valid HMAC from an origin it has been configured to trust.
+What authorises redemption _here_ is the ticket. Verifying the signature on the way back in
+would prove only that we minted the URL — which the ticket already proves — while coupling
+redemption to the sidecar's clock and to the key surviving a restart.
+
+The wire format is [docglean-mcp](https://github.com/msoukhomlinov/docglean-mcp)'s
+`signing.py` (`canonical_string`), and `src/lib/url-signing.ts` is a port of it. The
+canonical string is `\n`-joined: `v1`, lowercased scheme, lowercased host, the port always
+explicit, the path, the remaining query with `dgk`/`dgx`/`dgs` removed and the rest sorted
+and re-encoded, and the expiry. The test vectors in
+`test/attachment-url-signing.test.ts` were verified against the Python implementation byte
+for byte — three places where the obvious JavaScript disagrees with Python (`!*'()`
+escaping, `+` decoding as a space, and code-point vs UTF-16 sort order) are why that check
+exists rather than being assumed.
+
+The ticket travels in the **query, not the path**, because the verifying sidecar keeps a
+fetched URL's path in its error messages and strips the query.
+
+### Whose identity the bytes are read as
+
+Under `--trust-proxy-auth` the server reads with its own cached account, and redemption
+looks that account up again.
+
+In plain `--http` and `--obo`, identity arrives per request on the caller's
+`Authorization` header, and a ticket is redeemed later by a fetcher that sends none. So
+the ticket keeps the Graph token the minting request used (the exchanged one, under
+`--obo`) and redemption reads with that token and nothing else. It stays in server memory
+and is never part of the URL.
+
+With `MS365_MCP_OAUTH_TOKEN` set, the ticket keeps that token instead, `--trust-proxy-auth`
+or not.
+
+A token kept this way cannot be refreshed. If it expires before the URL is fetched,
+redemption answers 502. The agent can mint again once its client has a fresh token; an
+expired `MS365_MCP_OAUTH_TOKEN` has to be replaced by the operator.
+
+Tickets live in the memory of the process that minted them, so a URL has to be redeemed
+on the same instance. Behind a load balancer that means one replica or sticky routing.
 
 ## Token Storage
 

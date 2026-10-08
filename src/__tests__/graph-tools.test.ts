@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { z } from 'zod';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 /**
  * We test executeGraphTool logic by importing it indirectly through registerGraphTools.
@@ -484,6 +484,201 @@ describe('graph-tools', () => {
           graph_batch_error_code_counts: { accessDenied: 1 },
         })
       );
+    });
+  });
+
+  describe('audit response volume', () => {
+    it('lifts result volume from _meta onto the audit event', async () => {
+      const endpoint = makeEndpoint({
+        method: 'get',
+        path: '/me/messages',
+        alias: 'list-mail-messages',
+      });
+      const config = makeConfig({
+        pathPattern: '/me/messages',
+        method: 'get',
+        toolName: 'list-mail-messages',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [{ type: 'text', text: JSON.stringify({ value: [{ id: 'm1' }] }) }],
+          _meta: {
+            http_status: 200,
+            result_count: 4821,
+            result_has_more: true,
+            response_bytes: 8_412_004,
+          },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      await server.tools.get('list-mail-messages')!.handler({});
+
+      expect(auditLogMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tool: 'list-mail-messages',
+          status: 'success',
+          result_count: 4821,
+          result_has_more: true,
+          response_bytes: 8_412_004,
+        })
+      );
+    });
+
+    it('keeps result_has_more when it is false rather than dropping it', async () => {
+      const endpoint = makeEndpoint({
+        method: 'get',
+        path: '/me/messages',
+        alias: 'list-mail-messages',
+      });
+      const config = makeConfig({
+        pathPattern: '/me/messages',
+        method: 'get',
+        toolName: 'list-mail-messages',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [{ type: 'text', text: JSON.stringify({ value: [] }) }],
+          _meta: { http_status: 200, result_count: 0, result_has_more: false },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      await server.tools.get('list-mail-messages')!.handler({});
+
+      const [payload] = auditLogMock.mock.calls[0];
+      expect(payload.result_count).toBe(0);
+      expect(payload.result_has_more).toBe(false);
+    });
+
+    it('restates count and bytes for the whole read when pages are merged', async () => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [{ id: '1' }, { id: '2' }],
+                '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/messages?$skip=2',
+              }),
+            },
+          ],
+          _meta: { http_status: 200, result_count: 2, result_has_more: true, response_bytes: 1000 },
+        },
+        {
+          content: [{ type: 'text', text: JSON.stringify({ value: [{ id: '3' }] }) }],
+          _meta: { http_status: 200, result_count: 1, result_has_more: false, response_bytes: 700 },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
+
+      const [payload] = auditLogMock.mock.calls[0];
+      expect(payload.result_count).toBe(3);
+      expect(payload.result_has_more).toBe(false);
+      // Both pages, not just page one — the whole point of merging.
+      expect(payload.response_bytes).toBe(1700);
+    });
+
+    it('reports result_has_more when the merge loop stopped on a page cap', async () => {
+      const prevMaxPages = process.env.MS365_MCP_MAX_PAGES;
+      process.env.MS365_MCP_MAX_PAGES = '2';
+      try {
+        mockEndpoints.push(makeEndpoint());
+        mockEndpointsJson = [makeConfig()];
+
+        // Every page carries a nextLink, so the loop can only exit on the cap.
+        const graphClient = createMockGraphClient(
+          Array.from({ length: 5 }, (_, i) => ({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  value: [{ id: `item-${i}` }],
+                  '@odata.nextLink': `https://graph.microsoft.com/v1.0/me/messages?$skip=${i + 1}`,
+                }),
+              },
+            ],
+            _meta: { http_status: 200, result_count: 1, result_has_more: true, response_bytes: 50 },
+          }))
+        );
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
+
+        const [payload] = auditLogMock.mock.calls[0];
+        expect(payload.result_count).toBe(2);
+        // Truncated at the cap: the merged body drops @odata.nextLink, so the
+        // audit event is the only place Graph-has-more survives.
+        expect(payload.result_has_more).toBe(true);
+        expect(payload.response_bytes).toBe(100);
+      } finally {
+        if (prevMaxPages === undefined) {
+          delete process.env.MS365_MCP_MAX_PAGES;
+        } else {
+          process.env.MS365_MCP_MAX_PAGES = prevMaxPages;
+        }
+      }
+    });
+
+    it('omits the volume fields when the client supplied none', async () => {
+      const endpoint = makeEndpoint({ method: 'get', path: '/me', alias: 'get-current-user' });
+      const config = makeConfig({
+        pathPattern: '/me',
+        method: 'get',
+        toolName: 'get-current-user',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [{ type: 'text', text: JSON.stringify({ id: 'user-1' }) }],
+          _meta: { http_status: 200 },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      await server.tools.get('get-current-user')!.handler({});
+
+      const [payload] = auditLogMock.mock.calls[0];
+      expect(payload).not.toHaveProperty('result_count');
+      expect(payload).not.toHaveProperty('result_has_more');
+      expect(payload).not.toHaveProperty('response_bytes');
     });
   });
 
@@ -974,13 +1169,11 @@ describe('graph-tools', () => {
         };
         const discoveryServer = createMockServer();
         const discoveryGraphClient = { graphRequest: vi.fn() };
-        registerDiscoveryTools(
-          discoveryServer as any,
-          discoveryGraphClient as any,
-          false,
-          false,
-          authManager as any
-        );
+        registerDiscoveryTools(discoveryServer as any, discoveryGraphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          authManager: authManager as any,
+        });
         const failed = await discoveryServer.tools.get('execute-tool')!.handler({
           tool_name: 'get-test-item',
           parameters: { itemId: 'two' },
@@ -1357,6 +1550,331 @@ describe('graph-tools', () => {
     });
   });
 
+  // ---- 2a. skiptoken cursor paging ----
+  describe('shared query contract at execution', () => {
+    it.each([{ skiptoken: 123 }, { $SKIPTOKEN: 123 }, { COUNT: 'true' }, { $Count: 'true' }])(
+      'rejects invalid cursor and mixed-case query values: %j',
+      async (params) => {
+        mockEndpoints.push(makeEndpoint());
+        mockEndpointsJson = [makeConfig()];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        const result = await server.tools.get('test-tool')!.handler(params);
+        expect(result.isError).toBe(true);
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    );
+
+    it('accepts valid mixed-case query values and string cursors', async () => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      await server.tools.get('test-tool')!.handler({ COUNT: true, $SKIPTOKEN: 'next-token' });
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+      const request = JSON.stringify(graphClient.graphRequest.mock.calls[0]);
+      expect(request).toContain('$count=true');
+      expect(request).toContain('$skiptoken=next-token');
+    });
+
+    it.each(['list-calendar-events-delta', 'list-calendar-view-delta'])(
+      'ignores stale mixed-case top values for %s',
+      async (alias) => {
+        mockEndpoints.push(makeEndpoint({ alias }));
+        mockEndpointsJson = [makeConfig({ toolName: alias })];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        for (const key of ['top', '$top', 'TOP', '$TOP', '$Top']) {
+          await server.tools.get(alias)!.handler({ [key]: 10 });
+        }
+        expect(graphClient.graphRequest).toHaveBeenCalledTimes(5);
+        for (const call of graphClient.graphRequest.mock.calls) {
+          expect(JSON.stringify(call)).not.toContain('$top');
+        }
+      }
+    );
+
+    it.each(['list-joined-teams', 'list-my-associated-teams'])(
+      'rejects unsupported query options before Graph dispatch for %s',
+      async (alias) => {
+        mockEndpoints.push(makeEndpoint({ alias }));
+        mockEndpointsJson = [makeConfig({ toolName: alias })];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        for (const key of ['top', '$top', 'skiptoken', '$skiptoken', 'select', '$select']) {
+          const value = key.replace('$', '') === 'top' ? 100 : 'next-token';
+          const result = await server.tools.get(alias)!.handler({ [key]: value });
+          expect(result.isError).toBe(true);
+        }
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    );
+
+    it('rejects oversized chat pages before Graph dispatch, including dollar-prefixed input', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-chats' }));
+      mockEndpointsJson = [makeConfig({ toolName: 'list-chats' })];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      for (const key of ['top', '$top']) {
+        const result = await server.tools.get('list-chats')!.handler({ [key]: 100 });
+        expect(result.isError).toBe(true);
+      }
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('sends a calendar field array as comma-separated text in one Graph request', async () => {
+      const alias = 'list-calendar-events-delta';
+      mockEndpoints.push(makeEndpoint({ alias }));
+      mockEndpointsJson = [makeConfig({ toolName: alias })];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      await server.tools.get(alias)!.handler({ select: ['id', 'subject'] });
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(graphClient.graphRequest.mock.calls[0])).toContain('id,subject');
+    });
+  });
+
+  describe('skiptoken cursor', () => {
+    const prevAllowPagination = process.env.MS365_MCP_ALLOW_PAGINATION;
+    afterEach(() => {
+      if (prevAllowPagination === undefined) delete process.env.MS365_MCP_ALLOW_PAGINATION;
+      else process.env.MS365_MCP_ALLOW_PAGINATION = prevAllowPagination;
+    });
+
+    const callForResult = async (args: Record<string, unknown>) => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      const result = await server.tools.get('test-tool')!.handler(args);
+      return { result, graphClient };
+    };
+
+    /** The request path the tool sent to Graph. */
+    const callWith = async (args: Record<string, unknown>) => {
+      const { graphClient } = await callForResult(args);
+      return graphClient.graphRequest.mock.calls[0][0] as string;
+    };
+
+    /** A single-object GET: $select/$expand and nothing collection-shaped. */
+    const singleObjectEndpoint = () =>
+      makeEndpoint({
+        alias: 'get-thing',
+        path: '/me/thing',
+        parameters: [
+          { name: 'select', type: 'Query', schema: z.string().optional() },
+          { name: 'expand', type: 'Query', schema: z.string().optional() },
+        ],
+      });
+
+    const registerAnd = async (endpoint: any, config: any) => {
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+      return server;
+    };
+
+    it('omits skiptoken on single-object GETs', async () => {
+      const server = await registerAnd(
+        singleObjectEndpoint(),
+        makeConfig({ toolName: 'get-thing', pathPattern: '/me/thing' })
+      );
+
+      expect(server.tools.get('get-thing')!.schema.skiptoken).toBeUndefined();
+    });
+
+    it('keeps skiptoken on delta tools that have $top stripped', async () => {
+      // list-calendar-events-delta pages via cursor but is in TOP_UNSUPPORTED_DELTA_TOOLS,
+      // so a $top-only test would strip the cursor from an endpoint that needs it.
+      const endpoint = makeEndpoint({
+        alias: 'list-calendar-events-delta',
+        path: '/me/calendarView/delta',
+      });
+      const server = await registerAnd(
+        endpoint,
+        makeConfig({
+          toolName: 'list-calendar-events-delta',
+          pathPattern: '/me/calendarView/delta',
+        })
+      );
+
+      const schema = server.tools.get('list-calendar-events-delta')!.schema;
+      expect(schema.top).toBeUndefined();
+      expect(schema.skiptoken).toBeDefined();
+    });
+
+    it('advertises skiptoken on GET list tools', async () => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+
+      expect(server.tools.get('test-tool')!.schema.skiptoken).toBeDefined();
+    });
+
+    it('still advertises skiptoken when MS365_MCP_ALLOW_PAGINATION is disabled', async () => {
+      // Manual paging returns one page, so the auto-follow kill switch must not
+      // remove the only cursor a stateless client has.
+      process.env.MS365_MCP_ALLOW_PAGINATION = '0';
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+
+      expect(server.tools.get('test-tool')!.schema.fetchAllPages).toBeUndefined();
+      expect(server.tools.get('test-tool')!.schema.skiptoken).toBeDefined();
+    });
+
+    it('forwards a bare token as $skiptoken', async () => {
+      const path = await callWith({ skiptoken: 'abc123' });
+      expect(path).toContain('$skiptoken=abc123');
+    });
+
+    it('does not double-encode a token copied from @odata.nextLink', async () => {
+      // Tokens arrive percent-encoded straight out of the nextLink URL; encoding
+      // them again yields %253d and Graph rejects the cursor.
+      const path = await callWith({ skiptoken: 'eyJhIjoxfQ%3d%3d' });
+      expect(path).toContain('$skiptoken=eyJhIjoxfQ%3D%3D');
+      expect(path).not.toContain('%253');
+    });
+
+    it('extracts the token when handed a whole nextLink URL', async () => {
+      const path = await callWith({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/chats?$top=5&$filter=x&$skiptoken=tok123',
+      });
+      expect(path).toContain('$skiptoken=tok123');
+      expect(path).not.toContain('graph.microsoft.com');
+    });
+
+    it('keeps only the cursor when the nextLink has params after it', async () => {
+      const path = await callWith({ skiptoken: '$skiptoken=tok123&$top=5' });
+      expect(path).toContain('$skiptoken=tok123');
+      expect(path).not.toContain('tok123&');
+    });
+
+    it('accepts the $-prefixed param name', async () => {
+      const path = await callWith({ $skiptoken: 'abc123' });
+      expect(path).toContain('$skiptoken=abc123');
+    });
+
+    it.each(['', '   '])('omits $skiptoken entirely when blank (%j)', async (blank) => {
+      const path = await callWith({ skiptoken: blank });
+      expect(path).not.toContain('skiptoken');
+    });
+
+    it('sends $skip when the nextLink pages with $skip', async () => {
+      // Outlook mail and calendar nextLinks carry $skip, not $skiptoken
+      const path = await callWith({
+        top: 10,
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/messages?$top=10&$skip=10',
+      });
+      expect(path).toContain('$skip=10');
+      expect(path).not.toContain('skiptoken');
+    });
+
+    it('ignores a cursor-looking value inside another query param', async () => {
+      const path = await callWith({
+        skiptoken:
+          "https://graph.microsoft.com/v1.0/me/messages?$filter=subject eq '%24skip=100'&$skip=10",
+      });
+      expect(path).toContain('$skip=10');
+      expect(path).not.toContain('100');
+    });
+
+    it('refuses a link with no cursor to page with', async () => {
+      const { result, graphClient } = await callForResult({
+        skiptoken:
+          'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta()?$deltatoken=abc',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('refuses a delta token= link without calling it a deltaLink', async () => {
+      // get-drive-delta and get-sharepoint-sites-delta page with token=, so the refusal must
+      // not tell the model to pass the @odata.nextLink it just passed
+      const { result, graphClient } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/drive/delta(token=1230919asd190410jlka)',
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.error).toBe('invalid_skiptoken');
+      expect(payload.message).not.toContain('deltaLink');
+      expect(payload.message).toContain('fetchAllPages');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('refuses a link whose $skiptoken carries no value', async () => {
+      const { result } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/chats?$skiptoken=&$top=5',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+    });
+
+    it('accepts an encoded %24skiptoken marker', async () => {
+      const path = await callWith({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/chats?%24top=5&%24skiptoken=tok123',
+      });
+      expect(path).toContain('$skiptoken=tok123');
+    });
+
+    it.each([
+      ['https://graph.microsoft.com/v1.0/me/messages?$top=10&$skip=0', '$skip=0'],
+      ['https://graph.microsoft.com/v1.0/me/messages?%24top=10&%24skip=10', '$skip=10'],
+    ])('reads the $skip cursor out of %s', async (link, expected) => {
+      const path = await callWith({ skiptoken: link });
+      expect(path).toContain(expected);
+    });
+
+    it('refuses a $skip cursor that is not a plain number', async () => {
+      const { result } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/messages?$skip=10junk',
+      });
+
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+    });
+
+    it('offers no fetchAllPages in the refusal when pagination is disabled', async () => {
+      process.env.MS365_MCP_ALLOW_PAGINATION = '0';
+      const { result } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/drive/delta(token=1230919asd190410jlka)',
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.error).toBe('invalid_skiptoken');
+      expect(payload.message).not.toContain('fetchAllPages');
+    });
+
+    it('sends the cursor alongside the original query options', async () => {
+      const path = await callWith({ filter: "chatType eq 'oneOnOne'", top: 5, skiptoken: 'tok' });
+      expect(path).toContain('$filter=');
+      expect(path).toContain('$top=5');
+      expect(path).toContain('$skiptoken=tok');
+    });
+  });
+
   // ---- 2. fetchAllPages pagination ----
   describe('fetchAllPages pagination', () => {
     it('should follow @odata.nextLink and combine results', async () => {
@@ -1604,18 +2122,13 @@ describe('graph-tools', () => {
         const graphClient = createMockGraphClient(paginatingResponses(5));
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(
-          server as any,
-          graphClient as any,
-          false,
-          undefined,
-          false,
-          undefined,
-          false,
-          [],
-          undefined,
-          true
-        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
 
         await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
 
@@ -1776,6 +2289,269 @@ describe('graph-tools', () => {
       expect(schema['messageId']).toBeDefined();
       expect(schema['messageId'].description).not.toBe('Path parameter: messageId');
       expect(schema['messageId'].description).toContain("not as 'id'");
+    });
+  });
+
+  // ---- $search KQL quote normalization ----
+  describe('$search quote normalization', () => {
+    async function callSearch(
+      search: string,
+      path = '/me/messages'
+    ): Promise<{ result: any; graphClient: any }> {
+      const endpoint = makeEndpoint({ path });
+      const config = makeConfig();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        { content: [{ type: 'text', text: JSON.stringify({ value: [] }) }] },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      const result = await server.tools.get('test-tool')!.handler({ search });
+      return { result, graphClient };
+    }
+
+    async function callWithSearch(search: string, path = '/me/messages'): Promise<string> {
+      const { graphClient } = await callSearch(search, path);
+      return graphClient.graphRequest.mock.calls[0][0] as string;
+    }
+
+    it('wraps a bare KQL expression in one pair of double quotes', async () => {
+      const url = await callWithSearch('from:john AND subject:meeting');
+      expect(url).toContain(`$search=${encodeURIComponent('"from:john AND subject:meeting"')}`);
+    });
+
+    it('collapses per-term quoting into a single enclosing pair', async () => {
+      const url = await callWithSearch('"from:john" AND subject:meeting');
+      expect(url).toContain(`$search=${encodeURIComponent('"from:john AND subject:meeting"')}`);
+    });
+
+    it('leaves an already correctly quoted expression untouched', async () => {
+      const url = await callWithSearch('"from:john AND subject:meeting"');
+      expect(url).toContain(`$search=${encodeURIComponent('"from:john AND subject:meeting"')}`);
+    });
+
+    // Graph rejects a property phrase that has no enclosing pair, so add one and escape the
+    // phrase quotes. Microsoft documents that escaping for directory search only; mail's own
+    // docs never show an embedded quote, so this form is inferred.
+    it('adds the enclosing pair around a property phrase', async () => {
+      const url = await callWithSearch('subject:"quarterly report"');
+      expect(url).toContain(`$search=${encodeURIComponent('"subject:\\"quarterly report\\""')}`);
+    });
+
+    it('keeps a standalone phrase grouped', async () => {
+      const url = await callWithSearch('"quarterly report" AND from:john');
+      expect(url).toContain(
+        `$search=${encodeURIComponent('"\\"quarterly report\\" AND from:john"')}`
+      );
+    });
+
+    it('leaves an already escaped phrase untouched', async () => {
+      const query = '"subject:\\"quarterly report\\""';
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(query)}`);
+    });
+
+    // Already correctly wrapped free text is a multi-term search, not a phrase — escaping
+    // its quotes would narrow it to messages containing the exact phrase.
+    it('leaves already-wrapped free text as a multi-term search', async () => {
+      const query = '"quarterly report"';
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(query)}`);
+    });
+
+    // Date and size restrictions use comparison operators rather than a colon; they are
+    // clauses too, so per-clause quoting must be undone rather than escaped as a phrase.
+    it.each([
+      ['"received>=2024-01-01" AND from:john', '"received>=2024-01-01 AND from:john"'],
+      ['"size>1000" AND subject:meeting', '"size>1000 AND subject:meeting"'],
+      ['"received<2024-01-01"', '"received<2024-01-01"'],
+    ])('undoes per-clause quoting on a comparison clause (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // A phrase can open with a word and a colon without being a clause. RE and Q3 are not
+    // mail properties, so the grouping quotes have to survive.
+    it.each([
+      ['"RE: quarterly report" AND from:john', '"\\"RE: quarterly report\\" AND from:john"'],
+      ['"Q3: plan.pdf" AND subject:budget', '"\\"Q3: plan.pdf\\" AND subject:budget"'],
+    ])('keeps phrase quotes on a clause-shaped phrase (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // The colon inside the phrase is part of the text, not a property separator.
+    it.each([
+      ['subject:"RE: quarterly report"', '"subject:\\"RE: quarterly report\\""'],
+      ['attachment:"Q3: plan.pdf"', '"attachment:\\"Q3: plan.pdf\\""'],
+    ])('keeps phrase quotes when the phrase contains a colon (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // KQL demotes a restriction with whitespace around the operator to free text, so these
+    // are phrases. Unwrapping them would search a bare `from:`/`subject:` and quietly drop
+    // the words the caller was actually looking for.
+    it.each([
+      [
+        '"from: the desk of the CEO" AND subject:report',
+        '"\\"from: the desk of the CEO\\" AND subject:report"',
+      ],
+      [
+        '"subject: quarterly report" AND from:john',
+        '"\\"subject: quarterly report\\" AND from:john"',
+      ],
+    ])('keeps phrase quotes when a space follows the property (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // A trailing lone backslash would escape the enclosing pair's closing quote and hand
+    // Graph an unterminated string.
+    it('balances a trailing backslash so it cannot escape the closing quote', async () => {
+      const url = await callWithSearch('from:john\\');
+      expect(url).toContain(`$search=${encodeURIComponent('"from:john\\\\"')}`);
+    });
+
+    // An unterminated run is a missing closing quote, not a stray opening one. Dropping the
+    // delimiter would shed the grouping: `subject:"quarterly report` would go out as subject
+    // matching `quarterly` with `report` loose, which is a wider search than was asked for.
+    it.each([
+      ['from:"john', '"from:\\"john\\""'],
+      ['subject:"quarterly report', '"subject:\\"quarterly report\\""'],
+    ])('closes an unterminated quote rather than dropping it (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // A restriction binds only the token after its operator, so unwrapping a multi-word value
+    // would bind the first word and leave the rest as free text. Escaping the run in place is
+    // no better: `subject:` would end up inside the phrase as literal text and the restriction
+    // would be lost. Only moving the quotes past the operator keeps both.
+    it.each([
+      [
+        '"subject:quarterly report" AND from:john',
+        '"subject:\\"quarterly report\\" AND from:john"',
+      ],
+      ['"from:john" AND "subject:the big report"', '"from:john AND subject:\\"the big report\\""'],
+    ])('moves quotes past the operator on a multi-word value (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // Per-clause quoting of a whole boolean group is the same directory-style mistake as
+    // quoting one clause, so it unwraps too. Escaping it would turn live restrictions into
+    // literal text and leave only the clauses outside the quotes doing any work.
+    it.each([
+      [
+        '"from:john AND subject:meeting" OR from:jane',
+        '"from:john AND subject:meeting OR from:jane"',
+      ],
+      [
+        '"from:john OR from:jane" AND hasAttachments:true',
+        '"from:john OR from:jane AND hasAttachments:true"',
+      ],
+    ])('unwraps a quoted group of clauses (%s)', async (query, expected) => {
+      const url = await callWithSearch(query);
+      expect(url).toContain(`$search=${encodeURIComponent(expected)}`);
+    });
+
+    // A missing closing quote on the enclosing pair is a dropped character, not the start of
+    // a phrase. Reading it as a phrase would search for the expression literally and match
+    // nothing, leaving the model no error to correct against.
+    it('recovers a dropped closing quote on the enclosing pair', async () => {
+      const url = await callWithSearch('"from:john AND subject:meeting');
+      expect(url).toContain(`$search=${encodeURIComponent('"from:john AND subject:meeting"')}`);
+    });
+
+    // An escaped backslash must be consumed as a unit, or its second slash pairs with the
+    // real delimiter behind it and the scan runs off the end of a well-formed string.
+    it('reads an escaped backslash before a closing quote', async () => {
+      const url = await callWithSearch('from:"a\\\\"');
+      expect(url).toContain(`$search=${encodeURIComponent('"from:\\"a\\\\\\""')}`);
+    });
+
+    // Every repair has to be a fixed point, otherwise a retry or a second pass corrupts a
+    // value this code just declared correct.
+    const CORPUS = [
+      'from:john AND subject:meeting',
+      '"from:john" AND subject:meeting',
+      'subject:"quarterly report',
+      '"subject:quarterly report" AND from:john',
+      '"from:john AND subject:meeting" OR from:jane',
+      '"from:john AND subject:meeting',
+      'from:john\\',
+      'from:"a\\\\"',
+      'subject:"abc\\',
+      '"quarterly report"',
+    ];
+
+    // The value Graph receives must be one well-formed escaped string: an opening quote, no
+    // unescaped quote before the final one, and no trailing backslash that would escape it.
+    // Asserting the shape catches a class of scanner bugs that enumerating cases misses.
+    it.each(CORPUS)('emits a balanced escaped string (%s)', async (query) => {
+      const url = await callWithSearch(query);
+      const value = new URL(url, 'https://graph.microsoft.com').searchParams.get('$search')!;
+      expect(value.startsWith('"') && value.endsWith('"')).toBe(true);
+      let unescaped = 0;
+      for (let i = 0; i < value.length; i++) {
+        if (value[i] === '\\') {
+          i++;
+          continue;
+        }
+        if (value[i] === '"') unescaped++;
+      }
+      expect(unescaped).toBe(2);
+    });
+
+    it.each(CORPUS)('normalizing twice is a no-op (%s)', async (query) => {
+      const once = await callWithSearch(query);
+      const search = new URL(once, 'https://graph.microsoft.com').searchParams.get('$search')!;
+      const twice = await callWithSearch(search);
+      expect(twice).toContain(`$search=${encodeURIComponent(search)}`);
+    });
+
+    // Dropping $search would turn a search into an unfiltered listing of the whole mailbox
+    // and return it as though it were the result, which is worse than the 400 Graph sends.
+    it.each([' ', '   ', '"', '""""'])(
+      'refuses an unsearchable $search value %j',
+      async (query) => {
+        const { result, graphClient } = await callSearch(query);
+        expect(result.isError).toBe(true);
+        expect(JSON.parse(result.content[0].text).error).toBe('invalid_search');
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    );
+
+    // Directory search advertises clause-level quoting, which mail's convention would
+    // destroy: collapsing the quotes below changes an OR of two clauses into one.
+    it.each([
+      ['/users', '"displayName:john" OR "displayName:jane"'],
+      // Mail-adjacent, but none of these take message KQL.
+      ['/me/mailFolders', 'foo OR bar'],
+      ['/me/mailFolders/:mailFolderId/childFolders', 'foo OR bar'],
+      ['/me/mailFolders/:mailFolderId/messageRules', 'foo OR bar'],
+      ['/me/messages/:messageId/attachments', 'foo OR bar'],
+      ['/planner/tasks/:plannerTaskId/messages', 'foo OR bar'],
+      ['/chats/:chatId/messages', 'foo OR bar'],
+      ['/teams/:teamId/channels/:channelId/messages', 'foo OR bar'],
+    ])('does not touch $search on %s', async (path, query) => {
+      const url = await callWithSearch(query, path);
+      expect(url).toContain(`$search=${encodeURIComponent(query)}`);
+    });
+
+    it.each([
+      '/me/mailFolders/:mailFolderId/messages',
+      '/users/:userId/messages',
+      '/me/mailFolders/:mailFolderId/childFolders/:childFolderId/messages',
+    ])('still normalizes on %s', async (path) => {
+      const url = await callWithSearch('"from:john" AND subject:meeting', path);
+      expect(url).toContain(`$search=${encodeURIComponent('"from:john AND subject:meeting"')}`);
     });
   });
 
@@ -2217,20 +2993,14 @@ describe('graph-tools', () => {
       };
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(
-        server as any,
-        graphClient as any,
-        false,
-        undefined,
-        false,
-        undefined,
-        false,
-        [],
-        undefined,
-        true,
-        undefined,
-        'https://mcp.example.com'
-      );
+      registerGraphTools(server as any, graphClient as any, {
+        readOnly: false,
+        orgMode: false,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: true,
+        publicBaseUrl: 'https://mcp.example.com',
+      });
 
       const result = await server.tools.get('download-bytes')!.handler({ target });
 
@@ -2295,6 +3065,7 @@ describe('graph-tools', () => {
         expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
           accessToken: undefined,
           rawResponse: true,
+          forceBinary: true,
         });
         expect(graphClient.downloadToFile).toHaveBeenCalledWith(target, outputPath, {
           accessToken: undefined,
@@ -2362,6 +3133,7 @@ describe('graph-tools', () => {
         expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
           accessToken: undefined,
           rawResponse: true,
+          forceBinary: true,
         });
         expect(graphClient.downloadToFile).toHaveBeenCalledWith(target, outputPath, {
           accessToken: undefined,
@@ -2437,6 +3209,10 @@ describe('graph-tools', () => {
       const [path, options] = graphClient.graphRequest.mock.calls[0];
       expect(path).toBe('/me/photo/$value');
       expect(options.accessToken).toBeUndefined();
+      // The tool's contract is bytes: it must ask for binary handling regardless of
+      // the Content-Type Graph reports (application/msword is not on the allowlist).
+      expect(options.forceBinary).toBe(true);
+      expect(options.rawResponse).toBe(true);
     });
 
     it('rejects absolute URLs (Graph paths only)', async () => {
@@ -2495,18 +3271,13 @@ describe('graph-tools', () => {
             5 * 1024 * 1024
           )
         );
-        registerGraphTools(
-          server as any,
-          graphClient as any,
-          false,
-          undefined,
-          false,
-          undefined,
-          false,
-          [],
-          undefined,
-          true
-        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
 
         const tool = server.tools.get('download-bytes');
         const result = await tool!.handler({ target: '/drives/d1/items/i1/content' });
@@ -2541,20 +3312,14 @@ describe('graph-tools', () => {
       };
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(
-        server as any,
-        graphClient as any,
-        false,
-        undefined,
-        false,
-        undefined,
-        false,
-        [],
-        undefined,
-        true,
-        undefined,
-        'https://cli.example.com'
-      );
+      registerGraphTools(server as any, graphClient as any, {
+        readOnly: false,
+        orgMode: false,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: true,
+        publicBaseUrl: 'https://cli.example.com',
+      });
 
       const result = await server.tools
         .get('download-bytes')!
@@ -2610,20 +3375,14 @@ describe('graph-tools', () => {
         };
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(
-          server as any,
-          graphClient as any,
-          false,
-          undefined,
-          false,
-          undefined,
-          false,
-          [],
-          undefined,
-          true,
-          undefined,
-          'https://cli.example.com'
-        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+          publicBaseUrl: 'https://cli.example.com',
+        });
 
         const result = await server.tools.get('download-bytes')!.handler({ target });
 
@@ -2632,6 +3391,7 @@ describe('graph-tools', () => {
         expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
           accessToken: undefined,
           rawResponse: true,
+          forceBinary: true,
         });
         expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
       }
@@ -2925,16 +3685,11 @@ describe('graph-tools', () => {
       };
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(
-        server as any,
-        graphClient as any,
-        false,
-        undefined,
-        false,
-        authManager as any,
-        true,
-        ['user1@domain.com', 'user2@domain.com']
-      );
+      registerGraphTools(server as any, graphClient as any, {
+        authManager: authManager as any,
+        multiAccount: true,
+        accountNames: ['user1@domain.com', 'user2@domain.com'],
+      });
 
       const outputPath = join(tmpDir, 'invoice.pdf');
       const result = await server.tools.get('download-bytes-to-file')!.handler({
@@ -2966,18 +3721,7 @@ describe('graph-tools', () => {
 
       const httpServer = createMockServer();
       // httpMode is the 10th positional arg.
-      registerGraphTools(
-        httpServer as any,
-        {} as any,
-        false,
-        undefined,
-        false,
-        undefined,
-        false,
-        [],
-        undefined,
-        true
-      );
+      registerGraphTools(httpServer as any, {} as any, { httpMode: true });
       expect(httpServer.tools.has('download-bytes-to-file')).toBe(false);
       expect(httpServer.tools.has('download-bytes')).toBe(true);
     });
@@ -3330,18 +4074,13 @@ describe('graph-tools', () => {
 
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(
-          server as any,
-          graphClient as any,
-          false,
-          undefined,
-          false,
-          undefined,
-          false,
-          [],
-          undefined,
-          true
-        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
 
         const tool = server.tools.get('get-download-url');
         const result = await tool!.handler({
@@ -3391,20 +4130,14 @@ describe('graph-tools', () => {
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
         // The server hands tools the OAuth public URL; the override must still win.
-        registerGraphTools(
-          server as any,
-          graphClient as any,
-          false,
-          undefined,
-          false,
-          undefined,
-          false,
-          [],
-          undefined,
-          true,
-          undefined,
-          'https://oauth.example.com'
-        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+          publicBaseUrl: 'https://oauth.example.com',
+        });
 
         const result = await server.tools.get('get-download-url')!.handler({
           target: '/me/messages/m1/attachments/a1/$value',
@@ -3455,18 +4188,13 @@ describe('graph-tools', () => {
         };
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(
-          server as any,
-          graphClient as any,
-          false,
-          undefined,
-          false,
-          undefined,
-          false,
-          [],
-          undefined,
-          true
-        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
         const tool = server.tools.get('get-download-url')!;
 
         const first = tool.handler({ target: '/me/messages/m1/attachments/a1/$value' });
@@ -3621,16 +4349,11 @@ describe('graph-tools', () => {
       };
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(
-        server as any,
-        graphClient as any,
-        false,
-        undefined,
-        false,
-        authManager as any,
-        true,
-        ['user1@domain.com', 'user2@domain.com']
-      );
+      registerGraphTools(server as any, graphClient as any, {
+        authManager: authManager as any,
+        multiAccount: true,
+        accountNames: ['user1@domain.com', 'user2@domain.com'],
+      });
       const { requestContext } = await import('../request-context.js');
 
       const tool = server.tools.get('get-download-url');
@@ -3685,17 +4408,9 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(
-        server as any,
-        createMockGraphClient() as any,
-        false,
-        undefined,
-        false,
-        undefined,
-        false,
-        [],
-        'Mail.Read'
-      );
+      registerGraphTools(server as any, createMockGraphClient() as any, {
+        allowedScopes: 'Mail.Read',
+      });
 
       expect(server.tools.has('list-mail-messages')).toBe(true);
       expect(server.tools.has('list-calendar-events')).toBe(false);
@@ -3723,17 +4438,9 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(
-        server as any,
-        createMockGraphClient() as any,
-        false,
-        undefined,
-        false,
-        undefined,
-        false,
-        [],
-        'Mail.Read'
-      );
+      registerGraphTools(server as any, createMockGraphClient() as any, {
+        allowedScopes: 'Mail.Read',
+      });
       const handler = server.server._requestHandlers.get('tools/call');
 
       await expect(
@@ -3798,17 +4505,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(
-        server as any,
-        {} as any,
-        false,
-        false,
-        undefined,
-        false,
-        [],
-        undefined,
-        'Mail.Read'
-      );
+      registerDiscoveryTools(server as any, {} as any, { allowedScopes: 'Mail.Read' });
 
       const result = await server.tools.get('search-tools')!.handler({ limit: 50 });
       const found = JSON.parse(result.content[0].text).tools.map((t: any) => t.name);
@@ -3838,17 +4535,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(
-        server as any,
-        {} as any,
-        false,
-        false,
-        undefined,
-        false,
-        [],
-        undefined,
-        'Mail.Read'
-      );
+      registerDiscoveryTools(server as any, {} as any, { allowedScopes: 'Mail.Read' });
 
       const result = await server.tools.get('execute-tool')!.handler({
         tool_name: 'get-drive-item',
@@ -3894,17 +4581,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(
-        server as any,
-        {} as any,
-        false,
-        false,
-        undefined,
-        false,
-        [],
-        undefined,
-        'Mail.Read'
-      );
+      registerDiscoveryTools(server as any, {} as any, { allowedScopes: 'Mail.Read' });
       const handler = server.server._requestHandlers.get('tools/call');
 
       await expect(
@@ -4102,7 +4779,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(server as any, {} as any, false, false, undefined, false, [], 'mail');
+      registerDiscoveryTools(server as any, {} as any, { enabledTools: 'mail' });
 
       const result = await server.tools.get('search-tools')!.handler({ limit: 50 });
       const found = JSON.parse(result.content[0].text).tools.map((t: any) => t.name);
@@ -4141,16 +4818,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(
-        server as any,
-        {} as any,
-        false,
-        false,
-        undefined,
-        false,
-        [],
-        '^list-mail-messages$'
-      );
+      registerDiscoveryTools(server as any, {} as any, { enabledTools: '^list-mail-messages$' });
 
       const result = await server.tools.get('execute-tool')!.handler({
         tool_name: 'get-drive-item',
@@ -4179,16 +4847,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(
-        server as any,
-        {} as any,
-        false,
-        false,
-        undefined,
-        false,
-        [],
-        '^download-bytes$'
-      );
+      registerDiscoveryTools(server as any, {} as any, { enabledTools: '^download-bytes$' });
 
       const result = await server.tools.get('search-tools')!.handler({ limit: 50 });
       const found = JSON.parse(result.content[0].text).tools.map((t: any) => t.name);
@@ -4202,16 +4861,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(
-        server as any,
-        {} as any,
-        false,
-        false,
-        undefined,
-        false,
-        [],
-        '[invalid'
-      );
+      registerDiscoveryTools(server as any, {} as any, { enabledTools: '[invalid' });
 
       const result = await server.tools.get('search-tools')!.handler({ limit: 50 });
       const found = JSON.parse(result.content[0].text).tools.map((t: any) => t.name);
@@ -4228,7 +4878,7 @@ describe('graph-tools', () => {
 
       const server = createMockServer();
       const { registerGraphTools } = await loadModule();
-      registerGraphTools(server as any, {} as any, true);
+      registerGraphTools(server as any, {} as any, { readOnly: true });
 
       expect(server.tools.has('download-bytes')).toBe(true);
       expect(server.tools.has('parse-teams-url')).toBe(true);
@@ -4243,7 +4893,7 @@ describe('graph-tools', () => {
       const graphClient = { downloadToFile: vi.fn() };
       const server = createMockServer();
       const { registerDiscoveryTools } = await loadModule();
-      registerDiscoveryTools(server as any, graphClient as any, true);
+      registerDiscoveryTools(server as any, graphClient as any, { readOnly: true });
 
       const searchResult = await server.tools.get('search-tools')!.handler({ limit: 50 });
       const names = JSON.parse(searchResult.content[0].text).tools.map((tool: any) => tool.name);
@@ -4514,6 +5164,682 @@ describe('graph-tools', () => {
 
       expect(server.tools.get('test-tool')!.schema).not.toHaveProperty('confirm');
       expect(server.tools.get('destructive-tool')!.schema).toHaveProperty('confirm');
+    });
+  });
+
+  // ---- 13. Server-side $select projection (#660) ----
+  describe('$select projection', () => {
+    // The onlineMeeting shape from #660: the caller asked for three fields and Graph
+    // sent the whole resource back, invite HTML and passcode included.
+    const untrimmed = {
+      value: [
+        {
+          id: 'MSo',
+          subject: 'Standup',
+          joinWebUrl: 'https://teams/x',
+          joinInformation: { content: '<div>invite</div>' },
+          joinMeetingIdSettings: { passcode: '123456' },
+        },
+      ],
+    };
+
+    async function run(
+      args: Record<string, unknown>,
+      responses?: any[],
+      outputFormat: 'json' | 'toon' = 'json'
+    ) {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient(
+        responses ?? [{ content: [{ type: 'text', text: JSON.stringify(untrimmed) }] }],
+        outputFormat
+      );
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      const result = await server.tools.get('test-tool')!.handler(args);
+      return { result, graphClient };
+    }
+
+    it('narrows the body to the requested fields when Graph ignored $select', async () => {
+      const { result } = await run({ select: 'id,subject,joinWebUrl' });
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: 'MSo',
+        subject: 'Standup',
+        joinWebUrl: 'https://teams/x',
+      });
+    });
+
+    it('restricts list-users selects and responses to the configured user fields', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-users', path: '/users' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'list-users', pathPattern: '/users', scopes: ['User.Read.All'] }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [
+                  { id: '1', displayName: 'Carlos', mail: 'carlos@example.com', jobTitle: 'CEO' },
+                ],
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, {
+        userFields: 'id,displayName,mail',
+      });
+
+      const result = await server.tools.get('list-users')!.handler({
+        select: 'id,displayName,mail,jobTitle',
+      });
+
+      expect(graphClient.graphRequest.mock.calls[0][0]).toContain('$select=id,displayName,mail');
+      expect(graphClient.graphRequest.mock.calls[0][0]).not.toContain('jobTitle');
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: '1',
+        displayName: 'Carlos',
+        mail: 'carlos@example.com',
+      });
+    });
+
+    it('adds the configured fields when list-users is called without select', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-users', path: '/users' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'list-users', pathPattern: '/users', scopes: ['User.Read.All'] }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [{ id: '1', displayName: 'Carlos', jobTitle: 'CEO' }],
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      const result = await server.tools.get('list-users')!.handler({});
+
+      expect(graphClient.graphRequest.mock.calls[0][0]).toContain('$select=id,displayName');
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: '1',
+        displayName: 'Carlos',
+      });
+    });
+
+    it('blocks expanded user data outside the list-users field boundary', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-users', path: '/users' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'list-users', pathPattern: '/users', scopes: ['User.Read.All'] }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [
+                  {
+                    id: '1',
+                    displayName: 'Carlos',
+                    manager: { displayName: 'Manager', jobTitle: 'CEO' },
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      const result = await server.tools.get('list-users')!.handler({
+        select: 'id,displayName',
+        expand: 'manager($select=displayName,jobTitle)',
+      });
+
+      expect(graphClient.graphRequest.mock.calls[0][0]).not.toContain('$expand');
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: '1',
+        displayName: 'Carlos',
+      });
+    });
+
+    async function runListUsers(
+      userFields: string,
+      args: Record<string, unknown>,
+      graphBody: unknown
+    ) {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-users', path: '/users' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'list-users', pathPattern: '/users', scopes: ['User.Read.All'] }),
+      ];
+      const graphClient = createMockGraphClient([
+        { content: [{ type: 'text', text: JSON.stringify(graphBody) }] },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields });
+      const result = await server.tools.get('list-users')!.handler(args);
+      return { result, graphClient };
+    }
+
+    // The intersection is empty, so the fallback asks Graph for the whole allowlist. The
+    // projection has to use that same list, or it degrades to a no-op that ships whatever
+    // else Graph decided to include.
+    it('still projects when the requested fields are all disallowed', async () => {
+      const { result, graphClient } = await runListUsers(
+        'id,displayName',
+        { select: 'jobTitle,employeeId' },
+        { value: [{ id: '1', displayName: 'Carlos', jobTitle: 'CEO' }] }
+      );
+
+      expect(graphClient.graphRequest.mock.calls[0][0]).toContain('$select=id,displayName');
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: '1',
+        displayName: 'Carlos',
+      });
+    });
+
+    // id is kept implicitly on the ordinary $select path, but here the allowlist is the
+    // whole promise: a field the operator did not list must not come back.
+    it('drops id when the allowlist does not name it', async () => {
+      const { result } = await runListUsers(
+        'displayName',
+        {},
+        { value: [{ id: '1', displayName: 'Carlos', jobTitle: 'CEO' }] }
+      );
+
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({ displayName: 'Carlos' });
+    });
+
+    it('keeps the pagination envelope while enforcing the boundary', async () => {
+      const { result } = await runListUsers(
+        'displayName',
+        {},
+        {
+          '@odata.nextLink': 'https://graph/next',
+          value: [{ id: '1', displayName: 'Carlos', jobTitle: 'CEO' }],
+        }
+      );
+
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        '@odata.nextLink': 'https://graph/next',
+        value: [{ displayName: 'Carlos' }],
+      });
+    });
+
+    // The ordinary path returns the body untrimmed when none of the selected fields show
+    // up, to protect against a typo. Under the boundary that would hand back everything.
+    it('fails closed when Graph returns none of the allowlisted fields', async () => {
+      const { result } = await runListUsers(
+        'displayName',
+        {},
+        { value: [{ id: '1', jobTitle: 'CEO', employeeId: 'E-1' }] }
+      );
+
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({});
+    });
+
+    it('refuses to register with an allowlist that names no fields', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-users', path: '/users' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'list-users', pathPattern: '/users', scopes: ['User.Read.All'] }),
+      ];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+
+      expect(() =>
+        registerGraphTools(server as any, createMockGraphClient() as any, { userFields: ' , ,' })
+      ).toThrow(/names no fields/);
+    });
+
+    // execute-tool reaches the same Graph path by a different route, so the boundary has
+    // to be asserted there too rather than inferred from the registerGraphTools tests.
+    it('enforces the boundary through discovery mode execute-tool', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-users', path: '/users' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'list-users', pathPattern: '/users', scopes: ['User.Read.All'] }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [{ id: '1', displayName: 'Carlos', jobTitle: 'CEO' }],
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerDiscoveryTools } = await loadModule();
+      registerDiscoveryTools(server as any, graphClient as any, {
+        userFields: 'id,displayName',
+      });
+
+      const result = await server.tools.get('execute-tool')!.handler({
+        tool_name: 'list-users',
+        parameters: { select: 'id,displayName,jobTitle' },
+      });
+
+      expect(graphClient.graphRequest.mock.calls[0][0]).toContain('$select=id,displayName');
+      expect(graphClient.graphRequest.mock.calls[0][0]).not.toContain('jobTitle');
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: '1',
+        displayName: 'Carlos',
+      });
+    });
+
+    // manager and directReports return other people's displayName, mail and jobTitle, so
+    // omitting $select on either used to hand back everything the allowlist excluded.
+    it('projects a directory navigation that returns user profile data', async () => {
+      mockEndpoints.push(
+        makeEndpoint({ alias: 'get-user-manager', path: '/users/:userId/manager' })
+      );
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'get-user-manager',
+          pathPattern: '/users/{user-id}/manager',
+          scopes: ['User.Read.All'],
+        }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                id: 'm1',
+                displayName: 'Manager',
+                mail: 'manager@example.com',
+                jobTitle: 'CEO',
+                employeeId: 'E-9',
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, {
+        userFields: 'id,displayName,mail',
+      });
+
+      const result = await server.tools.get('get-user-manager')!.handler({ userId: 'abc' });
+
+      // directoryObject needs an OData cast before Graph will $select a user-only
+      // property, so the request is left alone and the response carries the boundary.
+      expect(graphClient.graphRequest.mock.calls[0][0]).not.toContain('$select');
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        id: 'm1',
+        displayName: 'Manager',
+        mail: 'manager@example.com',
+      });
+    });
+
+    it('projects group members, which carry the same profile fields', async () => {
+      mockEndpoints.push(
+        makeEndpoint({ alias: 'list-group-members', path: '/groups/:groupId/members' })
+      );
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'list-group-members',
+          pathPattern: '/groups/{group-id}/members',
+          scopes: ['GroupMember.Read.All'],
+        }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [{ id: '1', displayName: 'Carlos', jobTitle: 'CEO' }],
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      const result = await server.tools.get('list-group-members')!.handler({ groupId: 'g1' });
+
+      expect(JSON.parse(result.content[0].text).value[0]).toEqual({
+        id: '1',
+        displayName: 'Carlos',
+      });
+    });
+
+    it.each([
+      { alias: 'get-current-user', path: '/me', pathPattern: '/me', args: {} },
+      {
+        alias: 'get-group',
+        path: '/groups/:groupId',
+        pathPattern: '/groups/{group-id}',
+        args: { groupId: 'g1' },
+      },
+    ])('strips $expand from $alias while the field policy is active', async (endpoint) => {
+      mockEndpoints.push(makeEndpoint({ alias: endpoint.alias, path: endpoint.path }));
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: endpoint.alias,
+          pathPattern: endpoint.pathPattern,
+          scopes: ['User.Read.All'],
+        }),
+      ];
+      const graphClient = createMockGraphClient([
+        { content: [{ type: 'text', text: JSON.stringify({ id: '1' }) }] },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      await server.tools.get(endpoint.alias)!.handler({
+        ...endpoint.args,
+        expand: 'manager($select=displayName,jobTitle)',
+      });
+
+      expect(graphClient.graphRequest.mock.calls[0][0]).not.toContain('$expand');
+    });
+
+    // graph-batch forwards subrequest URLs verbatim, so /users?$select=employeeId reached
+    // Graph without ever touching list-users.
+    it('restricts a graph-batch subrequest that reads the users surface', async () => {
+      mockEndpoints.push(
+        makeEndpoint({
+          alias: 'graph-batch',
+          method: 'post',
+          path: '/$batch',
+          parameters: [{ name: 'body', type: 'Body', schema: z.any() }],
+        })
+      );
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'graph-batch', pathPattern: '/$batch', method: 'post' }),
+      ];
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                responses: [
+                  {
+                    id: '1',
+                    status: 200,
+                    body: {
+                      value: [{ id: '1', displayName: 'Carlos', employeeId: 'E-1' }],
+                    },
+                  },
+                  { id: '2', status: 200, body: { id: 'm1', subject: 'Keep me' } },
+                  { id: '3', status: 200, body: { id: 'g1', displayName: 'Team' } },
+                ],
+              }),
+            },
+          ],
+        },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      const result = await server.tools.get('graph-batch')!.handler({
+        body: {
+          requests: [
+            { id: '1', method: 'GET', url: '/users?$select=id,displayName,employeeId' },
+            { id: '2', method: 'GET', url: '/me/messages/m1?$select=id,subject' },
+            { id: '3', method: 'GET', url: '/groups/g1?$expand=members($select=mail)' },
+          ],
+        },
+      });
+
+      const sentBody = JSON.parse(graphClient.graphRequest.mock.calls[0][1].body);
+      expect(sentBody.requests[0].url).toBe('/users?$select=id,displayName');
+      // A subrequest that is not a profile read has to pass through untouched.
+      expect(sentBody.requests[1].url).toBe('/me/messages/m1?$select=id,subject');
+      expect(sentBody.requests[2].url).toBe('/groups/g1');
+
+      const responses = JSON.parse(result.content[0].text).responses;
+      expect(responses[0].body.value[0]).toEqual({ id: '1', displayName: 'Carlos' });
+      expect(responses[1].body).toEqual({ id: 'm1', subject: 'Keep me' });
+    });
+
+    // download-bytes returns the response verbatim, so there is no projection step to
+    // enforce the allowlist in; it has to refuse instead.
+    it('refuses a byte-passthrough read of the users surface', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      const result = await server.tools.get('download-bytes')!.handler({
+        target: '/users?$select=employeeId',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('user_fields_restricted');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('still allows byte reads below a user, such as a profile photo', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const graphClient = createMockGraphClient([
+        { content: [{ type: 'text', text: JSON.stringify({ message: 'OK!' }) }] },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, { userFields: 'id,displayName' });
+
+      await server.tools.get('download-bytes')!.handler({
+        target: '/users/abc/photo/$value',
+      });
+
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the body untouched when no select was passed', async () => {
+      const { result } = await run({});
+      expect(JSON.parse(result.content[0].text)).toEqual(untrimmed);
+    });
+
+    it('forces JSON so a --toon client still gets a trimmed body', async () => {
+      const { result, graphClient } = await run({ select: 'id,subject' }, undefined, 'toon');
+      expect(graphClient.graphRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ forceJsonOutput: true })
+      );
+      expect(result.content[0].text.startsWith('TOON:')).toBe(true);
+      expect(result.content[0].text).not.toContain('joinInformation');
+    });
+
+    // Regression: the merge re-encodes to TOON, so projecting after it would JSON.parse
+    // a TOON string, throw, and silently ship the untrimmed body.
+    it('still projects when --toon and fetchAllPages are combined', async () => {
+      const { result } = await run(
+        { select: 'id,subject', fetchAllPages: true },
+        [
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  value: [{ id: '1', subject: 'a', joinInformation: { content: 'huge' } }],
+                  '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/messages?$skip=1',
+                }),
+              },
+            ],
+          },
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  value: [{ id: '2', subject: 'b', joinInformation: { content: 'huge' } }],
+                }),
+              },
+            ],
+          },
+        ],
+        'toon'
+      );
+      expect(result.content[0].text.startsWith('TOON:')).toBe(true);
+      expect(result.content[0].text).not.toContain('joinInformation');
+      const merged = JSON.parse(result.content[0].text.slice('TOON:'.length));
+      expect(merged.value).toEqual([
+        { id: '1', subject: 'a' },
+        { id: '2', subject: 'b' },
+      ]);
+    });
+
+    // Binary and raw-text payloads are wrapped in an envelope; projecting one would
+    // strip every key and lose the file or transcript.
+    it('does not project a raw-text transport envelope', async () => {
+      const envelope = { message: 'OK!', rawResponse: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000' };
+      const { result } = await run({ select: 'id' }, [
+        { content: [{ type: 'text', text: JSON.stringify(envelope) }] },
+      ]);
+      expect(JSON.parse(result.content[0].text)).toEqual(envelope);
+    });
+
+    it('does not project a binary transport envelope', async () => {
+      const envelope = {
+        message: 'OK!',
+        contentType: 'video/mp4',
+        encoding: 'base64',
+        contentLength: 3,
+        contentBytes: 'AAA',
+      };
+      const { result } = await run({ select: 'id' }, [
+        { content: [{ type: 'text', text: JSON.stringify(envelope) }] },
+      ]);
+      expect(JSON.parse(result.content[0].text)).toEqual(envelope);
+    });
+
+    // $select and $expand are independent in OData: the expanded property arrives in
+    // addition to the selected fields and has to survive the projection.
+    it('keeps an $expand-ed navigation property that was not selected', async () => {
+      const { result } = await run({ select: 'subject', expand: 'attachments' }, [
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                id: '1',
+                subject: 'a',
+                attachments: [{ id: 'att1' }],
+                bodyPreview: 'huge',
+              }),
+            },
+          ],
+        },
+      ]);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.attachments).toEqual([{ id: 'att1' }]);
+      expect(body).not.toHaveProperty('bodyPreview');
+    });
+
+    // Graph never rejects a bad property name on the endpoints that ignore $select, so
+    // a typo would otherwise silently reduce the response to {id}.
+    it('returns the body untrimmed when no requested field is present', async () => {
+      const body = { id: '1', joinWebUrl: 'u', joinInformation: { content: 'huge' } };
+      const { result } = await run({ select: 'joinUrl' }, [
+        { content: [{ type: 'text', text: JSON.stringify(body) }] },
+      ]);
+      expect(JSON.parse(result.content[0].text)).toEqual(body);
+    });
+
+    it('keeps the _etag that includeHeaders adds to a single resource', async () => {
+      const { result } = await run({ select: 'subject', includeHeaders: true }, [
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ id: '1', subject: 'a', _etag: 'W/"1"', bodyPreview: 'huge' }),
+            },
+          ],
+        },
+      ]);
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        id: '1',
+        subject: 'a',
+        _etag: 'W/"1"',
+      });
+    });
+
+    // Asserting on the body alone passed even with the excludeResponse clause removed,
+    // because { success: true } trips the envelope guard anyway. forceJsonOutput is the
+    // signal that projection was never armed in the first place.
+    it('does not arm projection when excludeResponse was requested', async () => {
+      const { result, graphClient } = await run({ select: 'id', excludeResponse: true }, [
+        { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] },
+      ]);
+      expect(graphClient.graphRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.not.objectContaining({ forceJsonOutput: true })
+      );
+      expect(JSON.parse(result.content[0].text)).toEqual({ success: true });
+    });
+
+    // An error body still reaches the merge block, which parses and re-serializes it, so
+    // shouldProject is the only thing standing between it and the projection. Two keys
+    // with one selected: if the guard goes, `code` disappears.
+    it('does not project an error body on the merge path', async () => {
+      const errorBody = { error: 'Microsoft Graph API error: 403 Forbidden', code: 'accessDenied' };
+      const { result } = await run({ select: 'error', fetchAllPages: true }, [
+        { content: [{ type: 'text', text: JSON.stringify(errorBody) }], isError: true },
+      ]);
+      expect(JSON.parse(result.content[0].text)).toEqual(errorBody);
+    });
+
+    // A page failing mid-merge replaces `response` with the error, which the guard
+    // computed before the request cannot see.
+    it('leaves an error from a later page alone', async () => {
+      const errorBody = { error: 'Microsoft Graph API error: 503 Service Unavailable' };
+      const { result } = await run(
+        { select: 'error', fetchAllPages: true },
+        [
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  value: [{ id: '1', subject: 'a' }],
+                  '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/messages?$skip=1',
+                }),
+              },
+            ],
+          },
+          { content: [{ type: 'text', text: JSON.stringify(errorBody) }], isError: true },
+        ],
+        'toon'
+      );
+      expect(result.content[0].text.startsWith('TOON:')).toBe(false);
+      expect(JSON.parse(result.content[0].text)).toEqual(errorBody);
+    });
+
+    // The llmTips tell the model to pass select=id,subject,joinWebUrl, so id is in the
+    // list nearly every time; counting it as a match made the typo guard inert.
+    it('returns the body untrimmed when the only real field is a typo alongside id', async () => {
+      const { result } = await run({ select: 'id,joinUrl' });
+      expect(JSON.parse(result.content[0].text)).toEqual(untrimmed);
     });
   });
 

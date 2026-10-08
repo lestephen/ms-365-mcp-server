@@ -69,20 +69,14 @@ describe('discovery payload states how to invoke each tool', () => {
   });
 
   it('tells the caller to use execute-tool for a tool that is not registered by name', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      undefined,
-      DIRECT
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      directTools: DIRECT,
+    });
 
     const schema = await parse('get-tool-schema', { tool_name: 'delete-mail-attachment' });
     expect(schema.invocation).toBeDefined();
@@ -96,20 +90,14 @@ describe('discovery payload states how to invoke each tool', () => {
   });
 
   it('says a directly registered tool can be called by name', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      undefined,
-      DIRECT
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      directTools: DIRECT,
+    });
 
     const schema = await parse('get-tool-schema', { tool_name: 'get-mail-message' });
     expect(schema.invocation.via).toBe('direct');
@@ -118,7 +106,7 @@ describe('discovery payload states how to invoke each tool', () => {
   it('defaults to execute-tool when no direct pattern is configured', async () => {
     // Discovery-only mode: nothing is registered by name, so every tool routes
     // through execute-tool.
-    registerDiscoveryTools(server, graphClient, false, true);
+    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
 
     for (const tool of ['get-mail-message', 'delete-mail-attachment']) {
       const schema = await parse('get-tool-schema', { tool_name: tool });
@@ -127,20 +115,14 @@ describe('discovery payload states how to invoke each tool', () => {
   });
 
   it('marks the route on every search-tools result, so the schema fetch is not the first hint', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      undefined,
-      DIRECT
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      directTools: DIRECT,
+    });
 
     const found = await parse('search-tools', { query: 'mail attachment message' });
     const results = found.results ?? found.tools ?? [];
