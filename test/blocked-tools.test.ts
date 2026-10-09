@@ -80,19 +80,14 @@ describe('blocked tools', () => {
   });
 
   it('keeps a blocked tool out of the direct registration', () => {
-    registerGraphTools(
-      server,
-      graphClient,
-      false,
-      undefined,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      false,
-      BLOCKED
-    );
+    registerGraphTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      blockedTools: BLOCKED,
+    });
 
     const names = registeredNames();
     expect(names).toContain('create-draft-email');
@@ -117,19 +112,14 @@ describe('blocked tools', () => {
   });
 
   it('reports a blocked tool as not found through execute-tool', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      BLOCKED
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      blockedTools: BLOCKED,
+    });
 
     const result = await handlerFor('execute-tool')({ tool_name: 'send-mail', parameters: {} });
     expect(result.content[0].text).toContain('Tool not found');
@@ -137,38 +127,28 @@ describe('blocked tools', () => {
   });
 
   it('reports a blocked tool as not found through get-tool-schema', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      BLOCKED
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      blockedTools: BLOCKED,
+    });
 
     const result = await handlerFor('get-tool-schema')({ tool_name: 'send-mail' });
     expect(result.content[0].text).toContain('Tool not found');
   });
 
   it('does not surface a blocked tool from search-tools', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      BLOCKED
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      blockedTools: BLOCKED,
+    });
 
     const result = await handlerFor('search-tools')({ query: 'send mail reply message' });
 
@@ -189,19 +169,14 @@ describe('blocked tools', () => {
   });
 
   it('still allows an unblocked tool through execute-tool', async () => {
-    registerDiscoveryTools(
-      server,
-      graphClient,
-      false,
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      undefined,
-      false,
-      BLOCKED
-    );
+    registerDiscoveryTools(server, graphClient, {
+      readOnly: false,
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      blockedTools: BLOCKED,
+    });
 
     const result = await handlerFor('execute-tool')({
       tool_name: 'create-draft-email',
@@ -212,19 +187,15 @@ describe('blocked tools', () => {
   });
 
   it('blocks a tool even when an enable pattern explicitly selects it', () => {
-    registerGraphTools(
-      server,
-      graphClient,
-      false,
-      '^(send-mail|create-draft-email)$',
-      true,
-      undefined,
-      false,
-      [],
-      undefined,
-      false,
-      BLOCKED
-    );
+    registerGraphTools(server, graphClient, {
+      readOnly: false,
+      enabledTools: '^(send-mail|create-draft-email)$',
+      orgMode: true,
+      multiAccount: false,
+      accountNames: [],
+      httpMode: false,
+      blockedTools: BLOCKED,
+    });
 
     const names = registeredNames();
     expect(names).toContain('create-draft-email');
@@ -247,7 +218,7 @@ describe('blocked tools', () => {
   it('can block the generic dispatcher itself', () => {
     // An operator may want the named tools without generic Graph execution.
     const guarded = withToolBlocklist(server, '^execute-tool$');
-    registerDiscoveryTools(guarded, graphClient, false, true);
+    registerDiscoveryTools(guarded, graphClient, { readOnly: false, orgMode: true });
 
     const names = registeredNames();
     expect(names).toContain('search-tools');
@@ -267,19 +238,14 @@ describe('blocked tools', () => {
     // A blocklist is a guardrail: ignoring a typo would silently unblock send-mail,
     // so this has to be loud and fatal.
     expect(() =>
-      registerGraphTools(
-        server,
-        graphClient,
-        false,
-        undefined,
-        true,
-        undefined,
-        false,
-        [],
-        undefined,
-        false,
-        '([bad'
-      )
+      registerGraphTools(server, graphClient, {
+        readOnly: false,
+        orgMode: true,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: false,
+        blockedTools: '([bad',
+      })
     ).toThrow(/blocked-tools/i);
   });
 });

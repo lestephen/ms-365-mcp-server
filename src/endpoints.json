@@ -244,7 +244,7 @@
     "toolName": "add-mail-attachment",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "The only path for attachments under 3MB. contentBytes must carry the complete base64 verbatim; a truncated argument fails with 400 UnableToDeserializePostBody. At 3MB and above use create-mail-attachment-upload-session, which rejects anything smaller. Body requires @odata.type: {\"@odata.type\": \"#microsoft.graph.fileAttachment\", \"name\": \"file.pdf\", \"contentBytes\": \"<base64>\"}."
+    "llmTip": "This server refuses a fileAttachment here at any size, because inline contentBytes puts the file in the transcript. To attach a file, use get-upload-url (PUT the bytes from disk to the returned URL) or create-mail-attachment-upload-session. Still usable for a referenceAttachment or itemAttachment, which carry no contentBytes; body requires @odata.type, e.g. {\"@odata.type\": \"#microsoft.graph.referenceAttachment\", ...}."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments/createUploadSession",
@@ -414,7 +414,7 @@
     "toolName": "create-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
-    "descriptionOverride": "Create (schedule) a new calendar event — a meeting or appointment — on the user's calendar. Set subject, start/end times, time zone, location, body, and attendees; supports online meetings and recurrence.",
+    "descriptionOverride": "Create (schedule) a new calendar event — a meeting or appointment — on the user's calendar. Times use nested objects, not flat fields: start: {dateTime, timeZone}, end: {dateTime, timeZone}. Do NOT use startDateTime/startTimeZone. For one-off events, UTC is simplest (e.g. 3:30 PM AEDT = 04:30 UTC). For recurring events, use the organizer's own time zone name instead — Graph resolves DST against the zone in start.timeZone, so UTC drifts after DST changes. Get the zone from get-mailbox-settings, or validate one with list-supported-time-zones instead of guessing from memory. Set subject, location, body, and attendees; supports online meetings and recurrence.",
     "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
   },
   {
@@ -423,6 +423,7 @@
     "toolName": "update-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
+    "descriptionOverride": "Update an event on the default calendar. Requires eventId (the event's ID from get-calendar-view or list-calendar-events). Times use nested {dateTime, timeZone} objects. UTC is simplest for one-off events; for recurring events use the organizer's own time zone (from get-mailbox-settings or list-supported-time-zones) instead of UTC, since Graph resolves DST against that zone.",
     "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones."
   },
   {
@@ -484,6 +485,7 @@
     "toolName": "create-specific-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
+    "descriptionOverride": "Create a calendar event on a specific calendar. Requires calendarId (the target calendar's ID). Times use nested {dateTime, timeZone} objects — do NOT use startDateTime/startTimeZone. UTC is simplest for one-off events; for recurring events use the organizer's own time zone (from get-mailbox-settings or list-supported-time-zones) instead of UTC, since Graph resolves DST against that zone.",
     "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients."
   },
   {
@@ -492,6 +494,7 @@
     "toolName": "update-specific-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
+    "descriptionOverride": "Update a specific calendar event. Requires calendarId (from list-calendars) and eventId (from list-specific-calendar-events or get-specific-calendar-view for that same calendar). Times use nested {dateTime, timeZone} objects. UTC is simplest for one-off events; for recurring events use the organizer's own time zone (from get-mailbox-settings or list-supported-time-zones) instead of UTC, since Graph resolves DST against that zone.",
     "llmTip": "CRITICAL: Do not try to guess the email address of the recipients. Use the list-users tool to find the email address of the recipients. WARNING: Setting attendees replaces the entire attendee list — include all attendees, not just new ones."
   },
   {
@@ -500,6 +503,7 @@
     "toolName": "delete-specific-calendar-event",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.ReadWrite"],
+    "descriptionOverride": "Delete a specific calendar event. Requires calendarId (the target calendar's ID) and eventId (the event's own ID).",
     "llmTip": "Deleting a seriesMaster deletes ALL occurrences. To cancel a single occurrence, use the specific instance ID."
   },
   {
@@ -510,7 +514,7 @@
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
     "supportsExpandExtendedProperties": true,
-    "llmTip": "Returns expanded recurring event instances (not just seriesMaster) within a date range for the default calendar. Requires startDateTime and endDateTime query parameters in ISO 8601 format (e.g., 2024-01-01T00:00:00Z). Use get-specific-calendar-view if you need a non-default calendar. To find Teams meetings, use $filter=isOnlineMeeting eq true. To search by subject, use $filter=contains(subject,'keyword'). Teams meetings include a joinWebUrl property needed for transcript access via list-online-meetings."
+    "llmTip": "Returns expanded recurring event instances (not just seriesMaster) within a date range for the default calendar. Requires startDateTime and endDateTime query parameters in ISO 8601 format (e.g., 2024-01-01T00:00:00Z). Use get-specific-calendar-view if you need a non-default calendar. To find Teams meetings, use $select=subject,start,isOnlineMeeting,onlineMeetingProvider,onlineMeeting and keep the events with isOnlineMeeting true and onlineMeetingProvider teamsForBusiness; neither property is filterable (isOnlineMeeting returns 400 ErrorInvalidProperty). To search by subject, use $filter=contains(subject,'keyword'). Teams meetings expose their join link as onlineMeeting/joinUrl; the event resource has no joinWebUrl property. Pass that joinUrl to list-online-meetings as $filter=JoinWebUrl eq '{url}' to reach transcripts."
   },
   {
     "pathPattern": "/me/calendars/{calendar-id}/calendarView",
@@ -521,7 +525,7 @@
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
     "supportsExpandExtendedProperties": true,
-    "llmTip": "Returns expanded recurring event instances (not just seriesMaster) within a date range for a specific calendar. Requires startDateTime and endDateTime query parameters in ISO 8601 format (e.g., 2024-01-01T00:00:00Z). Each instance includes seriesMasterId and type (occurrence/exception) fields for recurring event linkage. Use fetchAllPages=true to retrieve all results when there are many events. To find Teams meetings, use $filter=isOnlineMeeting eq true. Teams meetings include a joinWebUrl property needed for transcript access via list-online-meetings."
+    "llmTip": "Returns expanded recurring event instances (not just seriesMaster) within a date range for a specific calendar. Requires startDateTime and endDateTime query parameters in ISO 8601 format (e.g., 2024-01-01T00:00:00Z). Each instance includes seriesMasterId and type (occurrence/exception) fields for recurring event linkage. Use fetchAllPages=true to retrieve all results when there are many events. To find Teams meetings, use $select=subject,start,isOnlineMeeting,onlineMeetingProvider,onlineMeeting and keep the events with isOnlineMeeting true and onlineMeetingProvider teamsForBusiness; neither property is filterable (isOnlineMeeting returns 400 ErrorInvalidProperty). Teams meetings expose their join link as onlineMeeting/joinUrl; the event resource has no joinWebUrl property. Pass that joinUrl to list-online-meetings as $filter=JoinWebUrl eq '{url}' to reach transcripts."
   },
   {
     "pathPattern": "/me/calendar/getSchedule",
@@ -529,7 +533,8 @@
     "toolName": "get-schedule",
     "presets": ["calendar", "outlook", "personal"],
     "readOnly": true,
-    "workScopes": ["Calendars.Read"]
+    "workScopes": ["Calendars.Read"],
+    "supportsTimezone": true
   },
   {
     "pathPattern": "/users/{user-id}/calendar/events",
@@ -537,7 +542,8 @@
     "toolName": "list-shared-calendar-events",
     "descriptionOverride": "List events in another user's default calendar. The user-id is the calendar owner's ID or email address, and delegated access to that calendar is required. Recurring events are returned as a single series master, not expanded into occurrences - use get-shared-calendar-view for that.",
     "presets": ["work"],
-    "workScopes": ["Calendars.Read.Shared"]
+    "workScopes": ["Calendars.Read.Shared"],
+    "supportsTimezone": true
   },
   {
     "pathPattern": "/users/{user-id}/calendarView",
@@ -595,7 +601,8 @@
     "toolName": "find-meeting-times",
     "presets": ["calendar", "outlook", "personal"],
     "readOnly": true,
-    "workScopes": ["Calendars.Read.Shared"]
+    "workScopes": ["Calendars.Read.Shared"],
+    "supportsTimezone": true
   },
   {
     "pathPattern": "/me/drives",
@@ -617,14 +624,14 @@
     "method": "get",
     "toolName": "get-drive-root-item",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.Read"]
+    "scopes": [["Files.Read"], ["Sites.Selected"]]
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/children",
     "method": "get",
     "toolName": "list-folder-files",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.Read"]
+    "scopes": [["Files.Read"], ["Sites.Selected"]]
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}",
@@ -638,7 +645,7 @@
     "method": "put",
     "toolName": "upload-file-content",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.ReadWrite"],
+    "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "llmTip": "Body is a base64-encoded string of the file bytes; the server decodes it before PUT. Graph accepts up to 250MB here, but the whole string travels as a tool argument and a truncated one decodes to a truncated file with no error, so use create-upload-session rather than emitting a large base64 string. For new files use path format: /items/root:/path/to/file.txt:/content. Overwrites existing files without warning."
   },
   {
@@ -646,7 +653,7 @@
     "method": "post",
     "toolName": "create-upload-session",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.ReadWrite"],
+    "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "llmTip": "For large file uploads (no size limit, and no minimum unlike the Outlook attachment session). Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself. This server does not perform the PUT. For new files use path: /items/{parentId}:/{fileName}:/createUploadSession. Body (optional): { item: { '@microsoft.graph.conflictBehavior': 'rename' } }."
   },
   {
@@ -654,7 +661,7 @@
     "method": "get",
     "toolName": "get-drive-item",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.Read"],
+    "scopes": [["Files.Read"], ["Sites.Selected"]],
     "llmTip": "Gets metadata for a file or folder: name, size, lastModifiedDateTime, createdBy, webUrl, file (mimeType, hashes), folder (childCount), parentReference, and @microsoft.graph.downloadUrl. For large drive/SharePoint files, call get-download-url with target=/drives/{drive-id}/items/{driveItem-id}/content to fetch out-of-band with no Authorization header. For small files where base64 in the tool response is acceptable, call download-bytes with the same /content target."
   },
   {
@@ -662,7 +669,7 @@
     "method": "patch",
     "toolName": "move-rename-onedrive-item",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.ReadWrite"],
+    "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "llmTip": "Move and/or rename a file or folder. To move, provide parentReference with the target folder's id. To rename, provide a new name. Both can be done in a single request."
   },
   {
@@ -670,7 +677,7 @@
     "method": "post",
     "toolName": "create-onedrive-folder",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.ReadWrite"],
+    "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "llmTip": "Creates a new folder inside the specified drive item. Body must include name (string) and folder ({}) fields. Use @microsoft.graph.conflictBehavior to control behavior on name conflict: 'rename' (default), 'replace', or 'fail'."
   },
   {
@@ -694,7 +701,7 @@
     "method": "post",
     "toolName": "copy-drive-item",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.ReadWrite"],
+    "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "llmTip": "Asynchronously copy a file or folder to a new location and/or name. Body: { parentReference: { driveId: '...', id: '...' }, name?: 'New Name.xlsx' }. Returns 202 Accepted with a Location header pointing at a monitor URL for the async job. Ideal for duplicating templates (e.g. clone an Armhr Census Template per prospect), bulk file provisioning, or preserving an immutable snapshot of a working file."
   },
   {
@@ -734,7 +741,7 @@
     "method": "get",
     "toolName": "list-drive-item-versions",
     "presets": ["files", "onedrive", "personal"],
-    "scopes": ["Files.Read"],
+    "scopes": [["Files.Read"], ["Sites.Selected"]],
     "llmTip": "Lists version history of a file. Each version has id, lastModifiedDateTime, lastModifiedBy, and size. Use the version id with /versions/{id}/content to download a specific version."
   },
   {
@@ -880,7 +887,7 @@
     "pathPattern": "/me/messages/{message-id}/$value",
     "method": "get",
     "toolName": "get-mail-message-mime",
-    "descriptionOverride": "Download the raw MIME source (RFC 822 .eml content) of an Outlook email message by its message ID. Returns the complete original message including headers and encoded attachments.",
+    "descriptionOverride": "Download the raw MIME source (RFC 5322 .eml content) of an Outlook email message by its message ID. Returns the complete original message including headers and encoded attachments.",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Read"],
     "acceptType": "text/plain",
@@ -1304,7 +1311,7 @@
     "toolName": "list-planner-tasks",
     "presets": ["tasks", "work"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Priority values: 0=Urgent, 1=Important, 3=Medium, 5=Low, 9=unset."
+    "llmTip": "Priority is 0-10 (lower = higher priority); Planner's own UI presets are 1=Urgent, 3=Important, 5=Medium, 9=Low."
   },
   {
     "pathPattern": "/planner/plans/{plannerPlan-id}",
@@ -1319,7 +1326,7 @@
     "toolName": "list-plan-tasks",
     "presets": ["tasks", "work"],
     "scopes": ["Tasks.Read"],
-    "llmTip": "Priority values: 0=Urgent, 1=Important, 3=Medium, 5=Low, 9=unset."
+    "llmTip": "Priority is 0-10 (lower = higher priority); Planner's own UI presets are 1=Urgent, 3=Important, 5=Medium, 9=Low."
   },
   {
     "pathPattern": "/planner/tasks/{plannerTask-id}",
@@ -1342,7 +1349,7 @@
     "toolName": "update-planner-task",
     "presets": ["tasks", "work"],
     "scopes": ["Tasks.ReadWrite"],
-    "llmTip": "CRITICAL: Requires If-Match header with the task's @odata.etag value, otherwise returns 412 Precondition Failed. Get the ETag from get-planner-task with includeHeaders=true. Priority values: 0=Urgent, 1=Important, 3=Medium, 5=Low, 9=unset."
+    "llmTip": "CRITICAL: Requires If-Match header with the task's @odata.etag value, otherwise returns 412 Precondition Failed. Get the ETag from get-planner-task with includeHeaders=true. Priority is 0-10 (lower = higher priority); Planner's own UI presets are 1=Urgent, 3=Important, 5=Medium, 9=Low."
   },
   {
     "pathPattern": "/planner/tasks/{plannerTask-id}/details",
@@ -1529,7 +1536,7 @@
     "toolName": "list-relevant-people",
     "presets": ["users", "work"],
     "workScopes": ["People.Read"],
-    "llmTip": "Lists people most relevant to the current user, ordered by relevance. Based on communication patterns, collaboration, and business relationships. Each person has displayName, emailAddresses, jobTitle, department, officeLocation. Use $search to find specific people by name. Use $top to limit results."
+    "llmTip": "Lists people most relevant to the current user, ordered by relevance. Based on communication patterns, collaboration, and business relationships. Each person has displayName, scoredEmailAddresses, jobTitle, department, officeLocation. Use $search to find specific people by name. Use $top to limit results."
   },
   {
     "pathPattern": "/me/memberOf",
@@ -1592,7 +1599,8 @@
     "method": "get",
     "toolName": "list-chats",
     "presets": ["teams", "teams-write", "work"],
-    "workScopes": ["Chat.ReadBasic"]
+    "workScopes": ["Chat.ReadBasic"],
+    "llmTip": "Lists the signed-in user's chats. Only $filter, $top (max 50), $expand (members, lastMessagePreview) and $orderby are supported; $orderby accepts just lastMessagePreview/createdDateTime in descending order. Other options are rejected: $search returns 400 'Query option Search is not allowed', and ordering by lastUpdatedDateTime returns 400 BadRequest. Meeting chats have chatType=meeting and carry the meeting subject in topic."
   },
   {
     "pathPattern": "/chats/{chat-id}",
@@ -1614,7 +1622,8 @@
     "method": "get",
     "toolName": "list-chat-messages",
     "presets": ["teams", "work"],
-    "workScopes": ["ChatMessage.Read"]
+    "workScopes": ["ChatMessage.Read"],
+    "llmTip": "Lists messages in a chat. $top is capped at 50 (higher values return 400) and $orderby accepts only descending order on createdDateTime or lastModifiedDateTime - ascending is rejected. Meeting chats mostly hold system events; transcripts are not available here, use list-meeting-transcripts instead."
   },
   {
     "pathPattern": "/chats/{chat-id}/messages/{chatMessage-id}",
@@ -1652,6 +1661,39 @@
     "toolName": "list-joined-teams",
     "presets": ["teams", "teams-write", "work"],
     "workScopes": ["Team.ReadBasic.All"]
+  },
+  {
+    "pathPattern": "/teamwork/messaging/customEmojis",
+    "method": "get",
+    "toolName": "list-custom-emojis",
+    "apiVersion": "beta",
+    "presets": ["teams", "work"],
+    "workScopes": ["TeamworkCustomEmoji.Read"],
+    "llmTip": "Lists the organization's custom Teams emojis, including displayName, createdBy and createdDateTime. Graph can return contentBytes: null by default; request select='displayName,contentBytes' (or a string array) to retrieve base64 PNG/GIF images. Supports $top, $filter and $select. Image bytes can make responses large: use a small $top when selecting contentBytes; use fetchAllPages only for an explicitly requested export. displayName is the unique key, not an id. Work/school accounts only. Microsoft Graph beta API: subject to change."
+  },
+  {
+    "pathPattern": "/teamwork/messaging/customEmojis",
+    "method": "post",
+    "toolName": "create-custom-emoji",
+    "apiVersion": "beta",
+    "presets": ["teams", "work"],
+    "workScopes": ["TeamworkCustomEmoji.Create"],
+    "requestBodySchema": {
+      "type": "object",
+      "required": ["displayName", "contentBytes"],
+      "properties": {
+        "displayName": {
+          "type": "string",
+          "description": "Exact unique custom emoji name, without surrounding colons. Must not conflict with an existing emoji name."
+        },
+        "contentBytes": {
+          "type": "string",
+          "description": "Base64-encoded PNG or GIF file content; do not include a data-URL prefix."
+        }
+      },
+      "additionalProperties": false
+    },
+    "llmTip": "Uploads a custom Teams emoji for the organization using body: { displayName, contentBytes }. Only PNG and GIF are supported; pass the complete image file as base64. Confirm the exact name and image with the user before creating it. Returns the created emoji, including its image bytes; use excludeResponse=true when only success/failure is needed. Work/school accounts only. Microsoft Graph beta API: subject to change."
   },
   {
     "pathPattern": "/teams/{team-id}",
@@ -2093,7 +2135,7 @@
     "toolName": "list-online-meetings",
     "presets": ["teams", "work"],
     "workScopes": ["OnlineMeetings.Read"],
-    "llmTip": "List online meetings. Use $filter=joinWebUrl eq '{url}' to find a specific meeting by its Teams join link. Returns meeting IDs needed for transcript access."
+    "llmTip": "Look up a meeting with $filter=JoinWebUrl eq '{url}', using the joinUrl from an event's onlineMeeting property. This filter is required: the collection cannot be listed or paged, and $search/$orderby are not supported. Without it Graph returns 400 InvalidArgument ('One of the required parameters to lookup meeting by QueryOptions is null or empty'). Returns the meeting ID needed for transcript access. The full meeting object is large and can include the invite HTML and the meeting passcode, so pass select=id,subject,joinWebUrl unless you need more."
   },
   {
     "pathPattern": "/me/onlineMeetings/{onlineMeeting-id}",
@@ -2101,7 +2143,7 @@
     "toolName": "get-online-meeting",
     "presets": ["teams", "work"],
     "workScopes": ["OnlineMeetings.Read"],
-    "llmTip": "Gets a specific online meeting by ID. Returns full details including subject, startDateTime, endDateTime, joinWebUrl, chatInfo (threadId for meeting chat), participants (organizer, attendees), lobbyBypassSettings, and videoTeleconferenceId. Use list-online-meetings first to find the meeting ID."
+    "llmTip": "Gets a specific online meeting by ID. Returns full details including subject, startDateTime, endDateTime, joinWebUrl, chatInfo (threadId for meeting chat), participants (organizer, attendees), lobbyBypassSettings, and videoTeleconferenceId. Use list-online-meetings first to find the meeting ID. The full meeting object is large and can include the invite HTML and the meeting passcode, so pass select with the fields you came here for, e.g. select=id,chatInfo,participants."
   },
   {
     "pathPattern": "/me/onlineMeetings",
@@ -2109,7 +2151,7 @@
     "toolName": "create-online-meeting",
     "presets": ["teams", "work"],
     "workScopes": ["OnlineMeetings.ReadWrite"],
-    "llmTip": "Creates a new online meeting. Required body: { subject, startDateTime, endDateTime }. Optional: participants (with organizer and attendees), lobbyBypassSettings, isEntryExitAnnounced, allowedPresenters (everyone/organization/roleIsPresenter/organizer). Returns the created meeting with joinWebUrl and meeting ID."
+    "llmTip": "Creates a new online meeting. Required body: { subject, endDateTime }. startDateTime is not documented as required, but is commonly supplied. Optional: participants (with organizer and attendees), lobbyBypassSettings, isEntryExitAnnounced, allowedPresenters (everyone/organization/roleIsPresenter/organizer). Returns the created meeting with joinWebUrl and meeting ID."
   },
   {
     "pathPattern": "/me/onlineMeetings/{onlineMeeting-id}",
@@ -2151,6 +2193,24 @@
     "workScopes": ["OnlineMeetingTranscript.Read.All"],
     "acceptType": "text/vtt",
     "llmTip": "Returns the transcript content in WebVTT format with speaker identification and timestamps."
+  },
+  {
+    "pathPattern": "/me/adhocCalls/getAllTranscripts(userId='{userId}',startDateTime={startDateTime},endDateTime={endDateTime})",
+    "method": "get",
+    "toolName": "list-adhoc-call-transcripts",
+    "presets": ["teams", "work"],
+    "workScopes": ["CallTranscripts.Read.All"],
+    "skipEncoding": ["startDateTime", "endDateTime"],
+    "llmTip": "Lists transcripts of ad hoc calls (PSTN, 1:1 and group calls) started by the signed-in user. Use this for calls that have no calendar event and no online meeting, e.g. recordings named 'Anruf mit ...'. userId must be the signed-in user's object id (from get-current-user), not an email. startDateTime and endDateTime are required ISO 8601 UTC timestamps such as 2026-08-01T00:00:00Z. Each item carries callId and id (the transcript id) for get-adhoc-call-transcript-content; contentCorrelationId ends with the yyyyMMdd_HHmmss stamp that also appears in the recording file name in OneDrive. Do not use $filter, $orderby or $top."
+  },
+  {
+    "pathPattern": "/me/adhocCalls/{adhocCall-id}/transcripts/{callTranscript-id}/content",
+    "method": "get",
+    "toolName": "get-adhoc-call-transcript-content",
+    "presets": ["teams", "work"],
+    "workScopes": ["CallTranscripts.Read.All"],
+    "acceptType": "text/vtt",
+    "llmTip": "Returns the transcript of an ad hoc call as WebVTT with speaker tags and timestamps. Take adhocCallId (the callId) and callTranscriptId (the id) from list-adhoc-call-transcripts; copy both exactly. On 403 SpeakerAttributionNotAllowed retry with Accept set to application/vnd.microsoft.graph.transcript+text."
   },
   {
     "pathPattern": "/me/onlineMeetings/{onlineMeeting-id}/recordings",
@@ -2362,6 +2422,7 @@
     "toolName": "list-calendar-view-delta",
     "presets": ["calendar", "outlook", "personal"],
     "scopes": ["Calendars.Read"],
+    "supportsTimezone": true,
     "llmTip": "Incremental sync of events within a time window. Required query params on first call: startDateTime, endDateTime (ISO 8601). Returns events in the window plus @odata.deltaLink; subsequent calls with that link return only changes. Expands recurring events to individual occurrences (unlike list-calendar-events-delta which returns the series master). Use this for calendar UIs showing a week/month view."
   },
   {
@@ -2542,7 +2603,7 @@
     "toolName": "list-supported-time-zones",
     "presets": ["calendar", "mail", "outlook", "personal"],
     "scopes": ["User.Read"],
-    "llmTip": "Lists time zones the user's mailbox server supports. TimeZoneStandard path parameter must be one of: Windows (default — Windows time zone names like 'Pacific Standard Time'), or Iana (IANA / Olson names like 'America/Los_Angeles'). Note the PascalCase — the values are case-sensitive enums, not lowercase strings. Returns timeZoneInformation objects with alias and displayName. Use the result to validate or look up the value before calling update-mailbox-settings to change the user's preferred timeZone — the format must match what the server expects."
+    "llmTip": "Lists time zones the user's mailbox server supports. TimeZoneStandard path parameter must be one of: Windows (default — Windows time zone names like 'Pacific Standard Time'), or Iana (IANA / Olson names like 'America/Los_Angeles'). Note the PascalCase — the values are case-sensitive enums, not lowercase strings. Returns timeZoneInformation objects with alias and displayName. Use the result to validate or look up the value before calling update-mailbox-settings to change the user's preferred timeZone, or before setting timeZone on a calendar event's start/end (especially for recurring events) — don't guess a time zone name from memory, look it up here."
   },
   {
     "pathPattern": "/me/outlook/supportedLanguages()",

@@ -72,8 +72,12 @@ describe('hybrid discovery mode', () => {
   });
 
   it('registers the direct tools matching the pattern alongside the discovery triad', () => {
-    registerDiscoveryTools(server, graphClient, false, true);
-    registerGraphTools(server, graphClient, false, '^(get-mail-message|create-draft-email)$', true);
+    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
+    registerGraphTools(server, graphClient, {
+      readOnly: false,
+      enabledTools: '^(get-mail-message|create-draft-email)$',
+      orgMode: true,
+    });
 
     const names = registeredNames();
     for (const tool of DISCOVERY_TRIAD) expect(names).toContain(tool);
@@ -82,8 +86,12 @@ describe('hybrid discovery mode', () => {
   });
 
   it('does not load schemas for tools outside the direct pattern', () => {
-    registerDiscoveryTools(server, graphClient, false, true);
-    registerGraphTools(server, graphClient, false, '^(get-mail-message|create-draft-email)$', true);
+    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
+    registerGraphTools(server, graphClient, {
+      readOnly: false,
+      enabledTools: '^(get-mail-message|create-draft-email)$',
+      orgMode: true,
+    });
 
     const names = registeredNames();
     expect(names).not.toContain('update-place');
@@ -93,7 +101,7 @@ describe('hybrid discovery mode', () => {
   it('keeps every tool reachable through execute-tool, including ones not registered directly', async () => {
     // The discovery registry is built without a filter, so the long tail stays
     // executable even though its schema was never sent to the model.
-    registerDiscoveryTools(server, graphClient, false, true);
+    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
 
     const executeTool = toolSpy.mock.calls.find((call) => call[0] === 'execute-tool');
     expect(executeTool).toBeDefined();
@@ -109,7 +117,7 @@ describe('hybrid discovery mode', () => {
   });
 
   it('registers only the triad when no direct pattern is given, preserving discovery-only behaviour', () => {
-    registerDiscoveryTools(server, graphClient, false, true);
+    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
 
     const names = registeredNames();
     for (const tool of DISCOVERY_TRIAD) expect(names).toContain(tool);

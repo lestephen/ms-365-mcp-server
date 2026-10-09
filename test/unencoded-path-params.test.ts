@@ -32,7 +32,7 @@ describe('unencoded path parameter policies', () => {
       }))
     );
 
-    expect(inventory).toHaveLength(16);
+    expect(inventory).toHaveLength(18);
     expect(inventory.filter((item) => item.paramName === 'q')).toEqual([
       {
         toolName: 'search-onedrive-files',
@@ -57,6 +57,18 @@ describe('unencoded path parameter policies', () => {
         toolName: 'get-sharepoint-site-by-path',
         paramName: 'path',
         kind: 'relative-path',
+      },
+    ]);
+    expect(inventory.filter((item) => item.kind === 'datetime-literal')).toEqual([
+      {
+        toolName: 'list-adhoc-call-transcripts',
+        paramName: 'startDateTime',
+        kind: 'datetime-literal',
+      },
+      {
+        toolName: 'list-adhoc-call-transcripts',
+        paramName: 'endDateTime',
+        kind: 'datetime-literal',
       },
     ]);
   });
@@ -114,5 +126,23 @@ describe('unencoded path parameter policies', () => {
         'sites/marketing:/lists/blocked'
       )
     ).toMatch(/unsafe route/);
+  });
+
+  it('accepts only an ISO 8601 date-time in an unquoted DateTime argument', () => {
+    const pattern =
+      "/me/adhocCalls/getAllTranscripts(userId='{userId}',startDateTime={startDateTime},endDateTime={endDateTime})";
+    expect(prepareUnencodedPathParameter(pattern, 'startDateTime', '2026-10-01T00:00:00Z')).toBe(
+      '2026-10-01T00%3A00%3A00Z'
+    );
+    expect(prepareUnencodedPathParameter(pattern, 'endDateTime', '2026-10-08T12:30:00+02:00')).toBe(
+      '2026-10-08T12%3A30%3A00%2B02%3A00'
+    );
+    for (const value of [
+      '2026-10-01',
+      '2026-10-01T00:00:00Z)/x',
+      "2026-10-01T00:00:00Z,userId='x'",
+    ]) {
+      expect(unencodedPathParameterError(pattern, 'startDateTime', value)).toMatch(/ISO 8601/);
+    }
   });
 });

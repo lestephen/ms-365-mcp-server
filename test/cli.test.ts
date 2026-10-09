@@ -51,6 +51,7 @@ describe('CLI Module', () => {
     vi.clearAllMocks();
     commanderMocks.mockCommand.opts.mockReturnValue({ file: 'test.xlsx' });
     delete process.env.MS365_MCP_ALLOWED_SCOPES;
+    delete process.env.MS365_MCP_USER_FIELDS;
     delete process.env.MS365_MCP_EXTRA_SCOPES;
     delete process.env.MS365_MCP_EXPECTED_USERNAME;
     delete process.env.MS365_MCP_EXPECTED_HOME_ACCOUNT_ID;
@@ -59,10 +60,12 @@ describe('CLI Module', () => {
 
   afterEach(() => {
     delete process.env.MS365_MCP_ALLOWED_SCOPES;
+    delete process.env.MS365_MCP_USER_FIELDS;
     delete process.env.MS365_MCP_EXTRA_SCOPES;
     delete process.env.MS365_MCP_EXPECTED_USERNAME;
     delete process.env.MS365_MCP_EXPECTED_HOME_ACCOUNT_ID;
     delete process.env.MS365_MCP_AUTH_CACHE_COMMAND;
+    delete process.env.MS365_MCP_HTTP_LOCAL_FILE_TOOLS;
   });
 
   describe('parseArgs', () => {
@@ -77,6 +80,53 @@ describe('CLI Module', () => {
       const result = parseArgs();
 
       expect(result.allowedScopes).toBe('Mail.Read Files.Read');
+    });
+
+    it('should parse --user-fields from CLI options', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({ userFields: 'id,displayName,mail' });
+
+      expect(parseArgs().userFields).toBe('id,displayName,mail');
+    });
+
+    it('should use MS365_MCP_USER_FIELDS as a fallback', () => {
+      process.env.MS365_MCP_USER_FIELDS = 'id,displayName';
+      commanderMocks.mockCommand.opts.mockReturnValue({});
+
+      expect(parseArgs().userFields).toBe('id,displayName');
+    });
+
+    it('should fail closed when user fields are supplied empty', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({ userFields: '   ' });
+
+      parseArgs();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--user-fields'));
+      expect(process.exit).toHaveBeenCalledWith(1);
+    });
+
+    it('should fail closed when user fields name no fields', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({ userFields: ' , ,' });
+
+      parseArgs();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--user-fields'));
+      expect(process.exit).toHaveBeenCalledWith(1);
+    });
+
+    it.each(['true', '1'])(
+      'should enable --http-local-file-tools from MS365_MCP_HTTP_LOCAL_FILE_TOOLS=%s',
+      (value) => {
+        process.env.MS365_MCP_HTTP_LOCAL_FILE_TOOLS = value;
+        commanderMocks.mockCommand.opts.mockReturnValue({});
+
+        expect(parseArgs().httpLocalFileTools).toBe(true);
+      }
+    );
+
+    it('should leave --http-local-file-tools off by default', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({});
+
+      expect(parseArgs().httpLocalFileTools).toBeUndefined();
     });
 
     it('should use MS365_MCP_ALLOWED_SCOPES as a fallback', () => {
@@ -244,6 +294,109 @@ describe('CLI Module', () => {
       expect(optionFlags).not.toContain('--auth-cache-command <command>');
       expect(result).not.toHaveProperty('authCacheCommand');
       expect(result).not.toHaveProperty('authCacheCommandArgs');
+    });
+  });
+
+  describe('--attachment-port / MS365_MCP_ATTACHMENT_PORT', () => {
+    const prev = process.env.MS365_MCP_ATTACHMENT_PORT;
+
+    afterEach(() => {
+      if (prev === undefined) delete process.env.MS365_MCP_ATTACHMENT_PORT;
+      else process.env.MS365_MCP_ATTACHMENT_PORT = prev;
+    });
+
+    it('passes a CLI-supplied port through untouched', () => {
+      delete process.env.MS365_MCP_ATTACHMENT_PORT;
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000', attachmentPort: '3001' });
+
+      expect(parseArgs().attachmentPort).toBe('3001');
+    });
+
+    it('uses MS365_MCP_ATTACHMENT_PORT as a fallback', () => {
+      process.env.MS365_MCP_ATTACHMENT_PORT = '3001';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000' });
+
+      expect(parseArgs().attachmentPort).toBe('3001');
+    });
+
+    it('prefers the CLI flag over the env var', () => {
+      process.env.MS365_MCP_ATTACHMENT_PORT = '4001';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000', attachmentPort: '3001' });
+
+      expect(parseArgs().attachmentPort).toBe('3001');
+    });
+
+    it('leaves the option unset when neither is given, so the listener stays single', () => {
+      delete process.env.MS365_MCP_ATTACHMENT_PORT;
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000' });
+
+      expect(parseArgs().attachmentPort).toBeUndefined();
+    });
+
+    it('does not validate the value here', () => {
+      // Deliberate: the value only means anything alongside
+      // --enable-attachment-urls and --http, both of which server.ts decides,
+      // so it is parsed and refused there -- one message whichever way it
+      // arrived. A second, partial check here would be a second message to keep
+      // in step with the first.
+      process.env.MS365_MCP_ATTACHMENT_PORT = 'not-a-port';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000' });
+
+      expect(parseArgs().attachmentPort).toBe('not-a-port');
+      expect(process.exit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('--attachment-host / MS365_MCP_ATTACHMENT_HOST', () => {
+    const prev = process.env.MS365_MCP_ATTACHMENT_HOST;
+
+    afterEach(() => {
+      if (prev === undefined) delete process.env.MS365_MCP_ATTACHMENT_HOST;
+      else process.env.MS365_MCP_ATTACHMENT_HOST = prev;
+    });
+
+    it('passes a CLI-supplied host through untouched', () => {
+      delete process.env.MS365_MCP_ATTACHMENT_HOST;
+      commanderMocks.mockCommand.opts.mockReturnValue({
+        http: '3000',
+        attachmentPort: '3001',
+        attachmentHost: '127.0.0.2',
+      });
+
+      expect(parseArgs().attachmentHost).toBe('127.0.0.2');
+    });
+
+    it('uses MS365_MCP_ATTACHMENT_HOST as a fallback', () => {
+      process.env.MS365_MCP_ATTACHMENT_HOST = '10.89.1.2';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000', attachmentPort: '3001' });
+
+      expect(parseArgs().attachmentHost).toBe('10.89.1.2');
+    });
+
+    it('prefers the CLI flag over the env var', () => {
+      process.env.MS365_MCP_ATTACHMENT_HOST = '10.89.9.9';
+      commanderMocks.mockCommand.opts.mockReturnValue({
+        http: '3000',
+        attachmentPort: '3001',
+        attachmentHost: '10.89.1.2',
+      });
+
+      expect(parseArgs().attachmentHost).toBe('10.89.1.2');
+    });
+
+    it('leaves the option unset when neither is given, so the MCP host is inherited', () => {
+      delete process.env.MS365_MCP_ATTACHMENT_HOST;
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000', attachmentPort: '3001' });
+
+      expect(parseArgs().attachmentHost).toBeUndefined();
+    });
+
+    it('does not validate the value here, for the same reason the port is not', () => {
+      process.env.MS365_MCP_ATTACHMENT_HOST = 'not a host';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000', attachmentPort: '3001' });
+
+      expect(parseArgs().attachmentHost).toBe('not a host');
+      expect(process.exit).not.toHaveBeenCalled();
     });
   });
 

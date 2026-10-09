@@ -1,9 +1,11 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { buildToolsRegistry, registerGraphTools } from '../src/graph-tools.js';
-import { describeToolSchema } from '../src/lib/tool-schema.js';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { GraphClient } from '../src/graph-client.js';
+import { buildToolsRegistry, registerGraphTools } from '../src/graph-tools.js';
+import { queryParameterSchema } from '../src/lib/query-parameter-schema.js';
+import { describeToolSchema } from '../src/lib/tool-schema.js';
 
 const registry = buildToolsRegistry(false, true);
 
@@ -34,16 +36,7 @@ function registeredParamSchemas(
 
   // orgMode: true matches `registry` above (buildToolsRegistry(false, true)) so both
   // sides see the same set of tools (work-scoped tools included).
-  registerGraphTools(
-    server,
-    graphClient,
-    false,
-    undefined,
-    true,
-    undefined,
-    multiAccount,
-    accountNames
-  );
+  registerGraphTools(server, graphClient, { orgMode: true, multiAccount, accountNames });
 
   const map = new Map<string, Record<string, z.ZodTypeAny>>();
   for (const call of registerToolSpy.mock.calls) {
@@ -127,6 +120,74 @@ describe('describeToolSchema', () => {
  */
 describe('describeToolSchema parity with registerGraphTools (discovery-mode drift guard)', () => {
   const registered = registeredParamSchemas();
+
+  it('matches query types and constraints across every generated tool in both modes', () => {
+    for (const [name, entry] of registry) {
+      const shape = registered.get(name);
+      if (!shape) continue;
+      const discovery = describeToolSchema(entry.tool, entry.config);
+      for (const parameter of entry.tool.parameters ?? []) {
+        if (parameter.type !== 'Query') continue;
+        const described = discovery.parameters.find((p) => p.name === parameter.name);
+        const actual = shape[parameter.name];
+        if (!actual) {
+          expect(described, `${name}.${parameter.name}`).toBeUndefined();
+          continue;
+        }
+        const inner = actual instanceof z.ZodOptional ? actual.unwrap() : actual;
+        const json = zodToJsonSchema(inner, {
+          target: 'jsonSchema7',
+          $refStrategy: 'none',
+        }) as Record<string, unknown>;
+        delete json.$schema;
+        expect(described?.schema, `${name}.${parameter.name}`).toEqual(json);
+        expect(described?.required).toBe(!actual.isOptional());
+      }
+    }
+  });
+
+  it.each(['list-joined-teams', 'list-my-associated-teams'])(
+    'omits all OData options and synthetic cursors for %s',
+    (name) => {
+      const shape = registered.get(name)!;
+      const discovery = schemaFor(name);
+      for (const key of [
+        'top',
+        'select',
+        'filter',
+        'search',
+        'expand',
+        'orderby',
+        'skip',
+        'count',
+        'skiptoken',
+      ]) {
+        for (const spelling of [key, `$${key}`]) {
+          expect(shape[spelling]).toBeUndefined();
+          expect(discovery.parameters.find((p) => p.name === spelling)).toBeUndefined();
+        }
+      }
+      expect(shape.fetchAllPages).toBeDefined();
+    }
+  );
+
+  it('enforces the chat page limit without relaxing stricter provider bounds', () => {
+    const top = registered.get('list-chats')!.top;
+    expect(top.safeParse(50).success).toBe(true);
+    expect(top.safeParse(100).success).toBe(false);
+    expect(top.safeParse(200).success).toBe(false);
+    expect(
+      queryParameterSchema('list-chats', '$top', z.number().max(10).optional())!.safeParse(11)
+        .success
+    ).toBe(false);
+  });
+
+  it('accepts both calendar field-list formats in the registered schema', () => {
+    const select = registered.get('list-calendar-events-delta')!.select;
+    expect(select.safeParse('id,subject').success).toBe(true);
+    expect(select.safeParse(['id', 'subject']).success).toBe(true);
+    expect(select.safeParse(['id', 1]).success).toBe(false);
+  });
 
   function registeredDescription(toolName: string, paramName: string): string | undefined {
     const shape = registered.get(toolName);
@@ -216,6 +277,23 @@ describe('describeToolSchema parity with registerGraphTools (discovery-mode drif
     const expected = registeredDescription('list-mail-messages', 'fetchAllPages');
     expect(expected).toBeDefined();
     expect(discovery?.description).toBe(expected);
+  });
+
+  it('matches Accept description exactly for an endpoint with a configured acceptType', () => {
+    const entry = registry.get('get-meeting-transcript-content');
+    if (!entry) throw new Error('registry missing get-meeting-transcript-content');
+    const s = describeToolSchema(entry.tool, entry.config);
+    const discovery = s.parameters.find((p) => p.name === 'Accept');
+    const expected = registeredDescription('get-meeting-transcript-content', 'Accept');
+    expect(expected).toBeDefined();
+    expect(discovery?.in).toBe('Header');
+    expect(discovery?.description).toBe(expected);
+  });
+
+  it('adds no Accept param to endpoints without a configured acceptType', () => {
+    const s = schemaFor('list-mail-messages');
+    expect(s.parameters.find((p) => p.name === 'Accept')).toBeUndefined();
+    expect(registered.get('list-mail-messages')).not.toHaveProperty('Accept');
   });
 
   it('matches confirm description exactly (already shared logic, guarded against future drift)', () => {

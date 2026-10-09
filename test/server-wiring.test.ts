@@ -11,7 +11,7 @@ import { getCombinedPresetPattern } from '../src/tool-categories.js';
  * registrars directly with hand-written argument lists, so they verify the guard works
  * when it is handed a blocklist. Neither notices when the caller fails to hand it one.
  *
- * That gap shipped. registerGraphTools takes eleven positional parameters, and upstream
+ * That gap shipped. registerGraphTools used to take eleven positional parameters, and upstream
  * v0.132 inserted httpMode at position ten, where our blockedTools had been. The
  * non-hybrid call site conflicted during the rebase and was updated; the hybrid branch
  * is EKI-only code, did not conflict, and silently kept passing ten arguments. So
@@ -22,8 +22,10 @@ import { getCombinedPresetPattern } from '../src/tool-categories.js';
  * Nothing caught it: tools were still unregistered by name via withToolBlocklist, so
  * every behavioural assertion still passed, and tsup does not typecheck.
  *
- * These assert on argument positions on purpose. For a function with eleven positional
- * parameters, the position IS the contract.
+ * Upstream v0.160 moved both registrars to an options object, which retires the
+ * positional hazard itself. These still assert that the call sites hand the blocklist
+ * and httpMode through, because omitting a property from an object is the
+ * same silent failure as omitting an argument: the type makes every one optional.
  */
 
 vi.mock('../src/logger.js', () => ({
@@ -44,14 +46,10 @@ vi.mock('../src/graph-tools.js', async (importOriginal) => {
 const BLOCKED = '^(send-mail|send-draft-message|reply-mail-message)$';
 const DIRECT = '^(graph-batch|create-draft-email|get-current-user)$';
 
-// registerGraphTools(server, graphClient, readOnly, enabledTools, orgMode, authManager,
-//                    multiAccount, accountNames, allowedScopes, httpMode, blockedTools,
-//                    publicBaseUrl)
-const HTTP_MODE = 9;
-const ENABLED_TOOLS = 3;
-const BLOCKED_TOOLS = 10;
-const PUBLIC_BASE_URL = 11;
-const ARITY = 12;
+// registerGraphTools(server, graphClient, options) and registerDiscoveryTools likewise.
+type RegistrationOptions = Record<string, unknown>;
+const optionsOf = (mock: typeof registerGraphTools, call = 0): RegistrationOptions =>
+  mock.mock.calls[call][2] as RegistrationOptions;
 
 function buildServer(options: Record<string, unknown>) {
   const authManager = { getToken: vi.fn() } as unknown as AuthManager;
@@ -76,12 +74,11 @@ describe('registerGraphTools wiring', () => {
     buildServer({ http: '3000', discovery: true, directTools: DIRECT, blockedTools: BLOCKED });
 
     expect(registerGraphTools).toHaveBeenCalledTimes(1);
-    const args = registerGraphTools.mock.calls[0];
-    // The regression: ten arguments instead of eleven, shifting blockedTools into
-    // httpMode and leaving the batch guard with nothing to match against.
-    expect(args).toHaveLength(ARITY);
-    expect(args[BLOCKED_TOOLS]).toBe(BLOCKED);
-    expect(args[HTTP_MODE]).toBe(true);
+    const options = optionsOf(registerGraphTools);
+    // The regression: the hybrid call site dropping the blocklist and leaving the
+    // batch guard with nothing to match against.
+    expect(options.blockedTools).toBe(BLOCKED);
+    expect(options.httpMode).toBe(true);
   });
 
   it('intersects hybrid direct tools with the preset-enabled surface', () => {
@@ -94,7 +91,9 @@ describe('registerGraphTools wiring', () => {
     });
 
     expect(registerGraphTools).toHaveBeenCalledTimes(1);
-    const effectiveDirectTools = registerGraphTools.mock.calls[0][ENABLED_TOOLS];
+    const effectiveDirectTools = optionsOf(registerGraphTools).enabledTools as (
+      name: string
+    ) => boolean;
     expect(typeof effectiveDirectTools).toBe('function');
     expect(effectiveDirectTools('get-mail-message')).toBe(true);
     expect(effectiveDirectTools('get-calendar-event')).toBe(false);
@@ -102,7 +101,7 @@ describe('registerGraphTools wiring', () => {
 
     // Discovery uses the same intersection for its invocation hints, so it cannot
     // advertise a tool outside the preset as directly callable.
-    expect(registerDiscoveryTools.mock.calls[0][11]).toBe(effectiveDirectTools);
+    expect(optionsOf(registerDiscoveryTools).directTools).toBe(effectiveDirectTools);
   });
 
   it('intersects independently valid regexes with duplicate named captures', () => {
@@ -113,20 +112,19 @@ describe('registerGraphTools wiring', () => {
       orgMode: true,
     });
 
-    const effective = registerGraphTools.mock.calls[0][ENABLED_TOOLS];
+    const effective = optionsOf(registerGraphTools).enabledTools as (name: string) => boolean;
     expect(typeof effective).toBe('function');
     expect(effective('get-mail-message')).toBe(true);
     expect(effective('get-calendar-event')).toBe(false);
-    expect(registerDiscoveryTools.mock.calls[0][11]).toBe(effective);
+    expect(optionsOf(registerDiscoveryTools).directTools).toBe(effective);
   });
 
   it('passes the blocklist in non-hybrid mode', () => {
     buildServer({ http: '3000', enabledTools: DIRECT, blockedTools: BLOCKED });
 
-    const args = registerGraphTools.mock.calls[0];
-    expect(args).toHaveLength(ARITY);
-    expect(args[BLOCKED_TOOLS]).toBe(BLOCKED);
-    expect(args[HTTP_MODE]).toBe(true);
+    const options = optionsOf(registerGraphTools);
+    expect(options.blockedTools).toBe(BLOCKED);
+    expect(options.httpMode).toBe(true);
   });
 
   it('reports httpMode as a boolean, not a truthy option string', () => {
@@ -135,59 +133,24 @@ describe('registerGraphTools wiring', () => {
     // stdioOnly tools would have been filtered out of a stdio server.
     buildServer({ discovery: true, directTools: DIRECT, blockedTools: BLOCKED });
 
-    const args = registerGraphTools.mock.calls[0];
-    expect(args[HTTP_MODE]).toBe(false);
-    expect(typeof args[HTTP_MODE]).toBe('boolean');
+    const options = optionsOf(registerGraphTools);
+    expect(options.httpMode).toBe(false);
+    expect(typeof options.httpMode).toBe('boolean');
   });
 
-  it('passes the CLI public URL into broker-aware tools', () => {
-    buildServer({
-      http: '3000',
-      publicUrl: 'https://cli.example.com/',
-      enabledTools: DIRECT,
-    });
-
-    const args = registerGraphTools.mock.calls[0];
-    expect(args).toHaveLength(ARITY);
-    expect(args[PUBLIC_BASE_URL]).toBe('https://cli.example.com');
-  });
-
-  it('passes the environment public URL when the CLI option is absent', () => {
+  it('resolves the OAuth public URL from the CLI option or the environment', () => {
     const previous = process.env.MS365_MCP_PUBLIC_URL;
-    process.env.MS365_MCP_PUBLIC_URL = 'https://env.example.com/';
-    try {
-      buildServer({ http: '3000', enabledTools: DIRECT });
-
-      const args = registerGraphTools.mock.calls[0];
-      expect(args).toHaveLength(ARITY);
-      expect(args[PUBLIC_BASE_URL]).toBe('https://env.example.com');
-    } finally {
-      if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
-      else process.env.MS365_MCP_PUBLIC_URL = previous;
-    }
-  });
-
-  it('keeps the OAuth public URL independent of MS365_MCP_BROKER_PUBLIC_URL', () => {
-    // The broker override is resolved inside attachment-broker. The OAuth public URL,
-    // which feeds the authorization-server and protected-resource metadata, must not
-    // pick it up, or moving the download host would move the OAuth issuer with it.
-    const previous = process.env.MS365_MCP_PUBLIC_URL;
-    const previousBroker = process.env.MS365_MCP_BROKER_PUBLIC_URL;
     process.env.MS365_MCP_PUBLIC_URL = 'https://oauth.example.com/';
-    process.env.MS365_MCP_BROKER_PUBLIC_URL = 'https://broker.example.com';
     try {
       expect(resolvePublicBaseUrl({})).toBe('https://oauth.example.com');
-
-      buildServer({ http: '3000', enabledTools: DIRECT });
-      expect(registerGraphTools.mock.calls[0][PUBLIC_BASE_URL]).toBe('https://oauth.example.com');
-
+      expect(resolvePublicBaseUrl({ publicUrl: 'https://cli.example.com/' })).toBe(
+        'https://cli.example.com'
+      );
       delete process.env.MS365_MCP_PUBLIC_URL;
       expect(resolvePublicBaseUrl({})).toBeUndefined();
     } finally {
       if (previous === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
       else process.env.MS365_MCP_PUBLIC_URL = previous;
-      if (previousBroker === undefined) delete process.env.MS365_MCP_BROKER_PUBLIC_URL;
-      else process.env.MS365_MCP_BROKER_PUBLIC_URL = previousBroker;
     }
   });
 });
