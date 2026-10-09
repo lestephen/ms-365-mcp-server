@@ -291,6 +291,77 @@ describe('graph-tools', () => {
       expect(result.isError).toBeFalsy();
       expect(graphClient.graphRequest).toHaveBeenCalled();
     });
+    // EKI fork: create-custom-emoji takes its image only as base64 contentBytes, so that
+    // one field on that one tool is exempt (owner decision 2026-10-09). Pin the edges.
+    const emojiEndpoint = () =>
+      makeEndpoint({
+        method: 'post',
+        path: '/teamwork/messaging/customEmojis',
+        alias: 'create-custom-emoji',
+        parameters: [{ name: 'body', type: 'Body', schema: z.any() }],
+      });
+    const registerOne = async (endpoint: ReturnType<typeof makeEndpoint>, toolName: string) => {
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig({ toolName })];
+      const graphClient = createMockGraphClient([{ content: [{ type: 'text', text: '{}' }] }]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1],
+        { orgMode: true }
+      );
+      return { server, graphClient };
+    };
+
+    it('forwards the emoji image contentBytes on create-custom-emoji', async () => {
+      const { server, graphClient } = await registerOne(emojiEndpoint(), 'create-custom-emoji');
+      const result = await server.tools.get('create-custom-emoji')!.handler({
+        body: { displayName: 'example-emoji', contentBytes: 'iVBORw0KGgo=' },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('still refuses contentBytes elsewhere in a create-custom-emoji body', async () => {
+      const { server, graphClient } = await registerOne(emojiEndpoint(), 'create-custom-emoji');
+      const result = await server.tools.get('create-custom-emoji')!.handler({
+        body: {
+          displayName: 'example-emoji',
+          contentBytes: 'iVBORw0KGgo=',
+          extra: { contentBytes: 'JVBERi0xLjQK' },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('inline_bytes_refused');
+      expect(result.content[0].text).toContain('extra.contentBytes');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('still refuses an emoji create carried inside a graph-batch subrequest', async () => {
+      const batch = makeEndpoint({
+        method: 'post',
+        path: '/$batch',
+        alias: 'graph-batch',
+        parameters: [{ name: 'body', type: 'Body', schema: z.any() }],
+      });
+      const { server, graphClient } = await registerOne(batch, 'graph-batch');
+      const result = await server.tools.get('graph-batch')!.handler({
+        body: {
+          requests: [
+            {
+              id: '1',
+              method: 'POST',
+              url: '/teamwork/messaging/customEmojis',
+              body: { displayName: 'example-emoji', contentBytes: 'iVBORw0KGgo=' },
+            },
+          ],
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('inline_bytes_refused');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
   });
 
   // ---- 0. Audit outcome metadata ----
