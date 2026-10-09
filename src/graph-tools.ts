@@ -2321,6 +2321,23 @@ function unalteredTargetError(target: string) {
   };
 }
 
+/**
+ * Inline-bytes fields a tool may carry, as exceptions to the refusal in executeGraphTool.
+ *
+ * create-custom-emoji: Graph takes a custom emoji's image only as base64 contentBytes on
+ * the create request; there is no upload session for it, so refusing the field makes the
+ * tool unusable. Allowed by owner decision (2026-10-09) for that tool's own top-level
+ * field only. It stays refused anywhere else in the body, and inside a graph-batch
+ * subrequest, where the guard runs against the outer graph-batch call.
+ */
+const ALLOWED_INLINE_BYTES: Record<string, ReadonlySet<string>> = {
+  'create-custom-emoji': new Set(['contentBytes']),
+};
+
+function isAllowedInlineBytes(toolName: string, fieldPath: string): boolean {
+  return ALLOWED_INLINE_BYTES[toolName]?.has(fieldPath) ?? false;
+}
+
 async function executeGraphTool(
   tool: (typeof api.endpoints)[0],
   config: EndpointConfig | undefined,
@@ -2741,7 +2758,9 @@ async function executeGraphTool(
     // a referenceAttachment has none and stays allowed, which name-blocking could not
     // express. Recursive, so a contentBytes inside a graph-batch subrequest is caught here
     // too.
-    const inlineBytes = findInlineByteFields(body);
+    const inlineBytes = findInlineByteFields(body).filter(
+      (hit) => !isAllowedInlineBytes(tool.alias, hit.path)
+    );
     if (inlineBytes.length > 0) {
       recordBlockedOperation(tool.alias, route);
       logger.warn(

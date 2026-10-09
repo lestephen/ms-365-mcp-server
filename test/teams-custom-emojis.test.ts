@@ -38,19 +38,6 @@ function resultJson<T>(result: ToolResult): T {
   return JSON.parse(result.content[0].text) as T;
 }
 
-// EKI fork: inline file bytes are refused at any size (src/lib/inline-bytes-guard.ts), and
-// create-custom-emoji takes its image only as base64 contentBytes, so the create path ends
-// at that guard instead of reaching Graph. These assertions pin that interaction; drop
-// them if the policy ever exempts emoji images.
-function expectInlineBytesRefused(
-  result: { isError?: boolean; content: Array<{ text: string }> },
-  graphClient: GraphClient
-) {
-  expect(result.isError).toBe(true);
-  expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'inline_bytes_refused' });
-  expect(graphClient.graphRequest).not.toHaveBeenCalled();
-}
-
 describe('Teams custom emojis (real generated clients)', () => {
   let mockServer: {
     tool: ReturnType<typeof vi.fn>;
@@ -294,7 +281,12 @@ describe('Teams custom emojis (real generated clients)', () => {
       expect(bodySchema!.safeParse({ displayName: body.displayName }).success).toBe(false);
       expect(bodySchema!.safeParse({ contentBytes }).success).toBe(false);
 
-      expectInlineBytesRefused(await handler('create-custom-emoji')({ body }), mockGraphClient);
+      await handler('create-custom-emoji')({ body });
+
+      expect(mockGraphClient.graphRequest).toHaveBeenCalledExactlyOnceWith(
+        emojiPath,
+        expect.objectContaining({ method: 'POST', apiVersion: 'beta', body: JSON.stringify(body) })
+      );
     }
   );
 
@@ -309,7 +301,11 @@ describe('Teams custom emojis (real generated clients)', () => {
     expect(resultJson(refused)).toMatchObject({ error: 'confirmation_required' });
     expect(mockGraphClient.graphRequest).not.toHaveBeenCalled();
 
-    expectInlineBytesRefused(await create({ body, confirm: true }), mockGraphClient);
+    await create({ body, confirm: true });
+    expect(mockGraphClient.graphRequest).toHaveBeenCalledExactlyOnceWith(
+      emojiPath,
+      expect.objectContaining({ body: JSON.stringify(body), apiVersion: 'beta' })
+    );
   });
 
   it('discovers both operations and executes create through the same beta route', async () => {
@@ -321,12 +317,10 @@ describe('Teams custom emojis (real generated clients)', () => {
     expect(result.tools.every((tool) => tool.description.startsWith('[beta]'))).toBe(true);
 
     const body = { displayName: 'example-emoji', contentBytes: imageFixtures[1].contentBytes };
-    expectInlineBytesRefused(
-      await handler(
-        'execute-tool',
-        true
-      )({ tool_name: 'create-custom-emoji', parameters: { body } }),
-      mockGraphClient
+    await handler('execute-tool', true)({ tool_name: 'create-custom-emoji', parameters: { body } });
+    expect(mockGraphClient.graphRequest).toHaveBeenCalledExactlyOnceWith(
+      emojiPath,
+      expect.objectContaining({ method: 'POST', apiVersion: 'beta', body: JSON.stringify(body) })
     );
   });
 
