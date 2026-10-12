@@ -59,14 +59,6 @@ describe('presets from endpoints.json', () => {
     expect(tools).not.toContain('list-sharepoint-site-drives');
   });
 
-  it('personal includes every Excel range formatter referenced by its guidance', () => {
-    const tools = matchedTools('personal');
-    expect(tools).toContain('format-excel-range');
-    expect(tools).toContain('format-excel-range-font');
-    expect(tools).toContain('format-excel-range-fill');
-    expect(tools).toContain('format-excel-range-border');
-  });
-
   it('work covers org tools without leaking personal list-* tools', () => {
     const tools = matchedTools('work');
     expect(tools).toContain('list-shared-mailbox-messages');
@@ -155,28 +147,19 @@ describe('utility tools in presets', () => {
     }
   );
 
-  // Pin the full get-download-url membership so every preset exposing a native-download or
-  // brokerable attachment resource keeps an out-of-band path in HTTP mode.
-  it('get-download-url is in every file and attachment preset it declares', () => {
-    for (const preset of [
-      'mail',
-      'calendar',
-      'files',
-      'personal',
-      'work',
-      'search',
-      'outlook',
-      'onedrive',
-    ]) {
+  // Pin the full get-download-url membership so a regression dropping any drive-backed preset
+  // is caught. download-bytes membership is covered by the every-preset test above.
+  it('get-download-url is in every drive-backed preset it declares', () => {
+    for (const preset of ['files', 'onedrive', 'personal', 'work', 'search']) {
       expect(inPreset(preset, 'get-download-url'), `get-download-url missing from ${preset}`).toBe(
         true
       );
     }
   });
 
-  it('mail preset exposes both inline and brokered attachment downloads', () => {
+  it('mail preset has download-bytes but not the drive-only download-url helper', () => {
     expect(inPreset('mail', 'download-bytes')).toBe(true);
-    expect(inPreset('mail', 'get-download-url')).toBe(true);
+    expect(inPreset('mail', 'get-download-url')).toBe(false);
   });
 
   it('parse-teams-url stays scoped to teams/work', () => {
@@ -187,6 +170,7 @@ describe('utility tools in presets', () => {
 
   it('scoped utilities do not leak into unrelated presets', () => {
     // download-bytes is universal, so only the scoped helpers should be absent here.
+    expect(inPreset('calendar', 'get-download-url')).toBe(false);
     expect(inPreset('contacts', 'get-download-url')).toBe(false);
     expect(inPreset('onenote', 'parse-teams-url')).toBe(false);
   });

@@ -1235,8 +1235,15 @@ async function mintUploadUrl(
 ): Promise<CallToolResult> {
   const minting = getAttachmentMinting();
   if (!minting) {
+    // EKI fork: inline contentBytes is refused here at any size, so point at the
+    // upload session for the target rather than upstream's base64 add-*-attachment.
+    const sessionHint = target.includes('/events/')
+      ? 'Use create-calendar-event-attachment-upload-session and PUT the bytes from disk to its uploadUrl.'
+      : target.startsWith('/users/')
+        ? 'This server has no shared-mailbox attachment upload session and refuses inline contentBytes, so a file cannot be attached to a shared-mailbox draft here.'
+        : 'Use create-mail-attachment-upload-session and PUT the bytes from disk to its uploadUrl.';
     return uploadError(
-      'This server is not running with --enable-attachment-urls, so no upload URL can be minted. Use create-mail-attachment-upload-session and PUT the bytes from disk to its uploadUrl.'
+      `This server is not running with --enable-attachment-urls, so no upload URL can be minted. ${sessionHint}`
     );
   }
   if (!UPLOAD_TARGET.test(target) || !isPlainGraphPath(target)) {
@@ -1876,6 +1883,22 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       // Recording content endpoints return authenticated bytes, not a pre-authenticated URL.
       // Upstream's ticket store (--enable-attachment-urls) can serve them.
       if (classification.kind === 'meeting-recording') {
+        // The bare recording resource is JSON metadata, so only its /content byte endpoint
+        // may be minted (upstream #713).
+        if (getAttachmentMinting() && !pathPart.endsWith('/content')) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'Only the /content byte endpoint can be minted a download URL: end target with /content, e.g. /me/onlineMeetings/{meeting-id}/recordings/{recording-id}/content.',
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
         const minted = await mintDownloadUrl(pathPart, accountParam, authManager);
         if (minted) return minted;
         return {
@@ -1916,8 +1939,23 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           // Graph has no pre-authenticated URL for these bytes, so upstream's ticket store
           // (--enable-attachment-urls) mints a single-use URL this server serves. The EKI
           // broker that used to do this, with Range/resume, was retired in favour of it.
-          const fetchTarget = pathPart.endsWith('/$value') ? pathPart : `${pathPart}/$value`;
-          const minted = await mintDownloadUrl(fetchTarget, accountParam, authManager);
+          // The bare attachment resource is JSON carrying base64 contentBytes, so only its
+          // /$value byte endpoint may be minted (upstream #713).
+          if (getAttachmentMinting() && !pathPart.endsWith('/$value')) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error:
+                      'Only the /$value byte endpoint can be minted a download URL: end target with /$value, e.g. /me/messages/{message-id}/attachments/{attachment-id}/$value. The attachment resource itself returns JSON with base64 contentBytes.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const minted = await mintDownloadUrl(pathPart, accountParam, authManager);
           if (minted) return minted;
           return {
             content: [
@@ -3072,6 +3110,7 @@ async function executeGraphTool(
           // response — otherwise fetchAllPages on a /delta endpoint silently drops
           // the resume token and forces callers to re-list from scratch.
           let deltaLink = combinedResponse['@odata.deltaLink'];
+          let unmergeablePage = false;
 
           while (nextLink && pageCount < maxPages && allItems.length < maxItems) {
             logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
@@ -3095,9 +3134,18 @@ async function executeGraphTool(
             }
             if (nextResponse?.content?.[0]?.text) {
               const nextJsonResponse = JSON.parse(nextResponse.content[0].text) as ODataPage;
-              if (Array.isArray(nextJsonResponse.value)) {
-                allItems = allItems.concat(nextJsonResponse.value);
+              // A page that is not a collection cannot be merged. Falling through would
+              // clear nextLink and stamp the short list as complete, so stop here and
+              // leave nextLink set: result_has_more then reports the read as incomplete,
+              // and this page's bytes stay out of the total.
+              if (!Array.isArray(nextJsonResponse.value)) {
+                logger.warn(
+                  `Pagination stopped at page ${pageCount + 1}: response was not a collection`
+                );
+                unmergeablePage = true;
+                break;
               }
+              allItems = allItems.concat(nextJsonResponse.value);
               nextLink = nextJsonResponse['@odata.nextLink'];
               if (
                 typeof totalResponseBytes === 'number' &&
@@ -3110,6 +3158,7 @@ async function executeGraphTool(
               }
               pageCount++;
             } else {
+              unmergeablePage = true;
               break;
             }
           }
@@ -3125,17 +3174,24 @@ async function executeGraphTool(
             }
 
             combinedResponse.value = allItems;
-            if (combinedResponse['@odata.count']) {
-              combinedResponse['@odata.count'] = allItems.length;
+            // @odata.count is Graph's total for the filtered collection, so it is
+            // left as page one reported it (it can exceed allItems.length when
+            // maxPages/maxItems truncates the merge).
+            // A page that could not be merged is not a limit the caller chose, so
+            // the body keeps the link to it. Without it the short list reads as
+            // the whole collection.
+            if (unmergeablePage && nextLink) {
+              combinedResponse['@odata.nextLink'] = nextLink;
+            } else {
+              delete combinedResponse['@odata.nextLink'];
             }
-            delete combinedResponse['@odata.nextLink'];
             // The client's metadata described page one. Now that pages are
             // merged, restate all three for the whole read.
             //
-            // nextLink still being set means the loop stopped on maxPages or
-            // maxItems, not on running out: Graph has more. The merged body
-            // drops @odata.nextLink either way, so the audit event is the only
-            // place that truncation is visible.
+            // nextLink still being set means the loop stopped early: on maxPages,
+            // on maxItems, or on a page it could not merge. Graph has more. For
+            // the two limits the merged body drops @odata.nextLink, so the audit
+            // event is the only place that truncation is visible.
             response._meta = {
               ...response._meta,
               result_count: allItems.length,
@@ -3147,7 +3203,7 @@ async function executeGraphTool(
             }
 
             logger.info(
-              `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
+              `Pagination ${nextLink ? 'incomplete' : 'complete'}: collected ${allItems.length} items across ${pageCount} pages`
             );
           }
         }

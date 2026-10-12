@@ -633,7 +633,7 @@ npx @softeria/ms-365-mcp-server --list-presets  # See all available presets
 
 Available presets: `mail`, `calendar`, `files`, `personal`, `work`, `excel`, `contacts`, `tasks`, `onenote`, `search`, `users`, `outlook`, `onedrive`, `teams`, `teams-write`, `all`
 
-Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`). The universal binary reader `download-bytes` is included in every preset except `teams-write`, so whatever an app returns (a file, an attachment, a photo, a recording) can always be fetched; `get-download-url` (a pre-authenticated URL for drive/SharePoint files) rides with the drive-backed presets. So a preset that can find a file can always read its bytes.
+Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`). The universal binary reader `download-bytes` is included in every preset except `teams-write`, so whatever an app returns (a file, an attachment, a photo, a recording) can always be fetched; `get-download-url` (a pre-authenticated URL for drive/SharePoint files) rides with the drive-backed presets, and joins every other preset (bar `teams-write`) when HTTP mode runs with `--enable-attachment-urls`. So a preset that can find a file can always read its bytes.
 
 The `outlook`, `onedrive` and `teams` presets are app-scoped: they expose exactly one Microsoft app. Use these for "expose exactly one app" deployments:
 
@@ -699,7 +699,8 @@ When running as an MCP server, the following options can be used:
                   --trust-proxy-auth
 --enable-auth-tools Enable login/logout tools when using HTTP mode (disabled by default in HTTP mode)
 --enable-attachment-urls Let get-download-url mint a server-served URL for byte resources Graph
-                  exposes no pre-authenticated URL for (see "Server-Minted Attachment URLs")
+                  exposes no pre-authenticated URL for (see "Server-Minted Attachment URLs").
+                  Also adds get-download-url to any --preset that lacks it (except teams-write)
 --attachment-port <port> Serve /attachment on its own listener on this port instead of on the
                   MCP app, so a fetcher that can read attachments cannot also reach /mcp
                   (requires --enable-attachment-urls; see "Splitting the attachment listener")
@@ -761,7 +762,13 @@ agent's context. A 73 KB, 3-page PDF costs about 24,500 tokens that way, and the
 cannot parse them anyway.
 
 `--enable-attachment-urls` (HTTP mode, off by default) closes that gap. When Graph has no
-URL of its own, `get-download-url` mints one this server serves:
+URL of its own, `get-download-url` mints one this server serves. With it on,
+`get-download-url` is registered under every `--preset` (except the send-only `teams-write`),
+so a `--preset mail` agent that lists an attachment can mint a URL for it. A minted URL only
+works if the preset's scopes cover the resource: a contacts, tasks or excel preset has no Mail
+scopes, so a URL minted for a mail attachment fails when fetched.
+
+The minted URL looks like:
 
 ```
 GET /attachment?t=<ticket>&dgk=<key-id>&dgx=<expiry>&dgs=<signature>
@@ -802,16 +809,21 @@ is refused with the same 404 as any other bad ticket.
 
 ```
 MS365_MCP_ATTACHMENT_URL_BASE=http://m365-mcp:3000   # required
-MS365_MCP_ATTACHMENT_URL_KEY=...                     # required (or _KEY_FILE=/path)
-MS365_MCP_ATTACHMENT_URL_KEY_ID=1                    # optional, default 1
+MS365_MCP_ATTACHMENT_URL_KEY=...                     # optional (or _KEY_FILE=/path), see below
+MS365_MCP_ATTACHMENT_URL_KEY_ID=1                    # optional, default 1; needs a key
 MS365_MCP_ATTACHMENT_URL_TTL_S=120                   # optional, default 120, max 300
 ```
 
 `MS365_MCP_ATTACHMENT_URL_BASE` is deliberately **not** `MS365_MCP_PUBLIC_URL`: that one is
 browser-facing, for OAuth redirects, while this is fetched server-to-server and is
 commonly a container address. A missing or malformed setting fails at startup rather than
-per-request — a signing feature that comes up without a key would mint URLs nothing can
-verify, silently.
+per-request.
+
+The signing key is optional. Without one, minted URLs are just `/attachment?t=<ticket>` and
+any HTTP client can fetch them; the ticket alone authorises redemption. Set a key only if
+the fetcher verifies the `dgk`/`dgx`/`dgs` signature (see below), such as a docglean-mcp
+sidecar, which will refuse an unsigned URL. Setting `_KEY_ID` without a key, or a `_KEY_FILE` that is
+empty or unreadable, fails at startup.
 
 ### Splitting the attachment listener
 
@@ -897,9 +909,10 @@ directly.
 `--attachment-host` takes a bare IPv4 address, IPv6 address (bracketed `[::1]` or bare
 `::1`) or hostname. It is refused rather than coerced — `--attachment-host 10.0.0.5:3001`
 is an error naming `--attachment-port`, not a bind to something else. Note that
-`MS365_MCP_ATTACHMENT_URL_BASE` still must not be an IPv6 literal (the URL signature covers
-the host and the two implementations normalise IPv6 differently); if you bind the listener
-to an IPv6 address, name it in the base by hostname.
+with a signing key set, `MS365_MCP_ATTACHMENT_URL_BASE` must not be an IPv6 literal (the URL
+signature covers the host and the two implementations normalise IPv6 differently); if you
+bind the listener to an IPv6 address, name it in the base by hostname. Without a key there
+is no such restriction.
 
 Point `MS365_MCP_ATTACHMENT_URL_BASE` at the attachment port. The server cannot check this
 for you: the base is usually a container name on a network this process cannot resolve, so
@@ -908,7 +921,7 @@ base and the bound port are logged at startup, one line apart, for exactly that 
 
 ### The signature, and who checks what
 
-`dgk`/`dgx`/`dgs` are **not** checked by this server on redemption, and that is deliberate.
+This server never checks `dgk`/`dgx`/`dgs` on redemption, and that is deliberate.
 They exist for the fetcher: a document-conversion sidecar that refuses to dial a private
 address unless the URL carries a valid HMAC from an origin it has been configured to trust.
 What authorises redemption _here_ is the ticket. Verifying the signature on the way back in
