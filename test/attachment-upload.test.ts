@@ -262,6 +262,20 @@ describe('get-upload-url', () => {
     });
   });
 
+  it('mints a bare upload URL when no key is configured, redeemable by its ticket', async () => {
+    configureAttachmentMinting({
+      store,
+      config: { base: 'https://relay.example', keyId: '1', ttlSeconds: 120 },
+    });
+    const result = await tool.execute({ target: DRAFT_ATTACHMENTS, name: 'a.txt' }, ctx());
+    const url = new URL(parse(result as never).uploadUrl);
+    expect([...url.searchParams.keys()]).toEqual([TICKET_PARAM]);
+    expect(store.redeem(url.searchParams.get(TICKET_PARAM)!)).toMatchObject({
+      purpose: 'upload',
+      target: DRAFT_ATTACHMENTS,
+    });
+  });
+
   it('refuses anything but a message or event attachments collection', async () => {
     for (const target of [
       '/me/messages/AAA/attachments/BBB/$value',
@@ -280,5 +294,24 @@ describe('get-upload-url', () => {
     const result = await tool.execute({ target: DRAFT_ATTACHMENTS, name: 'a.txt' }, ctx());
     expect(result.isError).toBe(true);
     expect(parse(result as never).error).toMatch(/--enable-attachment-urls/);
+  });
+
+  // EKI fork: inline contentBytes is refused at any size, so the fallback names the upload
+  // session for the target instead of upstream's base64 add-*-attachment tool.
+  it('names the upload session that fits the target when attachment URLs are not enabled', async () => {
+    resetAttachmentMinting();
+    for (const [target, expected] of [
+      [DRAFT_ATTACHMENTS, 'create-mail-attachment-upload-session'],
+      ['/me/events/EEE/attachments', 'create-calendar-event-attachment-upload-session'],
+      [
+        '/users/shared@example.com/messages/AAA/attachments',
+        'no shared-mailbox attachment upload session',
+      ],
+    ]) {
+      const result = await tool.execute({ target, name: 'a.txt' }, ctx());
+      const error = parse(result as never).error;
+      expect(error, target).toContain(expected);
+      expect(error, target).not.toContain('base64 contentBytes');
+    }
   });
 });
