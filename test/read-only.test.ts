@@ -86,9 +86,9 @@ describe('Read-Only Mode', () => {
     registerGraphTools(mockServer, {} as GraphClient, { readOnly: options.readOnly });
 
     // 1 GET graph endpoint via registerTool; parse-teams-url + download-bytes +
-    // download-bytes-to-file + get-download-url + read-mail-text utilities via tool
+    // get-download-url + read-mail-text read-only utilities via tool. The local file writer is excluded.
     expect(mockServer.registerTool).toHaveBeenCalledTimes(1);
-    expect(mockServer.tool).toHaveBeenCalledTimes(5);
+    expect(mockServer.tool).toHaveBeenCalledTimes(4);
 
     const toolCalls = mockServer.registerTool.mock.calls.map((call: unknown[]) => call[0]);
     expect(toolCalls).toContain('list-mail-messages');
@@ -143,11 +143,10 @@ describe('Read-Only Mode', () => {
     // PATCH endpoint should still be skipped (readOnly bypass is POST-only)
     expect(toolCalls).not.toContain('update-mail-folder');
 
-    // 2 graph tools (list-mail-messages + get-schedule) + utilities
-    // (parse-teams-url, download-bytes, download-bytes-to-file, get-download-url,
-    // read-mail-text)
+    // 2 graph tools (list-mail-messages + get-schedule) + read-only utilities
+    // (parse-teams-url, download-bytes, get-download-url, read-mail-text)
     expect(mockServer.registerTool).toHaveBeenCalledTimes(2);
-    expect(mockServer.tool).toHaveBeenCalledTimes(5);
+    expect(mockServer.tool).toHaveBeenCalledTimes(4);
   });
 
   it('reports a readOnly POST endpoint as read-only, not destructive, in its hints', () => {

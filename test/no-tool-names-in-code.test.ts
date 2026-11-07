@@ -16,6 +16,8 @@ const ALLOWED: Record<string, string[]> = {
     'add-calendar-event-attachment',
     'add-shared-mailbox-attachment',
     'add-mail-attachment',
+    // Deliberate narrow policy exception: emoji uploads have no session alternative.
+    'create-custom-emoji',
   ],
 };
 

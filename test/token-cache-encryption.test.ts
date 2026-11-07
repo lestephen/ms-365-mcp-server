@@ -19,6 +19,8 @@ const keychain = new Map<string, string>();
 let keytarAvailable = true;
 /** Reads fail while writes still work - a denied prompt rather than a dead keyring. */
 let keytarReadFails = false;
+/** Runs during keychain reads, allowing tests to hold an election mid-flight. */
+let keychainGetHook: (() => void | Promise<void>) | undefined;
 /** Runs just after a successful setPassword, to stand in for a racing sibling process. */
 let keychainSetHook: (() => void) | undefined;
 const setPasswordCalls: Array<{ account: string; value: string }> = [];
@@ -28,6 +30,7 @@ vi.mock('keytar', () => ({
     getPassword: vi.fn(async (service: string, account: string) => {
       if (!keytarAvailable) throw new Error('keychain unavailable');
       if (keytarReadFails) throw new Error('The user denied the keychain prompt.');
+      await keychainGetHook?.();
       return keychain.get(`${service}/${account}`) ?? null;
     }),
     setPassword: vi.fn(async (service: string, account: string, value: string) => {
@@ -43,8 +46,15 @@ vi.mock('keytar', () => ({
   },
 }));
 
-const { DefaultTokenCacheStorage, getCacheKeyPath, resetCacheKeyForTests, wrapCache, unwrapCache } =
-  await import('../src/token-cache-storage.js');
+const {
+  DefaultTokenCacheStorage,
+  getCacheKeyLockPath,
+  getCacheKeyPath,
+  resetCacheKeyForTests,
+  setCacheKeyLockTimingsForTests,
+  wrapCache,
+  unwrapCache,
+} = await import('../src/token-cache-storage.js');
 const { default: logger } = await import('../src/logger.js');
 
 const SERVICE = 'ms-365-mcp-server';
@@ -60,6 +70,7 @@ describe('encrypted token cache storage', () => {
     keychain.clear();
     keytarAvailable = true;
     keytarReadFails = false;
+    keychainGetHook = undefined;
     keychainSetHook = undefined;
     setPasswordCalls.length = 0;
     // The logger mock is created once for the file, so its calls accumulate across tests
@@ -69,6 +80,7 @@ describe('encrypted token cache storage', () => {
     resetCacheKeyForTests();
     vi.stubEnv('MS365_MCP_TOKEN_CACHE_PATH', cachePath);
     vi.stubEnv('MS365_MCP_SELECTED_ACCOUNT_PATH', path.join(dir, '.selected-account.json'));
+    vi.stubEnv('XDG_CONFIG_HOME', dir);
   });
 
   afterEach(() => {
@@ -403,6 +415,147 @@ describe('encrypted token cache storage', () => {
       resetCacheKeyForTests();
       expect(await storage.load('token-cache')).toBe(tokenValue);
       expect(await storage.load('selected-account')).toBe(accountValue);
+    });
+
+    it('serializes key election across independent initializers', async () => {
+      let cacheKeyReads = 0;
+      let releaseElection!: () => void;
+      const electionHeld = new Promise<void>((resolve) => {
+        releaseElection = resolve;
+      });
+      let firstElectionRead!: () => void;
+      const firstElectionReached = new Promise<void>((resolve) => {
+        firstElectionRead = resolve;
+      });
+
+      keychainGetHook = async () => {
+        cacheKeyReads += 1;
+        // First read is the initial empty state. Hold the fresh read under the lock so
+        // a second initializer also observes an empty keychain before trying to elect.
+        if (cacheKeyReads === 2) {
+          firstElectionRead();
+          await electionHeld;
+        }
+      };
+
+      const firstValue = wrapCache('first');
+      const secondValue = wrapCache('second');
+      const firstCachePath = path.join(dir, 'cache-a', 'tokens.json');
+      const secondCachePath = path.join(dir, 'cache-b', 'selected.json');
+      vi.stubEnv('MS365_MCP_TOKEN_CACHE_PATH', firstCachePath);
+      const first = new DefaultTokenCacheStorage().save('token-cache', firstValue);
+      await firstElectionReached;
+
+      // Separate processes do not share these memoized promises. Clearing them models
+      // that independent module state. A distinct cache directory models a different
+      // MS365_MCP_TOKEN_CACHE_PATH while both contenders share the global keychain.
+      resetCacheKeyForTests();
+      vi.stubEnv('MS365_MCP_SELECTED_ACCOUNT_PATH', secondCachePath);
+      const second = new DefaultTokenCacheStorage().save('selected-account', secondValue);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(setPasswordCalls.filter((call) => call.account === 'cache-key')).toHaveLength(0);
+
+      releaseElection();
+      await Promise.all([first, second]);
+
+      expect(setPasswordCalls.filter((call) => call.account === 'cache-key')).toHaveLength(1);
+      expect(fs.existsSync(getCacheKeyLockPath())).toBe(false);
+      resetCacheKeyForTests();
+      vi.stubEnv('MS365_MCP_TOKEN_CACHE_PATH', firstCachePath);
+      expect(await new DefaultTokenCacheStorage().load('token-cache')).toBe(firstValue);
+      vi.stubEnv('MS365_MCP_SELECTED_ACCOUNT_PATH', secondCachePath);
+      expect(await new DefaultTokenCacheStorage().load('selected-account')).toBe(secondValue);
+    });
+
+    it('recovers an expired lease even when its PID appears live in this namespace', async () => {
+      setCacheKeyLockTimingsForTests(40, 10);
+      const lockPath = getCacheKeyLockPath();
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+      fs.writeFileSync(
+        lockPath,
+        JSON.stringify({
+          version: 1,
+          // A container in another PID namespace can have the same numeric PID.
+          pid: process.pid,
+          createdAt: Date.now(),
+          token: '0123456789abcdef',
+        }),
+        { mode: 0o600 }
+      );
+      const old = new Date(Date.now() - 100);
+      fs.utimesSync(lockPath, old, old);
+
+      await expect(
+        new DefaultTokenCacheStorage().save('token-cache', wrapCache('recovered'))
+      ).resolves.toBeUndefined();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('expired'));
+    });
+
+    it('heartbeats a live slow keychain operation so a waiter cannot reap it', async () => {
+      setCacheKeyLockTimingsForTests(60, 10);
+      let releaseElection!: () => void;
+      const electionHeld = new Promise<void>((resolve) => {
+        releaseElection = resolve;
+      });
+      let electionReached!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        electionReached = resolve;
+      });
+      let reads = 0;
+      keychainGetHook = async () => {
+        reads += 1;
+        if (reads === 2) {
+          electionReached();
+          await electionHeld;
+        }
+      };
+
+      const first = new DefaultTokenCacheStorage().save('token-cache', wrapCache('first'));
+      await reached;
+      const lockPath = getCacheKeyLockPath();
+      const firstMtime = fs.statSync(lockPath).mtimeMs;
+
+      resetCacheKeyForTests();
+      setCacheKeyLockTimingsForTests(60, 10);
+      const second = new DefaultTokenCacheStorage().save('selected-account', wrapCache('second'));
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      expect(fs.statSync(lockPath).mtimeMs).toBeGreaterThan(firstMtime);
+      expect(setPasswordCalls.filter((call) => call.account === 'cache-key')).toHaveLength(0);
+      releaseElection();
+      await Promise.all([first, second]);
+      expect(setPasswordCalls.filter((call) => call.account === 'cache-key')).toHaveLength(1);
+    });
+
+    it('recovers stale invalid lock metadata before the waiter timeout', async () => {
+      setCacheKeyLockTimingsForTests(40, 10);
+      const lockPath = getCacheKeyLockPath();
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+      fs.writeFileSync(lockPath, 'invalid-owner', { mode: 0o600 });
+      const old = new Date(Date.now() - 100);
+      fs.utimesSync(lockPath, old, old);
+
+      await expect(
+        new DefaultTokenCacheStorage().save('token-cache', wrapCache('recovered'))
+      ).resolves.toBeUndefined();
+      expect(fs.existsSync(lockPath)).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('expired'));
+    });
+
+    it('uses one election lock for distinct cache directories sharing the keychain', async () => {
+      const firstDir = path.join(dir, 'cache-a');
+      const secondDir = path.join(dir, 'cache-b');
+      vi.stubEnv('MS365_MCP_TOKEN_CACHE_PATH', path.join(firstDir, 'tokens.json'));
+      const firstLockPath = getCacheKeyLockPath();
+      vi.stubEnv('MS365_MCP_TOKEN_CACHE_PATH', path.join(secondDir, 'tokens.json'));
+      const secondLockPath = getCacheKeyLockPath();
+
+      expect(firstLockPath).toBe(secondLockPath);
+      expect(firstLockPath.startsWith(firstDir)).toBe(false);
+      expect(firstLockPath.startsWith(secondDir)).toBe(false);
     });
 
     // The key file must never appear before its contents: a sibling reading it empty

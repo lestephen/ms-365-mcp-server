@@ -98,6 +98,29 @@ describe('hybrid discovery', () => {
     expect(denied.isError).toBe(true);
     expect(graphRequest).not.toHaveBeenCalled();
   });
+  it('cannot restore blocked eager tools through registration or discovery dispatch', async () => {
+    const { client, graphRequest } = await connect({
+      orgMode: true,
+      httpMode: true,
+      enabledTools: filter,
+      eagerTools: ['send-mail', 'list-mail-messages'],
+      blockedTools: '^send-mail$',
+    });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain('list-mail-messages');
+    expect(names).not.toContain('send-mail');
+    const denied = await client.callTool({
+      name: 'execute-tool',
+      arguments: { tool_name: 'send-mail', parameters: { body: {}, confirm: true } },
+    });
+    expect(denied.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
+    const schema = await client.callTool({
+      name: 'get-tool-schema',
+      arguments: { tool_name: 'send-mail' },
+    });
+    expect(schema.isError).toBe(true);
+  });
   it('cannot restore scope-denied or HTTP-local tools', async () => {
     const { client } = await connect({
       orgMode: true,
@@ -157,6 +180,15 @@ describe('hybrid discovery', () => {
       arguments: { tool_name: 'list-mail-messages' },
     });
     expect(schema.isError).not.toBe(true);
+    const payload = JSON.parse((schema.content as Array<{ text: string }>)[0].text);
+    expect(payload.invocation.via).toBe('execute-tool');
+    const search = await client.callTool({
+      name: 'search-tools',
+      arguments: { query: 'list mail messages' },
+    });
+    const results = JSON.parse((search.content as Array<{ text: string }>)[0].text).tools;
+    const match = results.find((tool: { name: string }) => tool.name === 'list-mail-messages');
+    expect(match.invoke_via).toBe('execute-tool');
   });
 
   it('rejects unknown eager names before exposing a server', () => {

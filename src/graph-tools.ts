@@ -8,6 +8,25 @@ import { fileURLToPath } from 'url';
 import { z } from 'zod';
 import { auditLog, getUserIdentityForAudit, type AuditEvent } from './audit-log.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
+import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
+import {
+  recordBatchSubrequest,
+  recordBlockedOperation,
+  recordDiscoveryStage,
+  recordToolCall,
+  metricsEnabled,
+  type ToolRoute,
+  type ToolOutcome,
+  initBlockedOperationSeries,
+} from './metrics.js';
+import { describeInlineBytes, findInlineByteFields } from './lib/inline-bytes-guard.js';
+import {
+  allOperationMatchers,
+  buildBlockedOperationMatchers,
+  describeBlockedSubrequests,
+  findBlockedSubrequests,
+  type BlockedOperationMatcher,
+} from './lib/batch-guard.js';
 import AuthManager, {
   getEndpointScopeGroups,
   getMissingAllowedScopesForGroups,
@@ -18,7 +37,11 @@ import AuthManager, {
 } from './auth.js';
 import { api as betaApi } from './generated/client-beta.js';
 import { api } from './generated/client.js';
-import GraphClient, { getBlobMaxBytes, isBlobOutputEnabled } from './graph-client.js';
+import GraphClient, {
+  getBlobMaxBytes,
+  isBlobOutputEnabled,
+  GraphDownloadSizeLimitError,
+} from './graph-client.js';
 import { getAttachmentMinting } from './lib/attachment-minting.js';
 import { MAX_UPLOAD_BYTES, uploadAttachment } from './lib/attachment-upload.js';
 import { getUploadDirs, openUploadFile, type UploadFile } from './lib/upload-dirs.js';
@@ -56,6 +79,10 @@ import {
   TIMEZONE_PARAM_DESCRIPTION,
 } from './lib/param-descriptions.js';
 import { describePathParam } from './lib/path-params.js';
+import {
+  prepareUnencodedPathParameter,
+  refineUnencodedPathParameterSchema,
+} from './lib/unencoded-path-params.js';
 import { queryParameterSchema } from './lib/query-parameter-schema.js';
 import {
   anyFieldPresent,
@@ -928,50 +955,12 @@ function thrownErrorAuditFields(error: unknown): Pick<AuditEvent, 'http_status' 
   };
 }
 
-async function executeUtilityTool(
-  utility: UtilityTool,
-  ctx: UtilityToolContext,
-  params: Record<string, unknown>
-): Promise<CallToolResult> {
-  const requestId = randomUUID();
-  const startTime = Date.now();
-  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
-
-  try {
-    const response = await utility.execute(params, ctx);
-    auditLog({
-      event: 'tool.call',
-      request_id: requestId,
-      user_principal_name: upn,
-      tool: utility.name,
-      http_method: utility.method.toUpperCase(),
-      status: response.isError ? 'error' : 'success',
-      duration_ms: Date.now() - startTime,
-      ...graphResponseAuditFields(response),
-    });
-    return response;
-  } catch (error) {
-    const err = error as { name?: string };
-    auditLog({
-      event: 'tool.call',
-      request_id: requestId,
-      user_principal_name: upn,
-      tool: utility.name,
-      http_method: utility.method.toUpperCase(),
-      status: 'error',
-      duration_ms: Date.now() - startTime,
-      error_type: err?.name || 'Error',
-      ...thrownErrorAuditFields(error),
-    });
-    throw error;
-  }
-}
-
 interface UtilityToolContext {
   graphClient: GraphClient;
   authManager?: AuthManager;
   multiAccount: boolean;
   accountNames: string[];
+  httpMode: boolean;
   userFields?: string[];
 }
 
@@ -985,7 +974,9 @@ interface UtilityTool {
   searchKeywords?: string;
   buildSchema: (ctx: UtilityToolContext) => Record<string, z.ZodTypeAny>;
   execute: (params: Record<string, unknown>, ctx: UtilityToolContext) => Promise<CallToolResult>;
-  readOnlyHint?: boolean;
+  // This is policy, not merely an MCP annotation. Registration, read-only
+  // filtering, confirmation, and annotations must all derive from this value.
+  mutatesState: boolean;
   openWorldHint?: boolean;
   // When true, this tool reads or writes the server's local filesystem and is only
   // registered in stdio mode, or over HTTP with --http-local-file-tools.
@@ -1000,7 +991,7 @@ export function isUtilityToolAvailable(
   utility: UtilityTool,
   options: { readOnly: boolean; httpMode: boolean; scopeMode: ScopeMode }
 ): boolean {
-  if (options.readOnly && !utility.readOnlyHint) return false;
+  if (options.readOnly && utility.mutatesState) return false;
   if (options.httpMode && utility.stdioOnly) return false;
   if (options.scopeMode === 'app' && utility.meOnly) return false;
   if (utility.enabled && !utility.enabled()) return false;
@@ -1153,6 +1144,158 @@ function installDeniedToolAuditHandler(
   });
 }
 
+const DEFAULT_DOWNLOAD_BYTES_MAX_INLINE = 256 * 1024;
+
+function downloadBytesMaxInline(): number {
+  const raw = process.env.MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE;
+  if (raw === undefined || raw === '') return DEFAULT_DOWNLOAD_BYTES_MAX_INLINE;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(
+      `Ignoring invalid MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=${JSON.stringify(raw)} (use 0 or a positive integer)`
+    );
+    return DEFAULT_DOWNLOAD_BYTES_MAX_INLINE;
+  }
+  return n;
+}
+
+type DownloadUrlTargetKind = 'meeting-recording' | 'brokerable' | 'drive-item' | 'unsupported';
+
+interface DownloadUrlTargetClassification {
+  kind: DownloadUrlTargetKind;
+  pathPart: string;
+  isDriveContentEndpoint: boolean;
+}
+
+interface CanonicalBinaryTarget {
+  target: string;
+  classification: DownloadUrlTargetClassification;
+}
+
+const ENCODED_BINARY_ROUTE_DELIMITER = /%(?:2f|3a|3f|5c)/i;
+const ENCODED_FRAGMENT_DELIMITER = /%23/i;
+
+function encodedHashesAreDrivePathData(target: string): boolean {
+  const drivePath = /\/root:\/(.+):(?:\/content)?\/?$/i.exec(target);
+  if (!drivePath) return !ENCODED_FRAGMENT_DELIMITER.test(target);
+
+  const filenameStart = drivePath.index + '/root:/'.length;
+  const filenameEnd = filenameStart + drivePath[1].length;
+  for (const match of target.matchAll(/%23/gi)) {
+    const index = match.index;
+    if (index < filenameStart || index >= filenameEnd) return false;
+  }
+  return true;
+}
+
+function validateBinaryTargetSegments(target: string): void {
+  if (target.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new Error('target must not contain dot path segments.');
+  }
+}
+
+function validateBinaryTargetEncoding(target: string): void {
+  let layer = target;
+  for (let depth = 0; depth < 16; depth++) {
+    if (ENCODED_BINARY_ROUTE_DELIMITER.test(layer) || !encodedHashesAreDrivePathData(layer)) {
+      throw new Error('target must not contain encoded route, query, or fragment delimiters.');
+    }
+
+    // Encoded dots are ordinary filename data unless decoding makes the whole segment
+    // `.` or `..`, which changes routing semantics. Do not decode the dispatched path.
+    const dotsDecoded = layer.replace(/%2e/gi, '.');
+    if (dotsDecoded.split('/').some((segment) => segment === '.' || segment === '..')) {
+      throw new Error('target must not contain an encoded dot path segment.');
+    }
+
+    // Peel one layer of encoded percent signs so double-encoded delimiters cannot hide.
+    // A literal `%25` filename is fine: it becomes `%` on the next pass and stabilizes.
+    const next = layer.replace(/%25/gi, '%');
+    if (next === layer) return;
+    layer = next;
+  }
+  throw new Error('target contains excessive nested percent encoding.');
+}
+
+/**
+ * Validate and normalize the Graph path once before either classification or dispatch.
+ * URL fragments are not sent by fetch, and encoded route delimiters may be decoded by
+ * an intermediary, so accepting either would let the classifier inspect a different
+ * effective resource from the one Graph receives.
+ */
+function canonicalizeBinaryTarget(target: string): CanonicalBinaryTarget {
+  if (!target.startsWith('/')) {
+    throw new Error('target must be a relative Microsoft Graph path starting with "/".');
+  }
+  if (target.includes('?')) throw new Error('target must not include query parameters.');
+  if (target.includes('#')) throw new Error('target must not include a URL fragment.');
+  if (target.includes('\\')) throw new Error('target must not include a backslash.');
+  // URL implementations normalize raw dot segments before dispatch. Reject them
+  // explicitly so classification and the effective Graph resource cannot diverge.
+  validateBinaryTargetSegments(target);
+  validateBinaryTargetEncoding(target);
+  for (let index = 0; index < target.length; index++) {
+    const code = target.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      throw new Error('target must not contain control characters.');
+    }
+  }
+
+  const canonicalTarget = target.replace(/\/+$/, '');
+  if (canonicalTarget === '') throw new Error('target must identify a Microsoft Graph resource.');
+  return {
+    target: canonicalTarget,
+    classification: classifyDownloadUrlTarget(canonicalTarget),
+  };
+}
+
+/**
+ * Classify the exact target shapes get-download-url can serve. This is shared with
+ * download-bytes so its HTTP inline cutoff is only applied when the suggested
+ * out-of-band route really exists.
+ */
+function classifyDownloadUrlTarget(target: string): DownloadUrlTargetClassification {
+  const pathPart = target;
+  const isMeetingRecording =
+    /^(\/me|\/users\/[^/]+)\/onlineMeetings\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(
+      pathPart
+    ) || /^\/communications\/calls\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(pathPart);
+  if (isMeetingRecording) {
+    return { kind: 'meeting-recording', pathPart, isDriveContentEndpoint: false };
+  }
+
+  // Match only real Graph mail/calendar attachment resources so driveItem path addressing
+  // with folders named messages/events/attachments is not falsely treated as an attachment.
+  const isAttachmentEndpoint =
+    /^(\/me|\/users\/[^/]+)\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+    /^(\/me|\/users\/[^/]+)\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+    /^\/groups\/[^/]+\/messages\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart) ||
+    /^\/groups\/[^/]+\/events\/[^/]+\/attachments\/[^/]+(?:\/\$value)?$/.test(pathPart);
+  if (isAttachmentEndpoint || pathPart.endsWith('/$value')) {
+    return { kind: 'brokerable', pathPart, isDriveContentEndpoint: false };
+  }
+
+  const isDriveItemById =
+    /^\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart) ||
+    /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/items\/[^/]+(?:\/content)?$/.test(
+      pathPart
+    ) ||
+    /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart);
+  const isDriveItemByPath =
+    /^\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(pathPart) ||
+    /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/root:\/.+:(?:\/content)?$/.test(
+      pathPart
+    ) ||
+    /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(pathPart);
+  const isDriveContentEndpoint =
+    /\/items\/[^/]+\/content$/.test(pathPart) || pathPart.endsWith(':/content');
+  return {
+    kind: isDriveItemById || isDriveItemByPath ? 'drive-item' : 'unsupported',
+    pathPart,
+    isDriveContentEndpoint,
+  };
+}
+
 /**
  * In OAuth/HTTP bearer mode the `account` parameter cannot switch identities —
  * every Graph call uses the connecting client's bearer token. Previously a
@@ -1248,13 +1391,15 @@ async function mintUploadUrl(
 ): Promise<CallToolResult> {
   const minting = getAttachmentMinting();
   if (!minting) {
-    const smallFileTool = target.includes('/events/')
-      ? 'add-calendar-event-attachment'
+    // EKI fork: inline contentBytes is refused here at any size, so point at the
+    // upload session for the target rather than upstream's base64 add-*-attachment.
+    const sessionHint = target.includes('/events/')
+      ? 'Use create-calendar-event-attachment-upload-session and PUT the bytes from disk to its uploadUrl.'
       : target.startsWith('/users/')
-        ? 'add-shared-mailbox-attachment'
-        : 'add-mail-attachment';
+        ? 'This server has no shared-mailbox attachment upload session and refuses inline contentBytes, so a file cannot be attached to a shared-mailbox draft here.'
+        : 'Use create-mail-attachment-upload-session and PUT the bytes from disk to its uploadUrl.';
     return uploadError(
-      `This server is not running with --enable-attachment-urls, so no upload URL can be minted. Attach small files with ${smallFileTool} (base64 contentBytes).`
+      `This server is not running with --enable-attachment-urls, so no upload URL can be minted. ${sessionHint}`
     );
   }
   if (!UPLOAD_TARGET.test(target) || !isPlainGraphPath(target)) {
@@ -1463,7 +1608,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       'upload attachment attach file draft email attach file event large attachment send file out-of-band upload url',
     description:
       'Mint a short-lived, single-use URL that this server serves for uploading a file as an attachment to a draft message or an event, so the bytes go straight from the caller to Microsoft Graph instead of passing as base64 through the agent context. target is the attachments collection of the item: /me/messages/{message-id}/attachments (a draft; create it first) or /me/events/{event-id}/attachments. PUT the raw file bytes to the returned uploadUrl with a Content-Length (e.g. curl -T file "<uploadUrl>"); the response confirms the attachment. Files under 3 MB are attached directly, larger ones (up to 150 MB) through a Graph upload session. Pass contentId to attach inline, e.g. a signature picture the HTML body shows with <img src="cid:<contentId>">. Requires --enable-attachment-urls. Returns { uploadUrl, method, expiresAt, singleUse, maxBytes }.',
-    readOnlyHint: false,
+    mutatesState: true,
     openWorldHint: true,
     buildSchema: (ctx) => {
       const schema: Record<string, z.ZodTypeAny> = {
@@ -1524,7 +1669,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       'attach local file upload file from disk attach file path draft email attach file event attachment without base64',
     description:
       'Attach a local file on the server to a draft message or an event, read straight from disk instead of passing as base64 through the agent context. target is the attachments collection, e.g. /me/messages/{message-id}/attachments or /me/events/{event-id}/attachments. Files up to 150 MB; the server picks an inline upload or an upload session by size. filePath must be absolute and inside a directory listed in MS365_MCP_UPLOAD_DIRS. stdio mode, or HTTP with --http-local-file-tools.',
-    readOnlyHint: false,
+    mutatesState: true,
     openWorldHint: true,
     stdioOnly: true,
     enabled: () => getUploadDirs().length > 0,
@@ -1660,7 +1805,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     path: 'tool:parse-teams-url',
     description:
       'Converts any Teams meeting URL format (short /meet/, full /meetup-join/, or recap ?threadId=) into a standard joinWebUrl. Use this before list-online-meetings when the user provides a recap or short URL.',
-    readOnlyHint: true,
+    mutatesState: false,
     openWorldHint: false,
     buildSchema: () => ({
       url: z.string().describe('Teams meeting URL in any format'),
@@ -1693,7 +1838,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
       'triage inbox skim many emails at once without quoted history signature footer tracking links',
     description:
       'Triage view of up to 20 mail messages at once, as text with the bulk junk removed: invisible padding, image placeholders and quoted reply history (forwards keep theirs). Links are kept: Safe Links, Proofpoint and Google redirects are unwrapped to the real address and tracking parameters (utm_* and similar) dropped; only an address still over 300 characters (a tracking redirect) is shortened to \u27e6link: domain\u27e7. Everything else (signatures, footers, whitespace) is left as the message has it; line endings become \\n and \u27e6 \u27e7 in the body itself appear as [ ]. Use get-mail-message for the raw body or the quoted thread. Give messageIds (up to 20), or folderId with optional top and filter or search for the newest messages in a folder. Each message is cut to maxChars characters (default 3,000; marked truncated: true): pass a larger maxChars, up to 300,000, for the whole of a long message; a body over 300,000 characters is cleaned only that far. If the whole result would exceed the server limit (MS365_MCP_READ_MAIL_TEXT_MAX_CHARS, default 80000) the call fails, listing the largest messages, instead of returning part of it. Returns [{ id, from, to, cc, subject, received, hasAttachments, text, chars, truncated }].',
-    readOnlyHint: true,
+    mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
       const schema: Record<string, z.ZodTypeAny> = {
@@ -1871,8 +2016,8 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     method: 'GET',
     path: 'tool:download-bytes',
     description:
-      'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large drive/SharePoint file content, prefer get-download-url, which returns a pre-authenticated URL to stream bytes out-of-band instead of base64 through the agent context. With the server\'s blob output on, the bytes come back as a file resource instead (capped by the server\'s download limit); pass fileName to name it.',
-    readOnlyHint: true,
+      'Download binary content from Microsoft Graph and return it as base64. Single tool for any binary read: drive file content, mail attachment, profile photo, Teams hosted content, meeting recording. Returns { contentType, encoding: "base64", contentLength, contentBytes }. For large content, prefer get-download-url, which returns native pre-authenticated URLs for drive/SharePoint files and, with --enable-attachment-urls, single-use URLs for mail attachments and meeting recordings. With the server\'s blob output on, the bytes come back as a file resource instead (capped by the server\'s download limit); pass fileName to name it.',
+    mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
       const schema: Record<string, z.ZodTypeAny> = {
@@ -1918,24 +2063,25 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      if (!target.startsWith('/')) {
+      const alteredTarget = unalteredTargetError(target);
+      if (alteredTarget) return alteredTarget;
+      const restrictedTarget = userProfilePassthroughError(target, userFields);
+      if (restrictedTarget) return restrictedTarget;
+      let canonical: CanonicalBinaryTarget;
+      try {
+        canonical = canonicalizeBinaryTarget(target);
+      } catch (error) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must be a relative Microsoft Graph path starting with "/", e.g. /me/photo/$value or /drives/{drive-id}/items/{driveItem-id}/content. Absolute URLs are not accepted; if you have an @microsoft.graph.downloadUrl, use the equivalent /content or /$value path instead (Graph 302-redirects to the same bytes).',
-              }),
+              text: JSON.stringify({ error: (error as Error).message }),
             },
           ],
           isError: true,
         };
       }
-      const alteredTarget = unalteredTargetError(target);
-      if (alteredTarget) return alteredTarget;
-      const restrictedTarget = userProfilePassthroughError(target, userFields);
-      if (restrictedTarget) return restrictedTarget;
+      const { target: canonicalTarget, classification } = canonical;
       try {
         const accountModeError = await checkAccountParamInBearerMode(accountParam, authManager);
         if (accountModeError) {
@@ -1948,15 +2094,6 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         if (authManager && !authManager.isOAuthModeEnabled() && !getRequestTokens()) {
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
-        // This tool's contract is the bytes, base64-encoded, whatever Graph says the
-        // type is. forceBinary makes the client read the body with arrayBuffer() for
-        // every Content-Type; without it only the isBinaryContentType allowlist is
-        // read raw, and an application/msword or application/rtf attachment is
-        // decoded as UTF-8 text with every invalid sequence replaced by U+FFFD —
-        // unrecoverable. rawResponse is kept for the JSON-body case (issue #546) but
-        // is not reached while forceBinary is set.
-        // With blob output on, the same bytes come back as a file resource, capped like
-        // the typed file tools.
         const blob = isBlobOutputEnabled()
           ? {
               maxBytes: getBlobMaxBytes(),
@@ -1965,12 +2102,66 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
               },
             }
           : {};
-        return await graphClient.graphRequest(target, {
+        // Enforce the inline limit while Graph is streaming, before constructing a base64
+        // payload. Only do so when get-download-url can actually provide the out-of-band
+        // alternative named by the error. Meeting recordings and other authenticated
+        // /content targets retain the historical response path because HTTP mode does not
+        // expose download-bytes-to-file. Set MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE=0 to
+        // disable the cutoff even for supported targets.
+        const downloadUrlKind = classification.kind;
+        const hasOutOfBandAlternative =
+          downloadUrlKind === 'brokerable' ||
+          downloadUrlKind === 'drive-item' ||
+          downloadUrlKind === 'meeting-recording';
+        const maxInline =
+          getAttachmentMinting() !== null && hasOutOfBandAlternative ? downloadBytesMaxInline() : 0;
+        if (maxInline > 0 && !isBlobOutputEnabled()) {
+          try {
+            const download = await graphClient.downloadToBuffer(canonicalTarget, maxInline, {
+              accessToken: accountAccessToken,
+            });
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    contentType: download.contentType,
+                    encoding: 'base64',
+                    contentLength: download.contentLength,
+                    contentBytes: download.bytes.toString('base64'),
+                  }),
+                },
+              ],
+            };
+          } catch (error) {
+            if (error instanceof GraphDownloadSizeLimitError) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: `Content exceeds the inline limit of ${maxInline} bytes (MS365_MCP_DOWNLOAD_BYTES_MAX_INLINE). Use get-download-url to fetch it out-of-band instead of base64 through the agent context.`,
+                      ...(error.actualBytes === undefined
+                        ? {}
+                        : { contentLength: error.actualBytes }),
+                    }),
+                  },
+                ],
+                isError: true,
+              };
+            }
+            throw error;
+          }
+        }
+
+        // Without a usable ticket store, retain the historical byte-faithful response path.
+        const response = await graphClient.graphRequest(canonicalTarget, {
           accessToken: accountAccessToken,
           rawResponse: true,
           forceBinary: true,
           ...blob,
         });
+        return response;
       } catch (error) {
         return {
           content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
@@ -1990,8 +2181,8 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     // sits past the cap. That keeps the hint for the reading LLM while letting
     // get-download-url own the high-signal "drive"/"sharepoint" search terms.
     description:
-      'Write authenticated Microsoft Graph byte content to a local file on the server, returning { path, contentType, bytesWritten } instead of base64. The only out-of-band way to save mail attachments and meeting recordings, whose bytes are exposed solely through authenticated endpoints. Also handles profile photos and Teams hosted content. Writes to an absolute outputPath and never overwrites an existing file. stdio mode, or HTTP with --http-local-file-tools. For OneDrive or SharePoint file content, get-download-url is preferred — it returns a pre-authenticated URL for fully out-of-band download without the server fetching the bytes.',
-    readOnlyHint: true,
+      'Write authenticated Microsoft Graph byte content to a local file on the server, returning { path, contentType, bytesWritten } instead of base64. Handles mail attachments, meeting recordings, profile photos, and Teams hosted content. Writes to an absolute outputPath and never overwrites an existing file. stdio mode, or HTTP with --http-local-file-tools. Prefer get-download-url when available because it returns native or brokered URLs for fully out-of-band download; download-bytes-to-file remains the out-of-band path for meeting recordings.',
+    mutatesState: true,
     openWorldHint: true,
     stdioOnly: true,
     buildSchema: (ctx) => {
@@ -2038,15 +2229,15 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      if (!target.startsWith('/')) {
+      let canonicalTarget: string;
+      try {
+        canonicalTarget = canonicalizeBinaryTarget(target).target;
+      } catch (error) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must be a relative Microsoft Graph path starting with "/", e.g. /me/photo/$value or /drives/{drive-id}/items/{driveItem-id}/content. Absolute URLs are not accepted; if you have an @microsoft.graph.downloadUrl, use the equivalent /content or /$value path instead (Graph 302-redirects to the same bytes).',
-              }),
+              text: JSON.stringify({ error: (error as Error).message }),
             },
           ],
           isError: true,
@@ -2117,7 +2308,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
         // Stream to disk instead of buffering: makeRequest holds the whole file
         // in memory as base64, which dies on big recordings (V8 max string length).
-        const result = await graphClient.downloadToFile(target, outputPath, {
+        const result = await graphClient.downloadToFile(canonicalTarget, outputPath, {
           accessToken: accountAccessToken,
         });
         return {
@@ -2159,8 +2350,8 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
     searchKeywords:
       'download file download drive file download onedrive file sharepoint file download large drive file large sharepoint file large file out-of-band download pre-authenticated url',
     description:
-      'Resolve a short-lived, pre-authenticated download URL for Microsoft Graph binary content that exposes one (drive/SharePoint file content). The returned URL streams the bytes with NO Authorization header, so the client can fetch it straight to disk (e.g. curl) without round-tripping base64 through the agent context. Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType? }. Mail file attachments (/messages/{id}/attachments/{id}/$value), meeting recordings and other $value byte endpoints have no pre-authenticated URL from Graph itself, but call this tool for them anyway: a server running with --enable-attachment-urls mints its own single-use URL for them, and one without it answers with the reason and points at download-bytes.',
-    readOnlyHint: true,
+      "Resolve a short-lived download URL for Microsoft Graph binary content. Drive/SharePoint file content returns Graph's native pre-authenticated URL. Mail and calendar attachments, meeting recordings and other /$value byte endpoints have no URL from Graph; on a server running with --enable-attachment-urls this mints a single-use URL the server serves (fetch it once, straight to disk; it does not support resume). Prefer this over download-bytes for any file above a few KB or any bulk download. Returns { downloadUrl, name?, size?, contentType? }.",
+    mutatesState: false,
     openWorldHint: true,
     buildSchema: (ctx) => {
       const schema: Record<string, z.ZodTypeAny> = {
@@ -2170,7 +2361,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             'Relative Microsoft Graph path starting with "/". Either a driveItem content path or the item path itself, e.g. ' +
               '/drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}/content, ' +
               'or /sites/{site-id}/drive/items/{driveItem-id}. ' +
-              'A trailing /content is optional and is stripped automatically for drive items. Mail attachment $value paths and meeting recordings are accepted on a server running with --enable-attachment-urls.'
+              'A trailing /content is optional and is stripped automatically for drive items. Mail attachment $value paths, meeting recordings and other /$value byte endpoints are accepted on a server running with --enable-attachment-urls.'
           ),
       };
       if (ctx.multiAccount) {
@@ -2197,88 +2388,31 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      if (!target.startsWith('/')) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must be a relative Microsoft Graph path starting with "/", e.g. /drives/{drive-id}/items/{driveItem-id}/content.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
       const alteredTarget = unalteredTargetError(target);
       if (alteredTarget) return alteredTarget;
       const restrictedTarget = userProfilePassthroughError(target, userFields);
       if (restrictedTarget) return restrictedTarget;
-      // Normalize: separate any query string and strip trailing slashes so the /content and
-      // /$value suffix checks are robust to e.g. "/content/" or "/content?select=id".
-      const queryIdx = target.indexOf('?');
-      if (queryIdx >= 0) {
+      let canonical: CanonicalBinaryTarget;
+      try {
+        canonical = canonicalizeBinaryTarget(target);
+      } catch (error) {
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must not include query parameters. Pass the drive item /content path or item metadata path without $select, $expand, or other query options.',
-              }),
+              text: JSON.stringify({ error: (error as Error).message }),
             },
           ],
           isError: true,
         };
       }
-      const pathPart = target.replace(/\/+$/, '');
-      // Mail/event attachments expose no pre-authenticated download URL in Graph; bytes come
-      // only from base64 contentBytes or the authenticated /$value endpoint (use download-bytes).
-      // Match only real Graph mail/calendar attachment resources so driveItem path addressing
-      // with folders named messages/events/attachments is not falsely rejected.
-      if (
-        /^(\/me|\/users\/[^/]+)\/messages\/[^/]+\/attachments\//.test(pathPart) ||
-        /^(\/me|\/users\/[^/]+)\/events\/[^/]+\/attachments\//.test(pathPart) ||
-        /^\/groups\/[^/]+\/messages\/[^/]+\/attachments\//.test(pathPart) ||
-        /^\/groups\/[^/]+\/events\/[^/]+\/attachments\//.test(pathPart)
-      ) {
-        if (getAttachmentMinting() && !pathPart.endsWith('/$value')) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  error:
-                    'Only the /$value byte endpoint can be minted a download URL: end target with /$value, e.g. /me/messages/{message-id}/attachments/{attachment-id}/$value. The attachment resource itself returns JSON with base64 contentBytes.',
-                }),
-              },
-            ],
-            isError: true,
-          };
-        }
-        const minted = await mintDownloadUrl(pathPart, accountParam, authManager, graphClient);
-        if (minted) return minted;
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'Mail and calendar event attachments do not expose a pre-authenticated download URL. Use download-bytes for small attachments.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
+      const { classification } = canonical;
+      const { pathPart } = classification;
       // Recording content endpoints return authenticated bytes, not a pre-authenticated URL.
-      if (
-        /^(\/me|\/users\/[^/]+)\/onlineMeetings\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(
-          pathPart
-        ) ||
-        /^\/communications\/calls\/[^/]+\/recordings\/[^/]+(?:\/content)?$/.test(pathPart)
-      ) {
+      // Upstream's ticket store (--enable-attachment-urls) can serve them.
+      if (classification.kind === 'meeting-recording') {
+        // The bare recording resource is JSON metadata, so only its /content byte endpoint
+        // may be minted (upstream #713).
         if (getAttachmentMinting() && !pathPart.endsWith('/content')) {
           return {
             content: [
@@ -2293,7 +2427,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
             isError: true,
           };
         }
-        const minted = await mintDownloadUrl(pathPart, accountParam, authManager);
+        const minted = await mintDownloadUrl(pathPart, accountParam, authManager, graphClient);
         if (minted) return minted;
         return {
           content: [
@@ -2308,60 +2442,13 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           isError: true,
         };
       }
-      // Other /$value byte endpoints (profile photo, Teams hosted content) likewise have no URL.
-      if (pathPart.endsWith('/$value')) {
-        const minted = await mintDownloadUrl(pathPart, accountParam, authManager);
-        if (minted) return minted;
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  '$value byte endpoints do not expose a pre-authenticated download URL. Use download-bytes to read these bytes.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
-      const isDriveItemById =
-        /^\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(pathPart) ||
-        /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/items\/[^/]+(?:\/content)?$/.test(
-          pathPart
-        ) ||
-        /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/items\/[^/]+(?:\/content)?$/.test(
-          pathPart
-        );
-      const isDriveItemByPath =
-        /^\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(pathPart) ||
-        /^\/(?:me|users\/[^/]+|groups\/[^/]+|sites\/[^/]+)\/drive\/root:\/.+:(?:\/content)?$/.test(
-          pathPart
-        ) ||
-        /^\/(?:groups\/[^/]+|sites\/[^/]+)\/drives\/[^/]+\/root:\/.+:(?:\/content)?$/.test(
-          pathPart
-        );
-      if (!isDriveItemById && !isDriveItemByPath) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'target must identify a driveItem in OneDrive or SharePoint. Use a drive item metadata path or /content path, such as /drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}, /sites/{site-id}/drive/items/{driveItem-id}, or /me/drive/root:/path/file.ext:/content. Other Graph byte resources must use download-bytes.',
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
       // The downloadUrl lives on driveItem metadata, not the /content sub-resource.
       // Only strip true Graph content endpoints: ID-addressed /items/{id}/content
       // and path-addressed root:/path/file:/content. A drive item can itself be
       // named "content", so a plain trailing /content is not enough.
-      const isDriveContentEndpoint =
-        /\/items\/[^/]+\/content$/.test(pathPart) || pathPart.endsWith(':/content');
-      const itemPath = isDriveContentEndpoint ? pathPart.slice(0, -'/content'.length) : pathPart;
+      const itemPath = classification.isDriveContentEndpoint
+        ? pathPart.slice(0, -'/content'.length)
+        : pathPart;
       try {
         const accountModeError = await checkAccountParamInBearerMode(accountParam, authManager);
         if (accountModeError) {
@@ -2375,6 +2462,58 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         if (authManager && !authManager.isOAuthModeEnabled() && !getRequestTokens()) {
           accountAccessToken = await authManager.getTokenForAccount(accountParam);
         }
+
+        if (classification.kind === 'brokerable') {
+          // Graph has no pre-authenticated URL for these bytes, so upstream's ticket store
+          // (--enable-attachment-urls) mints a single-use URL this server serves. The EKI
+          // broker that used to do this, with Range/resume, was retired in favour of it.
+          // The bare attachment resource is JSON carrying base64 contentBytes, so only its
+          // /$value byte endpoint may be minted (upstream #713).
+          if (getAttachmentMinting() && !pathPart.endsWith('/$value')) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error:
+                      'Only the /$value byte endpoint can be minted a download URL: end target with /$value, e.g. /me/messages/{message-id}/attachments/{attachment-id}/$value. The attachment resource itself returns JSON with base64 contentBytes.',
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          const minted = await mintDownloadUrl(pathPart, accountParam, authManager, graphClient);
+          if (minted) return minted;
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'This resource does not expose a pre-authenticated download URL (mail attachments and other /$value byte endpoints do not expose a pre-authenticated one from Graph), and this server is not running with --enable-attachment-urls. Use download-bytes to read these bytes.',
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (classification.kind !== 'drive-item') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'target must identify a driveItem in OneDrive or SharePoint. Use a drive item metadata path or /content path, such as /drives/{drive-id}/items/{driveItem-id}/content, /me/drive/items/{driveItem-id}, /sites/{site-id}/drive/items/{driveItem-id}, or /me/drive/root:/path/file.ext:/content. Other Graph byte resources must use download-bytes.',
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
         const response = await graphClient.graphRequest(itemPath, {
           accessToken: accountAccessToken,
           // We JSON.parse the metadata below, so force JSON - under --toon it'd be
@@ -2398,11 +2537,6 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
         }
         const downloadUrl = item?.['@microsoft.graph.downloadUrl'] as string | undefined;
         if (!downloadUrl) {
-          // The metadata path carries no downloadUrl, but the bytes are still
-          // reachable at its /content sub-resource -- which is what a ticket
-          // has to name, since that is what the redemption route will GET.
-          const minted = await mintDownloadUrl(`${itemPath}/content`, accountParam, authManager);
-          if (minted) return minted;
           return {
             content: [
               {
@@ -2444,6 +2578,17 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
 ];
 
+function buildUtilitySchema(
+  utility: UtilityTool,
+  ctx: UtilityToolContext
+): Record<string, z.ZodTypeAny> {
+  const schema = utility.buildSchema(ctx);
+  if (utility.mutatesState) {
+    schema.confirm = z.boolean().describe(CONFIRM_PARAM_DESCRIPTION).optional();
+  }
+  return schema;
+}
+
 function registerUtilityToolWithMcp(
   server: McpServer,
   utility: UtilityTool,
@@ -2452,14 +2597,82 @@ function registerUtilityToolWithMcp(
   server.tool(
     utility.name,
     utility.description,
-    utility.buildSchema(ctx),
+    buildUtilitySchema(utility, ctx),
     {
       title: utility.name,
-      readOnlyHint: utility.readOnlyHint ?? true,
+      readOnlyHint: !utility.mutatesState,
+      destructiveHint: utility.mutatesState,
       openWorldHint: utility.openWorldHint ?? true,
     },
-    async (params) => executeUtilityTool(utility, ctx, params)
+    async (params) => executeUtilityTool(utility, params, ctx, 'direct')
   );
+}
+
+async function executeUtilityTool(
+  utility: UtilityTool,
+  params: Record<string, unknown>,
+  ctx: UtilityToolContext,
+  route: ToolRoute
+): Promise<CallToolResult> {
+  // Merged at the v0.148.0 rebase: upstream grew its own executeUtilityTool for audit
+  // logging while this fork had one for Prometheus metrics, both wrapping the same
+  // utility.execute. This is the union, on EKI's signature because `route` must survive
+  // (a utility reached through execute-tool is not a direct call).
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+  const elapsed = () => (Date.now() - startedAt) / 1000;
+  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
+  if (isConfirmGateEnabled() && utility.mutatesState && params.confirm !== true) {
+    logger.warn(`Refusing destructive utility ${utility.name}: missing confirm: true`);
+    const response: CallToolResult = {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            error: 'confirmation_required',
+            tool: utility.name,
+            method: utility.method.toUpperCase(),
+            destructive: true,
+            message:
+              'This tool modifies user data or local state. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
+          }),
+        },
+      ],
+      isError: true,
+    };
+    recordToolCall(utility.name, route, 'blocked', elapsed());
+    return response;
+  }
+  try {
+    const response = await utility.execute(params, ctx);
+    recordToolCall(utility.name, route, response.isError ? 'error' : 'ok', elapsed());
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: response.isError ? 'error' : 'success',
+      duration_ms: Date.now() - startedAt,
+      ...graphResponseAuditFields(response),
+    });
+    return response;
+  } catch (error) {
+    const err = error as { name?: string };
+    recordToolCall(utility.name, route, 'error', elapsed());
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: 'error',
+      duration_ms: Date.now() - startedAt,
+      error_type: err?.name || 'Error',
+      ...thrownErrorAuditFields(error),
+    });
+    throw error;
+  }
 }
 
 // Every nested `body` field in the generated clients is an itemBody, so an @odata.type
@@ -2630,18 +2843,34 @@ function describeParamsForLog(params: Record<string, unknown>): string {
   }
 }
 
+/**
+ * Label each subrequest in a batch with the tool whose operation it matches, so the
+ * metric shows what batching is used for. Unmatched subrequests are counted as
+ * "unmatched" rather than by path, which would be unbounded cardinality and could carry
+ * resource ids.
+ */
+function recordBatchSubrequestsFor(body: unknown, blocked: BlockedOperationMatcher[]): void {
+  // recordBatchSubrequest already no-ops when metrics are off, but it does so AFTER this
+  // function has labelled every subrequest, so all of that work was thrown away in the
+  // default configuration (EnviroKinetics/ms365-mcp#54). Check before doing it.
+  if (!metricsEnabled()) return;
+  if (!body || typeof body !== 'object') return;
+  const requests = (body as { requests?: unknown }).requests;
+  if (!Array.isArray(requests)) return;
+  const all = allOperationMatchers();
+  for (const entry of requests) {
+    if (!entry || typeof entry !== 'object') continue;
+    const sub = entry as { method?: unknown; url?: unknown };
+    if (typeof sub.method !== 'string' || typeof sub.url !== 'string') continue;
+    const hit = findBlockedSubrequests({ requests: [entry] }, all.length > 0 ? all : blocked);
+    recordBatchSubrequest(hit[0]?.toolName ?? 'unmatched', sub.method);
+  }
+}
+
 // A quote inside an OData string literal is doubled, e.g. TimeZoneStandard='{TimeZoneStandard}'
 function escapeIfStringLiteral(template: string, names: string[], value: unknown): string {
   const quoted = names.some((n) => template.includes(`'{${n}}'`) || template.includes(`':${n}'`));
   return quoted ? String(value).replace(/'/g, "''") : String(value);
-}
-
-// A skipEncoding value goes in raw, so it must not bring path segments of its own. The one
-// that is a whole trailing segment (/sites/{site-id}:/{path}) is a path already, and there
-// it is the ":" ending path addressing that would start a new one.
-function rawValueAddsSegments(template: string, names: string[], value: string): boolean {
-  const isTail = names.some((n) => template.endsWith(`/{${n}}`) || template.endsWith(`/:${n}`));
-  return isTail ? value.includes(':') : value.includes('/');
 }
 
 function invalidPathParameter(message: string) {
@@ -2669,15 +2898,44 @@ function unalteredTargetError(target: string) {
   };
 }
 
+/**
+ * Inline-bytes fields a tool may carry, as exceptions to the refusal in executeGraphTool.
+ *
+ * create-custom-emoji: Graph takes a custom emoji's image only as base64 contentBytes on
+ * the create request; there is no upload session for it, so refusing the field makes the
+ * tool unusable. Allowed by owner decision (2026-10-09) for that tool's own top-level
+ * field only. It stays refused anywhere else in the body, and inside a graph-batch
+ * subrequest, where the guard runs against the outer graph-batch call.
+ */
+const ALLOWED_INLINE_BYTES: Record<string, ReadonlySet<string>> = {
+  'create-custom-emoji': new Set(['contentBytes']),
+};
+
+function isAllowedInlineBytes(toolName: string, fieldPath: string): boolean {
+  return ALLOWED_INLINE_BYTES[toolName]?.has(fieldPath) ?? false;
+}
+
 async function executeGraphTool(
   tool: (typeof api.endpoints)[0],
   config: EndpointConfig | undefined,
   graphClient: GraphClient,
   params: Record<string, unknown>,
   authManager?: AuthManager,
+  blockedOperations: BlockedOperationMatcher[] = [],
+  route: ToolRoute = 'direct',
   userFields?: string[]
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${describeParamsForLog(params)}`);
+  const startedAt = Date.now();
+  const elapsed = () => (Date.now() - startedAt) / 1000;
+  let metricsRecorded = false;
+  const finish = (result: CallToolResult, outcome?: ToolOutcome): CallToolResult => {
+    if (!metricsRecorded) {
+      recordToolCall(tool.alias, route, outcome ?? (result.isError ? 'error' : 'ok'), elapsed());
+      metricsRecorded = true;
+    }
+    return result;
+  };
 
   if (
     isConfirmGateEnabled() &&
@@ -2687,22 +2945,25 @@ async function executeGraphTool(
     logger.warn(
       `Refusing destructive tool ${tool.alias} (${tool.method.toUpperCase()}): missing confirm: true`
     );
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            error: 'confirmation_required',
-            tool: tool.alias,
-            method: tool.method.toUpperCase(),
-            destructive: true,
-            message:
-              'This tool modifies user data. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
-          }),
-        },
-      ],
-      isError: true,
-    };
+    return finish(
+      {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              error: 'confirmation_required',
+              tool: tool.alias,
+              method: tool.method.toUpperCase(),
+              destructive: true,
+              message:
+                'This tool modifies user data. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
+            }),
+          },
+        ],
+        isError: true,
+      },
+      'blocked'
+    );
   }
 
   const requestId = randomUUID();
@@ -2722,10 +2983,10 @@ async function executeGraphTool(
     // identity instead of silently returning the bearer user's data (discussion #467).
     const accountModeError = await checkAccountParamInBearerMode(accountParam, authManager);
     if (accountModeError) {
-      return {
+      return finish({
         content: [{ type: 'text', text: JSON.stringify({ error: accountModeError }) }],
         isError: true,
-      };
+      });
     }
 
     // Resolve account-specific token if `account` parameter is provided (or auto-resolve for single account).
@@ -2736,7 +2997,7 @@ async function executeGraphTool(
       try {
         accountAccessToken = await authManager.getTokenForAccount(accountParam);
       } catch (err) {
-        return {
+        return finish({
           content: [
             {
               type: 'text',
@@ -2744,7 +3005,7 @@ async function executeGraphTool(
             },
           ],
           isError: true,
-        };
+        });
       }
     }
 
@@ -2808,6 +3069,12 @@ async function executeGraphTool(
       // endpoints.json uses {message-id} but hack.ts extracts :messageId (camelCase) from the path.
       // LLMs may pass "message-id" (kebab) — we normalize so both forms work.
       const camelCaseParamName = paramName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+      const skipEncodingParamName = config?.skipEncoding?.find(
+        (configuredName) =>
+          configuredName === paramName ||
+          configuredName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()) ===
+            camelCaseParamName
+      );
 
       // Look up param definition using normalized name (without $) for OData params,
       // or camelCase equivalent for kebab-case path params
@@ -2850,23 +3117,34 @@ async function executeGraphTool(
         switch (paramDef.type) {
           case 'Path': {
             // Check if this parameter should skip URL encoding (for function-style API calls)
-            const shouldSkipEncoding = config?.skipEncoding?.includes(paramName) ?? false;
+            const shouldSkipEncoding = skipEncodingParamName !== undefined;
             // Use encodeURIComponent but preserve '=' which is valid in path segments (RFC 3986)
             // and commonly appears in Microsoft Graph base64-encoded resource IDs.
             // Without this, IDs like "AAMk...AAA=" become "AAMk...AAA%3D" causing 404 errors.
             // First we encode, then unencode. Crazy, check out https://github.com/Softeria/ms-365-mcp-server/issues/245
             const names = [paramName, camelCaseParamName];
-            if (shouldSkipEncoding && rawValueAddsSegments(tool.path, names, `${paramValue}`)) {
-              return invalidPathParameter(
-                `'${paramName}' cannot add path segments to this endpoint: no "/" in a value, and no ":" in a site path.`
-              );
-            }
-            const encodedValue = shouldSkipEncoding
-              ? (paramValue as string)
-              : encodeURIComponent(escapeIfStringLiteral(tool.path, names, paramValue)).replace(
-                  /%3D/g,
-                  '='
+            // EKI: a skipEncoding value is validated and encoded per route context by
+            // lib/unencoded-path-params (quoted literals have quotes doubled and are
+            // percent-encoded, so "/", "?", "#" and "'" stay data; relative paths and
+            // integers are refused unless plain). That is stricter than upstream's
+            // rawValueAddsSegments, which passes quoted literals raw and refuses a "/"
+            // in a search string, so it replaces that check rather than stacking on it.
+            let encodedValue: string;
+            if (shouldSkipEncoding) {
+              try {
+                encodedValue = prepareUnencodedPathParameter(
+                  config!.pathPattern,
+                  skipEncodingParamName,
+                  paramValue
                 );
+              } catch (error) {
+                return invalidPathParameter((error as Error).message);
+              }
+            } else {
+              encodedValue = encodeURIComponent(
+                escapeIfStringLiteral(tool.path, names, paramValue)
+              ).replace(/%3D/g, '=');
+            }
 
             // Replace both the original param name and the camelCase variant
             // to handle {message-id} (endpoints.json) and :messageId (generated client) formats
@@ -2923,9 +3201,22 @@ async function executeGraphTool(
       ) {
         // Fallback: path param not declared in tool.parameters (generated client omits them).
         // Replace placeholder directly so the URL is valid.
-        const encodedValue = encodeURIComponent(
-          escapeIfStringLiteral(tool.path, [paramName, camelCaseParamName], paramValue)
-        ).replace(/%3D/g, '=');
+        let encodedValue: string;
+        if (skipEncodingParamName) {
+          try {
+            encodedValue = prepareUnencodedPathParameter(
+              config!.pathPattern,
+              skipEncodingParamName,
+              paramValue
+            );
+          } catch (error) {
+            return invalidPathParameter((error as Error).message);
+          }
+        } else {
+          encodedValue = encodeURIComponent(
+            escapeIfStringLiteral(tool.path, [paramName, camelCaseParamName], paramValue)
+          ).replace(/%3D/g, '=');
+        }
         path = path
           .replace(`{${paramName}}`, () => encodedValue)
           .replace(`:${paramName}`, () => encodedValue)
@@ -2942,6 +3233,13 @@ async function executeGraphTool(
         // list — forward it as a query param rather than silently dropping it.
         queryParams[fixedParamName] = `${paramValue}`;
         logger.info(`OData param fallback: forwarded ${fixedParamName}=${paramValue}`);
+      } else if (tool.path === '/$batch' && paramName === 'requests') {
+        // The generated graph-batch Body schema is an empty passthrough object, so its
+        // shape cannot identify `requests` for the generic flattened-body fallback below.
+        // Preserve the advertised top-level calling convention, then let the normalized
+        // body guard inspect exactly what will be sent to Graph.
+        strayBodyFields.requests = paramValue;
+        logger.info("Body field fallback: merging top-level param 'requests' into graph-batch");
       } else if (
         bodyShape &&
         (hasOwn(bodyShape, paramName) || hasOwn(bodyShape, camelCaseParamName)) &&
@@ -3056,6 +3354,81 @@ async function executeGraphTool(
         };
       }
       body = rewritten.body;
+    }
+    // A blocked tool is unreachable by name, but graph-batch carries arbitrary
+    // method/url subrequests, so the operation itself has to be checked (#24). Inspect
+    // the normalized body, not params.body: passthrough clients may flatten requests to
+    // the top level, and the fallback above is what turns that shape into the payload
+    // Graph will actually receive.
+    // Inline file bytes are refused at any size, on the same normalized body and for the
+    // same reason as the batch check below: the payload is what the policy is about, not
+    // the tool name. add-mail-attachment carries contentBytes only for a fileAttachment;
+    // a referenceAttachment has none and stays allowed, which name-blocking could not
+    // express. Recursive, so a contentBytes inside a graph-batch subrequest is caught here
+    // too.
+    const inlineBytes = findInlineByteFields(body).filter(
+      (hit) => !isAllowedInlineBytes(tool.alias, hit.path)
+    );
+    if (inlineBytes.length > 0) {
+      recordBlockedOperation(tool.alias, route);
+      logger.warn(
+        `Refusing ${tool.alias}: request carries inline file bytes at ${describeInlineBytes(inlineBytes)}`
+      );
+      return finish(
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'inline_bytes_refused',
+                tool: tool.alias,
+                fields: inlineBytes.map((hit) => hit.path),
+                message:
+                  'This server refuses file bytes passed as a tool argument, at any size. ' +
+                  'Base64 in the transcript has caused corruption, truncation, and automated ' +
+                  'misuse misclassification. Create an upload session instead and PUT the ' +
+                  'bytes from disk: create-mail-attachment-upload-session for Outlook ' +
+                  'attachments, create-upload-session for drive files. A reference ' +
+                  'attachment (sourceUrl, no contentBytes) is also allowed.',
+              }),
+            },
+          ],
+          isError: true,
+        },
+        'blocked'
+      );
+    }
+
+    if (tool.path === '/$batch') {
+      // Count what batching is actually used for, so the question of whether graph-batch
+      // earns its keep can be answered from data rather than by grepping skill text.
+      recordBatchSubrequestsFor(body, blockedOperations);
+    }
+    if (blockedOperations.length > 0 && tool.path === '/$batch') {
+      const hits = findBlockedSubrequests(body, blockedOperations);
+      if (hits.length > 0) {
+        for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
+        logger.warn(
+          `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
+            hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
+        );
+        return finish(
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'blocked_operation',
+                  message: describeBlockedSubrequests(hits),
+                  blocked: hits,
+                }),
+              },
+            ],
+            isError: true,
+          },
+          'blocked'
+        );
+      }
     }
 
     const skiptokenError = normalizeSkiptokenQueryParam(queryParams, tool.alias);
@@ -3516,12 +3889,11 @@ async function executeGraphTool(
       ...graphResponseAuditFields(response),
       ...recipientAuditFields(body),
     });
-
-    return {
+    return finish({
       content,
       _meta: response._meta,
       isError: response.isError,
-    };
+    });
   } catch (error) {
     const err = error as { name?: string; code?: string | number; status?: string | number };
     logger.error(`Error in tool ${tool.alias}: ${(error as Error).message}`);
@@ -3538,7 +3910,7 @@ async function executeGraphTool(
       ...thrownErrorAuditFields(error),
       ...recipientAuditFields(body),
     });
-    return {
+    return finish({
       content: [
         {
           type: 'text',
@@ -3548,7 +3920,7 @@ async function executeGraphTool(
         },
       ],
       isError: true,
-    };
+    });
   }
 }
 
@@ -3571,6 +3943,8 @@ export interface GraphToolRegistrationOptions {
   allowedScopes?: string;
   httpMode?: boolean;
   userFields?: string;
+  /** EKI: regex of tool names refused everywhere (registration, execute-tool, graph-batch). */
+  blockedTools?: string;
 }
 
 /** What registerGraphTools passes to fit each tool into the connector definition budget. */
@@ -3596,6 +3970,7 @@ function registerGraphToolWithMcp(
 ): BudgetFitResult | undefined {
   const { authManager, multiAccount = false, accountNames = [] } = options;
   const userFields = parseUserFields(options.userFields);
+  const blockedOperations = buildBlockedOperationMatchers(options.blockedTools);
   const paramSchema: Record<string, z.ZodTypeAny> = {};
   const bodyParamNames: string[] = [];
   if (tool.parameters && tool.parameters.length > 0) {
@@ -3623,6 +3998,18 @@ function registerGraphToolWithMcp(
     if (!(pathParamName in paramSchema)) {
       paramSchema[pathParamName] = z.string().describe(describePathParam(pathParamName));
     }
+  }
+
+  for (const paramName of endpointConfig?.skipEncoding ?? []) {
+    const camelCaseParamName = paramName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+    const schemaName = paramSchema[paramName] !== undefined ? paramName : camelCaseParamName;
+    const schema = paramSchema[schemaName];
+    if (!schema) throw new Error(`Missing skipEncoding schema for ${tool.alias}: ${paramName}`);
+    paramSchema[schemaName] = refineUnencodedPathParameterSchema(
+      schema,
+      endpointConfig!.pathPattern,
+      paramName
+    );
   }
 
   // Endpoints with a configured acceptType get a synthetic, optional `Accept` param.
@@ -3755,7 +4142,16 @@ function registerGraphToolWithMcp(
       },
     },
     async (params: Record<string, unknown>) =>
-      executeGraphTool(tool, endpointConfig, graphClient, params, authManager, userFields)
+      executeGraphTool(
+        tool,
+        endpointConfig,
+        graphClient,
+        params,
+        authManager,
+        blockedOperations,
+        'direct',
+        userFields
+      )
   );
   return fit;
 }
@@ -3776,13 +4172,19 @@ export function registerGraphTools(
     allowedScopes: allowedScopesValue,
     httpMode = false,
     userFields: userFieldsValue,
+    blockedTools: blockedToolsPattern,
   } = options;
   const userFields = parseUserFields(userFieldsValue);
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+  // Operations the blocklist prohibits, so graph-batch cannot carry one as a
+  // subrequest (#24).
+  const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+  // Give those series a zero baseline now, so increase() can see the first refusal.
+  initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
       enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
-      logger.info(`Tool filtering enabled with pattern: ${enabledToolsPattern}`);
     } catch {
       logger.error(`Invalid tool filter regex pattern: ${enabledToolsPattern}. Ignoring filter.`);
     }
@@ -3840,6 +4242,14 @@ export function registerGraphTools(
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
       logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
+      skippedCount++;
+      continue;
+    }
+
+    // The blocklist wins over any enable pattern, including an explicit --eager-tools
+    // selection, so a blocked tool is unreachable by every path.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
+      logger.info(`Blocking tool ${tool.alias} - matches blocklist pattern`);
       skippedCount++;
       continue;
     }
@@ -3903,11 +4313,13 @@ export function registerGraphTools(
     authManager,
     multiAccount,
     accountNames,
+    httpMode,
     userFields,
   };
   for (const utility of UTILITY_TOOLS) {
     if (!isUtilityToolAvailable(utility, { readOnly, httpMode, scopeMode })) continue;
     if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
+    if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
     try {
       // Utility schemas are small and never pruned, but the connector charges for them
       // like any other tool, so they belong in the total. server.tool() wraps the raw
@@ -4025,7 +4437,8 @@ export function buildToolsRegistry(
   mode: boolean | ScopeMode,
   enabledToolsRegex?: RegExp,
   allowedScopesValue?: string,
-  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = []
+  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [],
+  blockedToolsRegex?: RegExp
 ): Map<string, { tool: (typeof api.endpoints)[0]; config: EndpointConfig | undefined }> {
   const toolsMap = new Map<
     string,
@@ -4048,6 +4461,12 @@ export function buildToolsRegistry(
     }
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+      continue;
+    }
+
+    // A blocked tool is unreachable by every path: direct registration, the
+    // discovery registry, search-tools, get-tool-schema and execute-tool.
+    if (blockedToolsRegex && blockedToolsRegex.test(tool.alias)) {
       continue;
     }
 
@@ -4193,10 +4612,32 @@ export function registerDiscoveryTools(
     allowedScopes: allowedScopesValue,
     httpMode = false,
     userFields: userFieldsValue,
+    blockedTools: blockedToolsPattern,
   } = options;
   const eagerNames = new Set(options.eagerTools ?? []);
   validateEagerToolNames([...eagerNames]);
   const userFields = parseUserFields(userFieldsValue);
+  const blockedToolsRegex = compileBlockedToolsRegex(blockedToolsPattern);
+  // execute-tool can dispatch graph-batch, so the same operation check applies here (#24).
+  const blockedOperations = buildBlockedOperationMatchers(blockedToolsPattern);
+  // Give those series a zero baseline now, so increase() can see the first refusal.
+  initBlockedOperationSeries([...new Set(blockedOperations.map((m) => m.toolName))]);
+
+  const registeredEagerNames = new Set<string>();
+  const invokeVia = (name: string): 'direct' | 'execute-tool' =>
+    registeredEagerNames.has(name) ? 'direct' : 'execute-tool';
+
+  const invocationFor = (name: string) =>
+    invokeVia(name) === 'direct'
+      ? {
+          via: 'direct' as const,
+          note: `${name} is registered as a named tool in this configuration; call it directly.`,
+        }
+      : {
+          via: 'execute-tool' as const,
+          note: `${name} is not registered as a named tool here, so it cannot be called directly. Invoke it through execute-tool.`,
+          example: { tool_name: name, parameters: {} as Record<string, unknown> },
+        };
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
     try {
@@ -4223,7 +4664,10 @@ export function registerDiscoveryTools(
     scopeMode,
     enabledToolsRegex,
     allowedScopesValue,
-    disabledByAllowedScopes
+    disabledByAllowedScopes,
+    // Keeps blocked tools out of the registry itself, which is what execute-tool,
+    // get-tool-schema and search-tools all read from.
+    blockedToolsRegex
   );
   if (disabledByAllowedScopes.length > 0) {
     logger.info(
@@ -4233,6 +4677,7 @@ export function registerDiscoveryTools(
   const utilityTools = UTILITY_TOOLS.filter((u) => {
     if (!isUtilityToolAvailable(u, { readOnly, httpMode, scopeMode })) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
+    if (blockedToolsRegex && blockedToolsRegex.test(u.name)) return false;
     return true;
   });
   // Eager selection changes presentation only. The discovery catalogue remains complete,
@@ -4242,6 +4687,7 @@ export function registerDiscoveryTools(
       const entry = toolsRegistry.get(name);
       if (entry) {
         registerGraphToolWithMcp(server, entry.tool, entry.config, graphClient, options);
+        registeredEagerNames.add(name);
         continue;
       }
       const utility = utilityTools.find((tool) => tool.name === name);
@@ -4251,8 +4697,10 @@ export function registerDiscoveryTools(
           authManager,
           multiAccount,
           accountNames,
+          httpMode,
           userFields,
         });
+        registeredEagerNames.add(name);
         continue;
       }
       if (options.onUnavailableEagerTool) options.onUnavailableEagerTool(name);
@@ -4272,6 +4720,7 @@ export function registerDiscoveryTools(
     authManager,
     multiAccount,
     accountNames,
+    httpMode,
     userFields,
   };
   const utilityByName = new Map(utilityTools.map((u) => [u.name, u]));
@@ -4292,6 +4741,7 @@ export function registerDiscoveryTools(
           config
         ),
         ...(config?.llmTip ? { llmTip: config.llmTip } : {}),
+        invoke_via: invokeVia(name),
       };
     }
     const utility = utilityByName.get(name);
@@ -4301,6 +4751,7 @@ export function registerDiscoveryTools(
         method: utility.method,
         path: utility.path,
         description: utility.description,
+        invoke_via: invokeVia(utility.name),
       };
     }
     return null;
@@ -4325,6 +4776,7 @@ export function registerDiscoveryTools(
       openWorldHint: true,
     },
     async ({ query, category, limit = 10 }) => {
+      recordDiscoveryStage('search_tools');
       const maxLimit = Math.min(Math.max(limit, 1), 50);
       const categoryDef = category ? TOOL_CATEGORIES[category] : undefined;
       const categoryFilter = (name: string) => !categoryDef || categoryDef.pattern.test(name);
@@ -4373,18 +4825,32 @@ export function registerDiscoveryTools(
       openWorldHint: false,
     },
     async ({ tool_name }) => {
+      recordDiscoveryStage('get_tool_schema');
       const entry = toolsRegistry.get(tool_name);
       if (entry) {
         const schema = describeToolSchema(entry.tool, entry.config, { multiAccount, accountNames });
         return {
-          content: [{ type: 'text', text: JSON.stringify(schema, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ...schema, invocation: invocationFor(tool_name) }, null, 2),
+            },
+          ],
         };
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
-        const schema = describeUtilityToolSchema(utility, utilityCtx);
+        const schema = describeUtilityToolSchema(
+          { ...utility, buildSchema: () => buildUtilitySchema(utility, utilityCtx) },
+          utilityCtx
+        );
         return {
-          content: [{ type: 'text', text: JSON.stringify(schema, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ ...schema, invocation: invocationFor(tool_name) }, null, 2),
+            },
+          ],
         };
       }
       return {
@@ -4421,6 +4887,7 @@ export function registerDiscoveryTools(
       openWorldHint: true,
     },
     async ({ tool_name, parameters = {} }) => {
+      recordDiscoveryStage('execute_tool');
       const toolData = toolsRegistry.get(tool_name);
       if (toolData) {
         return executeGraphTool(
@@ -4429,12 +4896,14 @@ export function registerDiscoveryTools(
           graphClient,
           parameters,
           authManager,
+          blockedOperations,
+          'execute_tool',
           userFields
         );
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
-        return executeUtilityTool(utility, utilityCtx, parameters);
+        return executeUtilityTool(utility, parameters, utilityCtx, 'execute_tool');
       }
       const deniedPolicy = deniedTools.get(tool_name);
       if (deniedPolicy) {
@@ -4459,3 +4928,6 @@ export function registerDiscoveryTools(
 
   // Layer 3 (list-accounts) is registered by registerAuthTools — no duplicate here.
 }
+
+// Re-exported so existing importers keep working after the helper moved to lib/.
+export { compileBlockedToolsRegex };

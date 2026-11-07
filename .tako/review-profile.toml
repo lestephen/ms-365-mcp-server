@@ -1,0 +1,35 @@
+schema = "tako.review-profile/v1"
+confirmed = true
+
+# EnviroKinetics house review profile, tier C: Services, infrastructure and shared runtime.
+# Shared prose is identical across all EKI repositories; the calibration below
+# is what varies by tier. See ADR-056.
+# Change the tier deliberately, not to quiet a review you disagree with.
+
+[default]
+criticality = "business_critical"
+recoverability = "easy"
+operator_profile = "technical_operators"
+edge_case_policy = "representative"
+evidence_bar = "targeted_tests"
+acceptable_residual_risk = "These are private repositories distributed only to employees. Internal commercial, customer and vendor detail is in scope by owner policy and is not a finding. Cosmetic or stylistic inconsistency may be deferred where it does not change meaning, obscure state, or mislead a reader. Work is reviewed by a competent human before it reaches a customer, and that review is part of the control, not a gap to be closed in the artifact."
+priorities = [
+  "Correctness of any number, quotation, or citation that a downstream artifact will repeat to a customer, a vendor, or an authority",
+  "Internal consistency between a document and whatever it routes the reader to",
+  "Honest scope: claims stated no more confidently than the cited evidence supports, and explicit about what could not be determined",
+]
+non_goals = [
+  "Re-raising the presence of internal commercial, customer, or vendor detail in a private employee-only repository; this is settled owner policy",
+  "Defence in depth against failure modes a human reviewer sees before the output reaches a customer",
+  "Subjective stylistic preference with no effect on correctness, safety, or a reader's understanding",
+  "Exhaustive enumeration of edge cases. Engineering work is designed to specified cases and credible upsets with margin carrying the residual, which is how the governing standards themselves are written",
+]
+failure_classes = [
+  "Destructive or bulk operations run without clear scope, confirmation, or a recovery path",
+  "A change silently leaves stored, indexed or synchronised state inconsistent",
+  "Credentials, tokens or customer data are logged, echoed, or persisted outside their intended store",
+]
+required_guards = [
+  "Destructive actions identify their target and consequences before execution",
+  "Secrets never enter logs, transcripts, command arguments, or tool output",
+]

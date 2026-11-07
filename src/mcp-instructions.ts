@@ -14,7 +14,7 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
     'When you need an organizational user or recipient address, resolve it with list-users (or another directory tool); do not invent SMTP addresses.',
     'Directory $search on collections such as /users or /groups requires ConsistencyLevel: eventual when the tool exposes that header.',
     'Teams chat and channel messages: prefer HTML contentType in the body; plain text is often mangled by Graph.',
-    'Files / binary content: for large drive/SharePoint file content, prefer get-download-url to resolve a pre-authenticated URL for out-of-band download. Use download-bytes for authenticated byte reads such as mail attachments, profile photos, Teams hosted content, and meeting recordings. In stdio mode (or HTTP with --http-local-file-tools), download-bytes-to-file writes those same authenticated bytes straight to a local absolute path instead of returning base64. For large mail attachments and meeting recordings that is one out-of-band option; get-download-url is the other, on a server running with --enable-attachment-urls. These tools take relative Microsoft Graph paths, not absolute URLs. For uploads, upload-file-content takes a base64 string body (Graph allows 250MB, but the whole string passes through the agent context and a truncated one is written without error); use create-upload-session for anything but small files.',
+    'Files / binary content: prefer get-download-url for large content. It returns native pre-authenticated URLs for drive/SharePoint files and, on a server running with --enable-attachment-urls, short-lived single-use URLs for mail and calendar attachments and meeting recordings; fetch each one once, straight to disk. Use download-bytes for small authenticated byte reads such as attachments, profile photos, Teams hosted content, and meeting recordings. In stdio mode (or HTTP with --http-local-file-tools), download-bytes-to-file writes authenticated bytes straight to a local absolute path and remains the out-of-band option for meeting recordings. These tools take relative Microsoft Graph paths, not absolute URLs. For uploads, prefer create-upload-session and send the bytes to the returned uploadUrl yourself, streaming them from disk; this server does not perform that PUT. To attach a file to a draft message or an event, use get-upload-url when available and PUT the file from disk to the URL it returns (e.g. curl -T), or create-mail-attachment-upload-session for a draft. upload-file-content instead carries the entire file as a base64 tool argument, and a truncated argument decodes to a truncated file with no error, so do not build that string regardless of how small the file looks.',
   ];
   if (opts.appMode)
     parts.push(
@@ -36,16 +36,36 @@ const DISCOVERY_MODE_INSTRUCTIONS_ADDON =
   'Skipping get-tool-schema is the leading cause of Graph 400 errors here. ' +
   'If search-tools returns no matches, retry with shorter or different keywords.';
 
+const HYBRID_MODE_INSTRUCTIONS_ADDON =
+  'HYBRID MODE ADD-ON: the most common Graph operations are already registered directly as named tools, ' +
+  'and you can see them in your tool list. Prefer a named tool whenever one fits and call it straight away, ' +
+  'with no search-tools or get-tool-schema step. ' +
+  'Everything else Graph offers is still reachable, it is just not loaded up front: ' +
+  'reach it via search-tools → get-tool-schema → execute-tool. ' +
+  'Workflow for those: (1) call search-tools with short natural-language keywords (BM25-ranked); ' +
+  '(2) call get-tool-schema(tool_name) to see the parameters, required fields, and enum values; ' +
+  '(3) call execute-tool with tool_name exactly as returned and parameters shaped per the schema. ' +
+  'Skipping get-tool-schema is the leading cause of Graph 400 errors here. ' +
+  'If search-tools returns no matches, retry with shorter or different keywords. ' +
+  'A tool missing from your tool list is not unavailable, so search for it before reporting that you cannot do something. ' +
+  'Do NOT call a tool by name unless it appears in your tool list: search-tools and get-tool-schema describe tools that are ' +
+  'not registered here, and calling one of those directly fails with "Tool not found". Both report the route per tool, as ' +
+  'invoke_via in search results and as an invocation block in get-tool-schema; follow it.';
+
 /**
- * Full MCP `initialize.instructions` string: general guidance for every mode, plus a discovery-only suffix when applicable.
+ * Full MCP `initialize.instructions` string: general guidance for every mode, plus
+ * a suffix describing how Graph is reached in this configuration.
+ *
+ * Three shapes: direct tools only (no suffix), discovery only, and hybrid (named
+ * tools plus the discovery triad). The hybrid suffix has to say both paths exist,
+ * otherwise the model routes everything through execute-tool and ignores the named
+ * tools sitting in front of it.
  */
 export function buildMcpServerInstructions(
   opts: McpInstructionsContext & { discovery: boolean; eagerTools?: string[] }
 ): string {
   const general = buildGeneralMcpInstructions(opts);
   if (!opts.discovery) return general;
-  const eager = opts.eagerTools?.length
-    ? ' HYBRID MODE: Tools published directly may be called immediately using their schemas. Use discovery for other operations; directly published tools also remain available through discovery.'
-    : '';
-  return `${general} ${DISCOVERY_MODE_INSTRUCTIONS_ADDON}${eager}`;
+  if (opts.eagerTools?.length) return `${general} ${HYBRID_MODE_INSTRUCTIONS_ADDON}`;
+  return `${general} ${DISCOVERY_MODE_INSTRUCTIONS_ADDON}`;
 }

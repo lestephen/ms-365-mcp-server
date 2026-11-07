@@ -325,7 +325,7 @@
     "toolName": "add-mail-attachment",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "The only path for attachments under 3MB. contentBytes must carry the complete base64 verbatim; a truncated argument fails with 400 UnableToDeserializePostBody. At 3MB and above use create-mail-attachment-upload-session, which rejects anything smaller. Body requires @odata.type: {\"@odata.type\": \"#microsoft.graph.fileAttachment\", \"name\": \"file.pdf\", \"contentBytes\": \"<base64>\"}."
+    "llmTip": "This server refuses a fileAttachment here at any size, because inline contentBytes puts the file in the transcript. To attach a file, use get-upload-url (PUT the bytes from disk to the returned URL) or create-mail-attachment-upload-session. Still usable for a referenceAttachment or itemAttachment, which carry no contentBytes; body requires @odata.type, e.g. {\"@odata.type\": \"#microsoft.graph.referenceAttachment\", ...}."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments/createUploadSession",
@@ -333,7 +333,7 @@
     "toolName": "create-mail-attachment-upload-session",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.ReadWrite"],
-    "llmTip": "For attachments 3MB to 150MB. Graph rejects smaller files with ErrorAttachmentSizeShouldNotBeLessThanMinimumSize, so under 3MB use add-mail-attachment instead. Body: { AttachmentItem: { attachmentType: 'file', name: 'report.pdf', size: 5000000 } }. Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself in ranges up to 4MB. This server does not perform the PUT."
+    "llmTip": "The supported path for ALL Outlook attachments, at any size. Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself in ranges up to 4MB, streaming from disk. This server does not perform the PUT. Body: { AttachmentItem: { attachmentType: 'file', name: 'report.pdf', size: 5000000 } }. Do NOT fall back to add-mail-attachment for small files: passing file bytes as a tool argument is prohibited here at any size, because the base64 lands in the transcript where it has caused corruption, truncation, and automated misuse misclassification. Microsoft documents a 3MB minimum for this session (ErrorAttachmentSizeShouldNotBeLessThanMinimumSize) but publishes no threshold in the API reference, and a 192KB attachment has been verified through this path end-to-end, so treat that minimum as unconfirmed rather than as a reason to inline."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments",
@@ -341,7 +341,7 @@
     "toolName": "list-mail-attachments",
     "presets": ["mail", "outlook", "personal"],
     "scopes": ["Mail.Read"],
-    "llmTip": "Lists attachments on a message: id, name, contentType, size, isInline. To download the bytes, call download-bytes with target=/me/messages/{message-id}/attachments/{attachment-id}/$value (the /$value suffix returns raw bytes; the bare attachment URL embeds contentBytes in JSON which can truncate large files)."
+    "llmTip": "Lists attachments on a message: id, name, contentType, size, isInline. For large attachments, call get-download-url with target=/me/messages/{message-id}/attachments/{attachment-id}/$value to use the configured out-of-band broker. For small inline reads, call download-bytes with the same target. The /$value suffix returns raw bytes; the bare attachment URL embeds contentBytes in JSON, which can truncate large files."
   },
   {
     "pathPattern": "/me/messages/{message-id}/attachments/{attachment-id}",
@@ -764,7 +764,7 @@
     "presets": ["files", "onedrive", "personal"],
     "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "appScopes": [["Files.ReadWrite.All"], ["Sites.ReadWrite.All"], ["Sites.Selected"]],
-    "llmTip": "Body is a base64-encoded string of the file bytes; the server decodes it before PUT. Graph accepts up to 250MB here, but the whole string travels as a tool argument and a truncated one decodes to a truncated file with no error, so use create-upload-session rather than emitting a large base64 string. For new files use path format: /items/root:/path/to/file.txt:/content. Overwrites existing files without warning."
+    "llmTip": "Body is a base64-encoded string of the file bytes; the server decodes it before PUT. Graph accepts up to 250MB here, but the whole string travels as a tool argument and a truncated one decodes to a truncated file with no error, so use create-upload-session rather than emitting a large base64 string. For a new file, driveItem-id is the item path only, root:/path/to/file.txt: with the trailing colon. Do not include /items/ or /content: the tool's own path already supplies both, so passing a full path yields /drives/{id}/items//items/...:/content/content. Overwrites existing files without warning."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/createUploadSession",
@@ -773,7 +773,7 @@
     "presets": ["files", "onedrive", "personal"],
     "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "appScopes": [["Sites.ReadWrite.All"], ["Sites.Selected"]],
-    "llmTip": "For large file uploads (no size limit, and no minimum unlike the Outlook attachment session). Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself. This server does not perform the PUT. For new files use path: /items/{parentId}:/{fileName}:/createUploadSession. Body (optional): { item: { '@microsoft.graph.conflictBehavior': 'rename' } }."
+    "llmTip": "For large file uploads (no size limit, and no minimum unlike the Outlook attachment session). Returns a pre-authenticated uploadUrl; the caller PUTs the bytes there itself. This server does not perform the PUT. For a new file, driveItem-id is the item path only, {parentId}:/{fileName}: with the trailing colon. Do not include /items/ or /createUploadSession: the tool's own path already supplies both. Body (optional): { item: { '@microsoft.graph.conflictBehavior': 'rename' } }. Pass item paths unencoded, including #, &, and spaces; the server encodes them. Do not percent-encode path names yourself (for example, use CO#1.pdf, not CO%231.pdf)."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}",
@@ -782,7 +782,7 @@
     "presets": ["files", "onedrive", "personal"],
     "scopes": [["Files.Read"], ["Sites.Selected"]],
     "appScopes": [["Files.Read.All"], ["Group.Read.All"], ["Sites.Read.All"], ["Sites.Selected"]],
-    "llmTip": "Gets metadata for a file or folder: name, size, lastModifiedDateTime, createdBy, webUrl, file (mimeType, hashes), folder (childCount), parentReference, and @microsoft.graph.downloadUrl. For large drive/SharePoint files, call get-download-url with target=/drives/{drive-id}/items/{driveItem-id}/content to fetch out-of-band with no Authorization header. For small files where base64 in the tool response is acceptable, call download-bytes with the same /content target."
+    "llmTip": "Gets metadata for a file or folder: name, size, lastModifiedDateTime, createdBy, webUrl, file (mimeType, hashes), folder (childCount), parentReference, and @microsoft.graph.downloadUrl. For large drive/SharePoint files, call get-download-url with target=/drives/{drive-id}/items/{driveItem-id}/content to fetch out-of-band with no Authorization header. For small files where base64 in the tool response is acceptable, call download-bytes with the same /content target. Pass item paths unencoded, including #, &, and spaces; the server encodes them. Do not percent-encode path names yourself (for example, use CO#1.pdf, not CO%231.pdf)."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}",
@@ -800,7 +800,7 @@
     "presets": ["files", "onedrive", "personal"],
     "scopes": [["Files.ReadWrite"], ["Sites.Selected"]],
     "appScopes": [["Files.ReadWrite.All"], ["Sites.ReadWrite.All"], ["Sites.Selected"]],
-    "llmTip": "Creates a new folder inside the specified drive item. Body must include name (string) and folder ({}) fields. Use @microsoft.graph.conflictBehavior to control behavior on name conflict: 'rename' (default), 'replace', or 'fail'."
+    "llmTip": "Creates a new folder inside the specified drive item. Body must include name (string) and folder ({}) fields. Use @microsoft.graph.conflictBehavior to control behavior on name conflict: 'rename' (default), 'replace', or 'fail'. Pass item paths unencoded, including #, &, and spaces; the server encodes them. Do not percent-encode path names yourself (for example, use CO#1.pdf, not CO%231.pdf)."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/invite",
@@ -964,7 +964,7 @@
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/range(address='{address}')/format/borders/{sideIndex}",
     "method": "patch",
     "toolName": "format-excel-range-border",
-    "presets": ["excel"],
+    "presets": ["excel", "personal"],
     "isExcelOp": true,
     "scopes": ["Files.ReadWrite"],
     "skipEncoding": ["address"],
@@ -2275,7 +2275,19 @@
     "toolName": "pin-chat-message",
     "presets": ["teams", "work"],
     "workScopes": ["ChatMessage.Send"],
-    "appScopes": ["Chat.ReadWrite.All"]
+    "appScopes": ["Chat.ReadWrite.All"],
+    "requestBodySchema": {
+      "type": "object",
+      "required": ["message@odata.bind"],
+      "additionalProperties": false,
+      "properties": {
+        "message@odata.bind": {
+          "type": "string",
+          "description": "Full Graph URL of the message to pin, for example https://graph.microsoft.com/v1.0/chats/{chat-id}/messages/{message-id}. Graph accepts only this @odata.bind reference here; a nested message object is rejected."
+        }
+      }
+    },
+    "llmTip": "Pin an existing message. The body is a single @odata.bind reference to the message, not a message object: { \"message@odata.bind\": \"https://graph.microsoft.com/v1.0/chats/{chat-id}/messages/{message-id}\" }."
   },
   {
     "pathPattern": "/chats/{chat-id}/pinnedMessages/{pinnedChatMessageInfo-id}",
@@ -2546,7 +2558,9 @@
         },
         "resourceMetadata": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Optional list of retrievable metadata fields to return per hit (e.g. ['title', 'author']). By default no metadata is returned."
         },
         "maximumNumberOfResults": {

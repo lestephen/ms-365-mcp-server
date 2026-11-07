@@ -289,6 +289,23 @@ function toBlobResponse(data: unknown, blob: { fileName?: string }): McpResponse
   };
 }
 
+export interface GraphBufferResult extends GraphDownloadResult {
+  bytes: Buffer;
+  /** Bytes retained by the backing allocation, which can exceed logical contentLength. */
+  allocatedBytes: number;
+}
+
+export class GraphDownloadSizeLimitError extends Error {
+  constructor(
+    message: string,
+    readonly maximumBytes: number,
+    readonly actualBytes?: number
+  ) {
+    super(message);
+    this.name = 'GraphDownloadSizeLimitError';
+  }
+}
+
 class GraphClient {
   private authManager: AuthManager;
   private secrets: AppSecrets;
@@ -570,6 +587,138 @@ class GraphClient {
       response.status,
       graphErrorCode
     );
+  }
+
+  /**
+   * Read Graph byte content into memory without allowing the response to exceed a caller-owned
+   * bound. The Content-Length check rejects known oversized payloads before reading the body;
+   * the streaming count is the authoritative backstop for missing or dishonest headers.
+   */
+  async downloadToBuffer(
+    endpoint: string,
+    maximumBytes: number,
+    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion'> = {}
+  ): Promise<GraphBufferResult> {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
+      throw new Error('Maximum download size must be a positive integer');
+    }
+
+    const contextTokens = getRequestTokens();
+    const accessToken =
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    if (!accessToken) {
+      throw new Error('No access token available');
+    }
+
+    try {
+      const response = await this.performRequest(endpoint, accessToken, options);
+      if (response.status === 403) {
+        const errorText = await response.text();
+        if (errorText.includes('scope') || errorText.includes('permission')) {
+          throw new Error(
+            `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
+          );
+        }
+        throw new Error(
+          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
+        );
+      }
+      if (!response.ok) {
+        throw new Error(
+          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+        );
+      }
+
+      const contentLengthHeader = response.headers.get('content-length');
+      const contentEncoding = response.headers.get('content-encoding')?.trim();
+      let declaredLength: number | undefined;
+      // Node fetch transparently decodes compressed response bodies but preserves the
+      // wire Content-Length. It is therefore only a usable allocation bound for an
+      // identity response.
+      if (
+        (!contentEncoding || contentEncoding.toLowerCase() === 'identity') &&
+        contentLengthHeader !== null &&
+        contentLengthHeader.trim() !== ''
+      ) {
+        const parsedLength = Number(contentLengthHeader);
+        if (Number.isFinite(parsedLength) && parsedLength > maximumBytes) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new GraphDownloadSizeLimitError(
+            `Microsoft Graph content is ${parsedLength} bytes, exceeding the configured limit of ${maximumBytes} bytes.`,
+            maximumBytes,
+            parsedLength
+          );
+        }
+        if (Number.isSafeInteger(parsedLength) && parsedLength >= 0) declaredLength = parsedLength;
+      }
+      if (!response.body) {
+        throw new Error('Microsoft Graph returned an empty response body');
+      }
+
+      const reader = response.body.getReader();
+      // One unpooled backing allocation avoids both the chunk array and Buffer.concat's
+      // second full-size allocation. With no trustworthy Content-Length, allocate the
+      // caller's already-reserved maximum. The returned view retains this allocation,
+      // so allocatedBytes reports the real memory a caller retains while it holds the bytes.
+      const allocatedBytes = declaredLength ?? maximumBytes;
+      const destination = Buffer.allocUnsafeSlow(allocatedBytes);
+      let contentLength = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const nextLength = contentLength + value.byteLength;
+          if (nextLength > maximumBytes) {
+            await reader.cancel().catch(() => undefined);
+            throw new GraphDownloadSizeLimitError(
+              `Microsoft Graph content exceeded the configured limit of ${maximumBytes} bytes while streaming.`,
+              maximumBytes,
+              nextLength
+            );
+          }
+          if (nextLength > allocatedBytes) {
+            await reader.cancel().catch(() => undefined);
+            throw new Error(
+              `Microsoft Graph response exceeded its declared Content-Length of ${allocatedBytes} bytes while streaming (${nextLength} bytes received).`
+            );
+          }
+          destination.set(value, contentLength);
+          contentLength = nextLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      // Right-size before returning. `destination` is the caller's whole maximum whenever
+      // Content-Length was absent or untrustworthy, and a subarray RETAINS its backing
+      // allocation, so handing that view out would retain the maximum for every
+      // download regardless of the file's real size (EnviroKinetics/ms365-mcp#61). Node's
+      // fetch sends `accept-encoding: gzip, deflate` by default, so Graph responses are
+      // typically compressed and declaredLength is undefined on essentially every
+      // download - this is the normal path, not an edge case.
+      //
+      // Copy rather than re-account: charging bytes.length while still holding the
+      // oversized allocation would turn a refusal into an OOM.
+      let bytes = destination.subarray(0, contentLength);
+      let retainedBytes = allocatedBytes;
+      if (contentLength < allocatedBytes) {
+        const exact = Buffer.allocUnsafeSlow(contentLength);
+        destination.copy(exact, 0, 0, contentLength);
+        bytes = exact;
+        retainedBytes = contentLength;
+      }
+
+      return {
+        bytes,
+        allocatedBytes: retainedBytes,
+        contentType: response.headers.get('content-type') || 'application/octet-stream',
+        contentLength,
+        httpStatus: response.status,
+      };
+    } catch (error) {
+      logger.error('Microsoft Graph bounded download failed:', error);
+      throw error;
+    }
   }
 
   private async performRequest(

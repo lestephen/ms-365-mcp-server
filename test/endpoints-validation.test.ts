@@ -192,6 +192,23 @@ describe('endpoints.json validation', () => {
     expect(updateTask?.llmTip).toContain('delete-todo-checklist-item');
   });
 
+  it('documents raw item paths so callers do not double-encode file names', () => {
+    for (const name of ['create-upload-session', 'get-drive-item', 'create-onedrive-folder']) {
+      const endpoint = endpoints.find((e) => e.toolName === name);
+      expect(endpoint?.llmTip, name).toContain('Pass item paths unencoded');
+      expect(endpoint?.llmTip, name).toContain('CO#1.pdf, not CO%231.pdf');
+    }
+  });
+
+  it('should route large mail attachments to the out-of-band broker', () => {
+    const endpoint = endpoints.find((e) => e.toolName === 'list-mail-attachments');
+
+    expect(endpoint, 'list-mail-attachments should exist').toBeDefined();
+    expect(endpoint?.llmTip).toContain('For large attachments, call get-download-url');
+    expect(endpoint?.llmTip).toContain('/$value');
+    expect(endpoint?.llmTip).toContain('For small inline reads, call download-bytes');
+  });
+
   it('should document the @mention shape on the Teams send/reply tools', () => {
     const mentionTools = [
       'send-chat-message',

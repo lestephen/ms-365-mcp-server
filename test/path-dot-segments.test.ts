@@ -92,6 +92,29 @@ describe('Path parameters cannot leave the endpoint (GHSA-42wc-j69p-jppq)', () =
     expect(graphRequest).not.toHaveBeenCalled();
   }
 
+  // EKI fork: a quoted-literal skipEncoding value (the Excel address) is not refused but
+  // encoded by lib/unencoded-path-params: quotes doubled, then percent-encoded, so "/",
+  // "?", "#", "\\" and "'" stay data inside the literal and the request cannot leave the
+  // endpoint. Upstream passes the value raw and refuses these instead.
+  const RANGE_PREFIX = "/drives/d/items/i/workbook/worksheets/w/range(address='";
+  async function expectContainedInLiteral(address: string) {
+    const result = await getToolHandler('get-excel-range')({
+      driveId: 'd',
+      driveItemId: 'i',
+      workbookWorksheetId: 'w',
+      address,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(graphRequest).toHaveBeenCalledTimes(1);
+    const sent = graphRequest.mock.calls[0][0] as string;
+    expect(sent.startsWith(RANGE_PREFIX)).toBe(true);
+    expect(sent.endsWith("')")).toBe(true);
+    const literal = sent.slice(RANGE_PREFIX.length, -2);
+    expect(literal).toBe(encodeURIComponent(address.replace(/'/g, "''")).replace(/'/g, '%27'));
+    expect(literal).not.toMatch(/[/?#\\']/);
+    expect(isUnalteredGraphPath(sent)).toBe(true);
+  }
+
   it.each(['..', '.'])('refuses %j as an id', async (eventId) => {
     await expectRefused('delete-specific-calendar-event', { calendarId: 'cal', eventId });
   });
@@ -106,24 +129,14 @@ describe('Path parameters cannot leave the endpoint (GHSA-42wc-j69p-jppq)', () =
     'A1?$expand=x',
     'A1/%2e%2e/x',
     'A1\\..\\x',
-  ])('refuses %j in a skipEncoding parameter', async (address) => {
-    await expectRefused('get-excel-range', {
-      driveId: 'd',
-      driveItemId: 'i',
-      workbookWorksheetId: 'w',
-      address,
-    });
+  ])('keeps %j inside the quoted skipEncoding literal', async (address) => {
+    await expectContainedInLiteral(address);
   });
 
   it.each(["A1')/worksheet/tables('T", 'A1/x'])(
-    'refuses %j, a skipEncoding value adding segments without dots',
+    'keeps %j, a value that would add segments without dots, inside the literal',
     async (address) => {
-      await expectRefused('get-excel-range', {
-        driveId: 'd',
-        driveItemId: 'i',
-        workbookWorksheetId: 'w',
-        address,
-      });
+      await expectContainedInLiteral(address);
     }
   );
 
@@ -179,14 +192,18 @@ describe('Path parameters cannot leave the endpoint (GHSA-42wc-j69p-jppq)', () =
     expect(graphRequest.mock.calls[0][0]).toBe('/me/calendars/a.b/events/..x');
   });
 
-  it('still sends a raw address with a space, quotes and non-ASCII', async () => {
+  it('sends an Excel address with a space, quotes and non-ASCII as an escaped literal', async () => {
+    // EKI fork: the caller passes the address as Excel writes it; the server doubles the
+    // quotes for OData, where upstream expects the caller to have doubled them already.
     await getToolHandler('get-excel-range')({
       driveId: 'd',
       driveItemId: 'i',
       workbookWorksheetId: 'w',
-      address: "''Årsrapport 2026''!A1:B2",
+      address: "'Årsrapport 2026'!A1:B2",
     });
-    expect(graphRequest.mock.calls[0][0]).toContain("range(address='''Årsrapport 2026''!A1:B2')");
+    expect(graphRequest.mock.calls[0][0]).toContain(
+      "range(address='%27%27%C3%85rsrapport%202026%27%27!A1%3AB2')"
+    );
   });
 
   it('takes a non-string value for a quoted parameter', async () => {

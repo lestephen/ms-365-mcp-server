@@ -353,7 +353,7 @@ describe('read-mail-text tool', () => {
 
   it('is registered as a read-only utility', () => {
     expect(tool).toBeDefined();
-    expect(tool.readOnlyHint).toBe(true);
+    expect(tool.mutatesState).toBe(false);
   });
 
   it('messageIds: one $batch asking for text bodies; unknown ids reported per message', async () => {

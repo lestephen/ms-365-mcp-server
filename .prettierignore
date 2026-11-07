@@ -1,0 +1,7 @@
+node_modules
+dist
+coverage
+
+# Local working / tooling output directories (not source).
+scratch
+.tako

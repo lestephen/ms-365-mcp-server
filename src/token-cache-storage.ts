@@ -49,6 +49,20 @@ const CACHE_KEY_ACCOUNT = 'cache-key';
 const TOKEN_CACHE_FILE = '.token-cache.json';
 const SELECTED_ACCOUNT_FILE = '.selected-account.json';
 const CACHE_KEY_FILE = '.cache-key';
+const CACHE_KEY_LOCK_FILE = '.cache-key.lock';
+const CACHE_KEY_LOCK_POLL_MS = 25;
+const CACHE_KEY_LOCK_TIMEOUT_MS = 30_000;
+const DEFAULT_CACHE_KEY_LOCK_STALE_MS = 10_000;
+const DEFAULT_CACHE_KEY_LOCK_HEARTBEAT_MS = 2_000;
+
+let cacheKeyLockStaleMs = DEFAULT_CACHE_KEY_LOCK_STALE_MS;
+let cacheKeyLockHeartbeatMs = DEFAULT_CACHE_KEY_LOCK_HEARTBEAT_MS;
+
+interface CacheKeyLockOwner {
+  version: 2;
+  ownerId: string;
+  createdAt: number;
+}
 
 // Where the cache used to live: inside the installed package. Kept only so an upgrade
 // can move the file out instead of silently forcing a fresh device-code login.
@@ -188,6 +202,11 @@ export function getSelectedAccountPath(): string {
 /** Key file sits beside the token cache, so a custom cache path takes it along. */
 export function getCacheKeyPath(): string {
   return path.join(path.dirname(getTokenCachePath()), CACHE_KEY_FILE);
+}
+
+/** The lock protects the global keychain account, so it must not follow a custom cache. */
+export function getCacheKeyLockPath(): string {
+  return path.join(getConfigDir(), CACHE_KEY_LOCK_FILE);
 }
 
 let legacyPathsMigrated = false;
@@ -374,6 +393,13 @@ export function resetCacheKeyForTests(): void {
   loggedKeytarOptOut = false;
   warnedKeytarValue = false;
   mintedKeys.length = 0;
+  cacheKeyLockStaleMs = DEFAULT_CACHE_KEY_LOCK_STALE_MS;
+  cacheKeyLockHeartbeatMs = DEFAULT_CACHE_KEY_LOCK_HEARTBEAT_MS;
+}
+
+export function setCacheKeyLockTimingsForTests(staleMs: number, heartbeatMs: number): void {
+  cacheKeyLockStaleMs = staleMs;
+  cacheKeyLockHeartbeatMs = heartbeatMs;
 }
 
 async function clearLegacyKeytarEntry(key: TokenCacheStorageKey): Promise<void> {
@@ -501,26 +527,135 @@ async function resolveEncryptionKey(): Promise<Buffer> {
   const preferred = state.keys[state.fileKeyIndex ?? 0];
   if (preferred) return preferred;
 
-  // Minting is only ever right when there is no key to lose. A key file that is there but
-  // will not read is not that: persistCacheKey would collide with it, fail the read-back
-  // and replace it, and any sibling cache written under it - the one this save is not even
-  // looking at - becomes unopenable for good. assertOverwritable cannot catch this,
-  // because a save whose own cache is absent never consults the key at all. Refusing
-  // costs one failed save that recovers as soon as the file is readable again.
-  if (state.fileKeyUnreadable) {
-    throw new Error(
-      `Refusing to replace the auth cache key at ${getCacheKeyPath()}: it exists but ` +
-        'could not be read this run, and minting over it would strand every cache ' +
-        'encrypted under it. Fix the permissions on that file, or delete it to start over.'
-    );
-  }
+  const minted = await withCacheKeyElectionLock(async () => {
+    // The state above was read before the lock. A sibling may have elected a key while
+    // this process waited, so the winner must be established from a fresh read inside
+    // the critical section. Keychain APIs offer replace, not compare-and-set; without
+    // this lock two processes can each read back their own setPassword result and later
+    // leave a cache encrypted under the key that was replaced.
+    const current = await readCacheKeys();
+    const elected = current.keys[current.fileKeyIndex ?? 0];
+    if (elected) {
+      logger.info('Another process elected the auth cache key first, adopting it');
+      return elected;
+    }
 
-  const minted = await persistCacheKey(generateCacheKey(), state.canUseKeychain);
-  if (!mintedKeys.some((k) => k.equals(minted))) mintedKeys.push(minted);
+    // Minting is only ever right when there is no key to lose. A key file that is there but
+    // will not read is not that: persistCacheKey would collide with it, fail the read-back
+    // and replace it, and any sibling cache written under it - the one this save is not even
+    // looking at - becomes unopenable for good. assertOverwritable cannot catch this,
+    // because a save whose own cache is absent never consults the key at all. Refusing
+    // costs one failed save that recovers as soon as the file is readable again.
+    //
+    // Read from `current`, not the pre-lock `state`, for the same reason the election is:
+    // the file may have become readable, or unreadable, while this process waited.
+    if (current.fileKeyUnreadable) {
+      throw new Error(
+        `Refusing to replace the auth cache key at ${getCacheKeyPath()}: it exists but ` +
+          'could not be read this run, and minting over it would strand every cache ' +
+          'encrypted under it. Fix the permissions on that file, or delete it to start over.'
+      );
+    }
+
+    const fresh = await persistCacheKey(generateCacheKey(), current.canUseKeychain);
+    // Only a key this process actually minted belongs here. An adopted key is pre-existing
+    // as far as the mintedKeys filter further down this file is concerned, and recording
+    // it would make a sibling's key look like ours.
+    if (!mintedKeys.some((k) => k.equals(fresh))) mintedKeys.push(fresh);
+    return fresh;
+  });
   // Share it with any later load, which may be looking at a cache this key just wrote.
   state.keys.unshift(minted);
   if (state.fileKeyIndex !== undefined) state.fileKeyIndex += 1;
   return minted;
+}
+
+/**
+ * Serialize the one-time key election across server processes sharing a config dir.
+ *
+ * The keychain has no atomic create operation, so setPassword followed by getPassword
+ * cannot elect a winner. A small file lock supplies the missing compare-and-set around
+ * the fresh read and mint. Normal reads and writes never take this lock once a key exists.
+ */
+async function withCacheKeyElectionLock<T>(operation: () => Promise<T>): Promise<T> {
+  const lockPath = getCacheKeyLockPath();
+  const owner: CacheKeyLockOwner = {
+    version: 2,
+    ownerId: randomBytes(16).toString('hex'),
+    createdAt: Date.now(),
+  };
+  const serializedOwner = JSON.stringify(owner);
+  const deadline = Date.now() + CACHE_KEY_LOCK_TIMEOUT_MS;
+
+  ensureParentDir(lockPath);
+  while (true) {
+    try {
+      fs.writeFileSync(lockPath, serializedOwner, { flag: 'wx', mode: 0o600 });
+      break;
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'EEXIST') throw error;
+      if (removeOrphanedCacheKeyLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for auth cache key election lock at ${lockPath}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, CACHE_KEY_LOCK_POLL_MS));
+    }
+  }
+
+  const heartbeat = setInterval(() => {
+    try {
+      // Refresh only while the owner token is still ours. This lease, rather than PID
+      // visibility, works across containers that share a volume but not a PID namespace.
+      if (readFileSync(lockPath, 'utf8') === serializedOwner) {
+        const now = new Date();
+        fs.utimesSync(lockPath, now, now);
+      }
+    } catch {
+      // A waiter recovered or replaced the lease. The exact-token cleanup below will
+      // leave its replacement alone when this operation eventually finishes.
+    }
+  }, cacheKeyLockHeartbeatMs);
+  heartbeat.unref();
+
+  try {
+    return await operation();
+  } finally {
+    clearInterval(heartbeat);
+    // Only remove the lock if it is still ours. Never remove a replacement lock that
+    // another process created after recovering this owner.
+    try {
+      if (readFileSync(lockPath, 'utf8') === serializedOwner) fs.unlinkSync(lockPath);
+    } catch {
+      // Already recovered or removed. There is no lock left for this owner to release.
+    }
+  }
+}
+
+/** Recover an expired lease without relying on namespace-local PID visibility. */
+function removeOrphanedCacheKeyLock(lockPath: string): boolean {
+  let serializedOwner: string;
+  let observedMtimeMs: number;
+  try {
+    const stats = fs.statSync(lockPath);
+    observedMtimeMs = stats.mtimeMs;
+    if (Date.now() - observedMtimeMs < cacheKeyLockStaleMs) return false;
+    serializedOwner = readFileSync(lockPath, 'utf8');
+  } catch {
+    return false;
+  }
+
+  try {
+    // Recheck the owner immediately before removal so a recovered replacement is not
+    // mistaken for the stale file observed above.
+    const currentStats = fs.statSync(lockPath);
+    if (currentStats.mtimeMs !== observedMtimeMs) return false;
+    if (readFileSync(lockPath, 'utf8') !== serializedOwner) return false;
+    fs.unlinkSync(lockPath);
+    logger.warn(`Recovered expired auth cache key election lease at ${lockPath}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

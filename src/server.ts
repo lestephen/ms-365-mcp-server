@@ -13,9 +13,9 @@ import { isIP, isIPv6 } from 'node:net';
 import { createAttachmentHandler, createAttachmentUploadHandler } from './attachment-route.js';
 import { registerAuthTools } from './auth-tools.js';
 import AuthManager, {
-  buildScopesFromEndpoints,
   parseAllowedScopes,
   resolveAuthScopes,
+  resolveAuthorizeScopes,
 } from './auth.js';
 import type { CommandOptions } from './cli.ts';
 import { getCloudEndpoints } from './cloud-config.js';
@@ -38,6 +38,9 @@ import {
   toOAuthErrorResponse,
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
+import { withToolBlocklist } from './lib/tool-blocklist.js';
+import { withMetricsObserver, seedAdvertisedSurface } from './lib/metrics-transport.js';
+import { contentType, enableMetrics, metricsEnabled, metricsText } from './metrics.js';
 import logger, { enableConsoleLogging } from './logger.js';
 import { buildMcpServerInstructions } from './mcp-instructions.js';
 import { installToolSchemaRefNormalization } from './normalize-tool-schema.js';
@@ -110,6 +113,15 @@ export function parseHttpOption(httpOption: string | boolean): {
   // No colon, treat as port only
   const port = parseInt(httpString) || 3000;
   return { host: undefined, port };
+}
+
+export function resolvePublicBaseUrl(options: CommandOptions): string | undefined {
+  const raw =
+    options.publicUrl ||
+    process.env.MS365_MCP_PUBLIC_URL ||
+    options.baseUrl ||
+    process.env.MS365_MCP_BASE_URL;
+  return raw ? new URL(raw).href.replace(/\/$/, '') : undefined;
 }
 
 /**
@@ -337,11 +349,18 @@ class MicrosoftGraphServer {
       }
     );
 
+    // Single registration boundary for the blocklist. Wrapping the server here means
+    // a blocked name cannot be registered by ANY registrar (auth, Graph, utility, the
+    // discovery triad), rather than each one having to remember to filter. The
+    // registry inside registerDiscoveryTools still gets the pattern separately,
+    // because execute-tool/get-tool-schema/search-tools read that, not a registration.
+    const registrar = withToolBlocklist(server, this.options.blockedTools);
+
     // App mode has no accounts to log in to, list or switch between
     const shouldRegisterAuthTools =
       !this.options.appMode && (!this.options.http || this.options.enableAuthTools);
     if (shouldRegisterAuthTools) {
-      registerAuthTools(server, this.authManager);
+      registerAuthTools(registrar, this.authManager);
     }
 
     const registrationOptions = {
@@ -357,18 +376,26 @@ class MicrosoftGraphServer {
       allowedScopes: this.options.allowedScopes,
       httpMode: this.hidesStdioOnlyTools(),
       userFields: this.options.userFields,
+      blockedTools: this.options.blockedTools,
     };
 
     if (this.options.discovery) {
-      registerDiscoveryTools(server, this.graphClient!, registrationOptions);
+      registerDiscoveryTools(registrar, this.graphClient!, registrationOptions);
     } else {
-      registerGraphTools(server, this.graphClient!, registrationOptions);
+      registerGraphTools(registrar, this.graphClient!, registrationOptions);
     }
 
     // Strict JSON-Schema backends (e.g. Kimi/Moonshot) reject a tools/list whose
     // inputSchema $refs aren't anchored under #/$defs/. The SDK emits root-relative
     // refs for recursive/shared Microsoft Graph schemas and hard-codes its conversion
     // options, so normalize the emitted schemas here. See issue #571.
+    //
+    // This replaced our own strict-tool-schemas wrapper: upstream MOVES each
+    // referenced sub-schema into $defs where ours copied it, which is ~17k tokens
+    // smaller over 330 tools and is maintained upstream rather than by us. Must run
+    // after registration: it decorates the SDK's tools/list handler, which does not
+    // exist until the first tool is registered. Exactly once, because it wraps
+    // whatever handler is already installed, including itself.
     installToolSchemaRefNormalization(server);
 
     return server;
@@ -467,8 +494,58 @@ class MicrosoftGraphServer {
     }
 
     if (this.options.discovery) {
-      logger.info('Discovery mode enabled (experimental) - registering discovery tool only');
+      logger.info(
+        this.options.eagerTools?.length
+          ? `Hybrid mode enabled - discovery plus eager tools: ${this.options.eagerTools.join(', ')}`
+          : 'Discovery mode enabled - registering discovery tools only'
+      );
     }
+
+    // Batch subrequests are guarded by endpoint operation. Binary helpers still
+    // accept arbitrary Graph read paths beyond the name-based blocklist.
+    if (this.options.blockedTools) {
+      const passthrough = ['download-bytes', 'get-download-url'].filter(
+        (name) => !new RegExp(this.options.blockedTools!, 'i').test(name)
+      );
+      if (passthrough.length > 0) {
+        logger.warn(
+          `--blocked-tools cannot restrict arbitrary Graph read paths through: ` +
+            `${passthrough.join(', ')}. Block these tools too when read restrictions must hold.`
+        );
+      }
+    }
+  }
+
+  /**
+   * Serve Prometheus metrics on a dedicated port.
+   *
+   * Deliberately a separate listener rather than a route on the MCP app: the MCP app is
+   * published through a public IngressRoute, and operational detail should not be one
+   * routing mistake away from the internet. Expose this port on the Service only and
+   * scrape it in-cluster.
+   */
+  private startMetricsListener(): void {
+    if (!this.options.metrics) return;
+
+    const port =
+      typeof this.options.metrics === 'string' ? parseInt(this.options.metrics, 10) || 9464 : 9464;
+
+    enableMetrics();
+    const metricsApp = express();
+    metricsApp.get('/metrics', async (_req: Request, res: Response) => {
+      try {
+        res.set('Content-Type', contentType());
+        res.end(await metricsText());
+      } catch (error) {
+        logger.error(`Failed to render metrics: ${(error as Error).message}`);
+        res.status(500).end();
+      }
+    });
+    metricsApp.get('/healthz', (_req: Request, res: Response) => res.status(200).send('ok'));
+
+    metricsApp.listen(port, () => {
+      logger.info(`Metrics listening on :${port}/metrics (not exposed through the MCP ingress)`);
+    });
   }
 
   async start(): Promise<void> {
@@ -477,6 +554,25 @@ class MicrosoftGraphServer {
     }
 
     logger.info('Microsoft 365 MCP Server starting...');
+
+    this.startMetricsListener();
+
+    // Measure the advertised surface at startup rather than waiting for a client to
+    // call tools/list (#34). In HTTP mode no server exists until the first request, so
+    // build a throwaway purely to measure; tool registration does not depend on the
+    // caller's token. Once per process, and never fatal.
+    if (metricsEnabled()) {
+      const probe = this.server ?? this.createMcpServer();
+      void seedAdvertisedSurface(probe).finally(() => {
+        if (probe !== this.server) {
+          try {
+            void probe.close();
+          } catch {
+            // Never connected to a transport, so there is nothing that must succeed here.
+          }
+        }
+      });
+    }
 
     // Debug: Check if secrets are loaded
     logger.info('Secrets Check:', {
@@ -649,13 +745,7 @@ class MicrosoftGraphServer {
       // through the SDK's mcpAuthRouter, whose metadata endpoint is
       // shadowed by the custom handler below, so no deployment relied
       // on its actual semantics.
-      const publicUrlRaw =
-        this.options.publicUrl ||
-        process.env.MS365_MCP_PUBLIC_URL ||
-        this.options.baseUrl ||
-        process.env.MS365_MCP_BASE_URL ||
-        null;
-      const publicBase = publicUrlRaw ? new URL(publicUrlRaw).href.replace(/\/$/, '') : null;
+      const publicBase = resolvePublicBaseUrl(this.options) ?? null;
 
       // OAuth Authorization Server Discovery
       app.get('/.well-known/oauth-authorization-server', async (req, res) => {
@@ -733,6 +823,20 @@ class MicrosoftGraphServer {
           });
         });
       }
+
+      // OAuth 2.0 requires GET on the authorization endpoint and leaves POST optional.
+      // We implement GET only, and refuse POST explicitly rather than letting it fall
+      // through to the SDK's mcpAuthRouter further down, whose own authorization handler
+      // never sees the blocked-scope filter applied on the GET route below. That made
+      // POST a second door into the same endpoint with different policy. It happens to
+      // fail closed today inside the SDK on a redirect_uri check, but that is the SDK's
+      // behaviour to change, not ours to depend on.
+      app.post('/authorize', (_req, res) => {
+        res.status(405).set('Allow', 'GET').json({
+          error: 'invalid_request',
+          error_description: 'The authorization endpoint accepts GET only.',
+        });
+      });
 
       // Authorization endpoint - redirects to Microsoft
       // Implements two-leg PKCE: client↔server and server↔Microsoft are independent
@@ -874,26 +978,24 @@ class MicrosoftGraphServer {
         //     access to data" consent line that fails in tenants where user
         //     consent for applications is restricted by policy (even when
         //     admin has pre-consented every scope).
-        const explicitAllowedScopes = parseAllowedScopes(this.options.allowedScopes);
+        // A client-supplied `scope` may only narrow what this configuration would
+        // request on its own, never widen it. Forwarding the client's list verbatim
+        // let a caller ask for Mail.Send while every send tool was blocked, and the
+        // resulting token is usable directly against Graph, outside the tool surface
+        // the blocklist guards (#24).
         const clientScope = microsoftAuthUrl.searchParams.get('scope');
         const clientScopes = (clientScope ?? '').split(/\s+/).filter(Boolean);
         // Under --obo the token must be for this app, not Graph, or the OBO
         // exchange cannot use it. So Graph scopes are never derived here, and
         // the relay scope is added if the client left it out. --allowed-scopes
-        // still narrows the tool surface, nothing more (#697).
+        // still narrows the tool surface, nothing more (#697). Every other mode
+        // goes through resolveAuthorizeScopes, which subtracts blocked-tool scopes
+        // from the client's request (#24).
         const baseScopes = this.options.obo
           ? clientScopes.some((scope) => scope.endsWith('/access_as_user'))
             ? clientScopes
             : [`${clientId}/access_as_user`, ...clientScopes]
-          : explicitAllowedScopes !== undefined
-            ? resolveAuthScopes(this.options)
-            : clientScope
-              ? clientScopes
-              : buildScopesFromEndpoints(
-                  this.options.orgMode,
-                  this.options.enabledTools,
-                  this.options.readOnly
-                );
+          : resolveAuthorizeScopes(this.options, clientScope);
         // Under --obo the client asks only for this app's own scope
         // (<clientId>/access_as_user), so the tool-derived Graph scopes never
         // reach the consent screen and the later OBO exchange for
@@ -1105,7 +1207,7 @@ class MicrosoftGraphServer {
               server.close();
             });
 
-            await server.connect(transport);
+            await server.connect(withMetricsObserver(transport));
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -1332,7 +1434,7 @@ class MicrosoftGraphServer {
       transport.onerror = (error) => {
         logger.error('Stdio transport error', { error: dumpError(error) });
       };
-      await this.server!.connect(transport);
+      await this.server!.connect(withMetricsObserver(transport));
       logger.info('Server connected to stdio transport');
     }
   }

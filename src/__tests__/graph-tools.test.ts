@@ -136,11 +136,29 @@ async function loadModule() {
   return mod;
 }
 
+/**
+ * EKI: turn on upstream's ticket store (--enable-attachment-urls) in the module graph
+ * loadModule just reset, so it cannot leak into the next case. Call it after loadModule.
+ */
+async function enableAttachmentUrls() {
+  const { configureAttachmentMinting } = await import('../lib/attachment-minting.js');
+  const { AttachmentTicketStore } = await import('../lib/attachment-tickets.js');
+  configureAttachmentMinting({
+    store: new AttachmentTicketStore(120),
+    config: { base: 'http://m365:3000', key: 'k', keyId: '1', ttlSeconds: 120 },
+  });
+}
+
 /** Minimal McpServer mock that captures registered tools */
 function createMockServer() {
   const tools = new Map<
     string,
-    { description: string; schema: any; handler: (...args: any[]) => any }
+    {
+      description: string;
+      schema: any;
+      annotations?: any;
+      handler: (...args: any[]) => any;
+    }
   >();
   const requestHandlers = new Map<string, (request: unknown, extra: unknown) => Promise<unknown>>();
   const installDefaultToolCallHandler = () => {
@@ -173,7 +191,7 @@ function createMockServer() {
         annotations: any,
         handler: (...args: any[]) => any
       ) => {
-        tools.set(name, { description, schema, handler });
+        tools.set(name, { description, schema, annotations, handler });
         installDefaultToolCallHandler();
       }
     ),
@@ -208,6 +226,150 @@ describe('graph-tools', () => {
     mockEndpoints.length = 0;
     mockEndpointsJson = [];
     vi.clearAllMocks();
+  });
+
+  // ---- 0. Inline bytes guard (payload-keyed, not name-keyed) ----
+  describe('inline file bytes are refused in the request path', () => {
+    const attachmentEndpoint = () =>
+      makeEndpoint({
+        method: 'post',
+        path: '/me/messages/{message-id}/attachments',
+        alias: 'add-mail-attachment',
+        parameters: [
+          { name: 'message-id', type: 'Path', schema: z.string() },
+          { name: 'body', type: 'Body', schema: z.any() },
+        ],
+      });
+
+    it('refuses a fileAttachment carrying contentBytes', async () => {
+      const endpoint = attachmentEndpoint();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig({ toolName: 'add-mail-attachment' })];
+
+      const graphClient = createMockGraphClient([{ content: [{ type: 'text', text: '{}' }] }]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      const result = await server.tools.get('add-mail-attachment')!.handler({
+        'message-id': 'AAA',
+        body: {
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: 'report.pdf',
+          contentBytes: 'JVBERi0xLjQK',
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('inline_bytes_refused');
+      // Refused BEFORE reaching Graph, so no request is made at all.
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('allows a reference attachment on the same tool', async () => {
+      // The whole reason the guard is payload-keyed. A referenceAttachment carries a
+      // sourceUrl and no bytes, and is the documented fallback when an upload-session
+      // PUT is unavailable. Name-blocking add-mail-attachment killed this too.
+      const endpoint = attachmentEndpoint();
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig({ toolName: 'add-mail-attachment' })];
+
+      const graphClient = createMockGraphClient([{ content: [{ type: 'text', text: '{}' }] }]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      const result = await server.tools.get('add-mail-attachment')!.handler({
+        'message-id': 'AAA',
+        body: {
+          '@odata.type': '#microsoft.graph.referenceAttachment',
+          name: 'report.pdf',
+          sourceUrl: 'https://envirokinetics.sharepoint.com/x.pdf',
+          providerType: 'oneDriveBusiness',
+          permission: 'view',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.graphRequest).toHaveBeenCalled();
+    });
+    // EKI fork: create-custom-emoji takes its image only as base64 contentBytes, so that
+    // one field on that one tool is exempt (owner decision 2026-10-09). Pin the edges.
+    const emojiEndpoint = () =>
+      makeEndpoint({
+        method: 'post',
+        path: '/teamwork/messaging/customEmojis',
+        alias: 'create-custom-emoji',
+        parameters: [{ name: 'body', type: 'Body', schema: z.any() }],
+      });
+    const registerOne = async (endpoint: ReturnType<typeof makeEndpoint>, toolName: string) => {
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [makeConfig({ toolName })];
+      const graphClient = createMockGraphClient([{ content: [{ type: 'text', text: '{}' }] }]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1],
+        { orgMode: true }
+      );
+      return { server, graphClient };
+    };
+
+    it('forwards the emoji image contentBytes on create-custom-emoji', async () => {
+      const { server, graphClient } = await registerOne(emojiEndpoint(), 'create-custom-emoji');
+      const result = await server.tools.get('create-custom-emoji')!.handler({
+        body: { displayName: 'example-emoji', contentBytes: 'iVBORw0KGgo=' },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('still refuses contentBytes elsewhere in a create-custom-emoji body', async () => {
+      const { server, graphClient } = await registerOne(emojiEndpoint(), 'create-custom-emoji');
+      const result = await server.tools.get('create-custom-emoji')!.handler({
+        body: {
+          displayName: 'example-emoji',
+          contentBytes: 'iVBORw0KGgo=',
+          extra: { contentBytes: 'JVBERi0xLjQK' },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('inline_bytes_refused');
+      expect(result.content[0].text).toContain('extra.contentBytes');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('still refuses an emoji create carried inside a graph-batch subrequest', async () => {
+      const batch = makeEndpoint({
+        method: 'post',
+        path: '/$batch',
+        alias: 'graph-batch',
+        parameters: [{ name: 'body', type: 'Body', schema: z.any() }],
+      });
+      const { server, graphClient } = await registerOne(batch, 'graph-batch');
+      const result = await server.tools.get('graph-batch')!.handler({
+        body: {
+          requests: [
+            {
+              id: '1',
+              method: 'POST',
+              url: '/teamwork/messaging/customEmojis',
+              body: { displayName: 'example-emoji', contentBytes: 'iVBORw0KGgo=' },
+            },
+          ],
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('inline_bytes_refused');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
   });
 
   // ---- 0. Audit outcome metadata ----
@@ -1096,6 +1258,194 @@ describe('graph-tools', () => {
     });
   });
 
+  describe('utility metrics', () => {
+    it('records counters and durations for direct and execute-tool routes', async () => {
+      const { registerGraphTools, registerDiscoveryTools } = await loadModule();
+      const { enableMetrics, metricsText, registry } = await import('../metrics.js');
+      enableMetrics();
+      registry.resetMetrics();
+
+      const directGraphClient = {
+        graphRequest: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: JSON.stringify({ contentBytes: 'b2s=' }) }],
+        }),
+      };
+      const directServer = createMockServer();
+      registerGraphTools(directServer as any, directGraphClient as any);
+      await directServer.tools.get('download-bytes')!.handler({ target: '/me/photo/$value' });
+
+      const discoveryGraphClient = {
+        graphRequest: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: JSON.stringify({ error: 'Graph denied the read' }) }],
+          isError: true,
+        }),
+      };
+      const discoveryServer = createMockServer();
+      registerDiscoveryTools(discoveryServer as any, discoveryGraphClient as any);
+      await discoveryServer.tools.get('execute-tool')!.handler({
+        tool_name: 'download-bytes',
+        parameters: { target: '/me/photo/$value' },
+      });
+
+      const text = await metricsText();
+      expect(text).toMatch(
+        /ms365_mcp_tool_calls_total\{tool="download-bytes",route="direct",outcome="ok"\} 1/
+      );
+      expect(text).toMatch(
+        /ms365_mcp_tool_calls_total\{tool="download-bytes",route="execute_tool",outcome="error"\} 1/
+      );
+      expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="download-bytes"\} 2/);
+    });
+
+    it('records Graph calls rejected before request dispatch', async () => {
+      mockEndpoints.push(
+        makeEndpoint({ alias: 'delete-test-item', method: 'delete', path: '/me/items/:itemId' }),
+        makeEndpoint({ alias: 'get-test-item', method: 'get', path: '/me/items/:itemId' })
+      );
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'delete-test-item',
+          method: 'delete',
+          pathPattern: '/me/items/{id}',
+        }),
+        makeConfig({ toolName: 'get-test-item', method: 'get', pathPattern: '/me/items/{id}' }),
+      ];
+      const { registerGraphTools, registerDiscoveryTools } = await loadModule();
+      const { enableMetrics, metricsText, registry } = await import('../metrics.js');
+      enableMetrics();
+      registry.resetMetrics();
+
+      const previousConfirm = process.env.MS365_MCP_REQUIRE_CONFIRM;
+      process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+      try {
+        const directServer = createMockServer();
+        const directGraphClient = { graphRequest: vi.fn() };
+        registerGraphTools(directServer as any, directGraphClient as any);
+        const blocked = await directServer.tools
+          .get('delete-test-item')!
+          .handler({ itemId: 'one' });
+        expect(blocked.isError).toBe(true);
+        expect(directGraphClient.graphRequest).not.toHaveBeenCalled();
+
+        const accountError = new Error('cached account is unavailable');
+        const authManager = {
+          isOAuthModeEnabled: vi.fn().mockReturnValue(false),
+          getTokenForAccount: vi.fn().mockRejectedValue(accountError),
+        };
+        const discoveryServer = createMockServer();
+        const discoveryGraphClient = { graphRequest: vi.fn() };
+        registerDiscoveryTools(discoveryServer as any, discoveryGraphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          authManager: authManager as any,
+        });
+        const failed = await discoveryServer.tools.get('execute-tool')!.handler({
+          tool_name: 'get-test-item',
+          parameters: { itemId: 'two' },
+        });
+        expect(failed.isError).toBe(true);
+        expect(discoveryGraphClient.graphRequest).not.toHaveBeenCalled();
+
+        const text = await metricsText();
+        expect(text).toMatch(
+          /ms365_mcp_tool_calls_total\{tool="delete-test-item",route="direct",outcome="blocked"\} 1/
+        );
+        expect(text).toMatch(
+          /ms365_mcp_tool_calls_total\{tool="get-test-item",route="execute_tool",outcome="error"\} 1/
+        );
+        expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="delete-test-item"\} 1/);
+        expect(text).toMatch(/ms365_mcp_tool_duration_seconds_count\{tool="get-test-item"\} 1/);
+      } finally {
+        if (previousConfirm === undefined) delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+        else process.env.MS365_MCP_REQUIRE_CONFIRM = previousConfirm;
+      }
+    });
+  });
+
+  describe('skipEncoding route safety', () => {
+    it('validates generated path-parameter fallbacks before raw interpolation', async () => {
+      mockEndpoints.push(
+        makeEndpoint({
+          alias: 'search-test-drive',
+          path: "/drives/:driveId/search(q=':q')",
+          parameters: [],
+        }),
+        makeEndpoint({
+          alias: 'get-test-range',
+          path: "/drives/:driveId/workbook/range(address=':address')",
+          parameters: [],
+        }),
+        makeEndpoint({
+          alias: 'get-test-row',
+          path: '/drives/:driveId/workbook/rows/itemAt(index=:index)',
+          parameters: [],
+        })
+      );
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'search-test-drive',
+          pathPattern: "/drives/{drive-id}/search(q='{q}')",
+          skipEncoding: ['q'],
+        }),
+        makeConfig({
+          toolName: 'get-test-range',
+          pathPattern: "/drives/{drive-id}/workbook/range(address='{address}')",
+          skipEncoding: ['address'],
+        }),
+        makeConfig({
+          toolName: 'get-test-row',
+          pathPattern: '/drives/{drive-id}/workbook/rows/itemAt(index={index})',
+          skipEncoding: ['index'],
+        }),
+      ];
+      const { registerGraphTools } = await loadModule();
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      registerGraphTools(server as any, graphClient as any);
+
+      await server.tools.get('search-test-drive')!.handler({
+        driveId: 'drive-1',
+        q: "Budget#1/? Stephen's report",
+      });
+      await server.tools.get('get-test-range')!.handler({
+        driveId: 'drive-1',
+        address: 'Table1[#All]',
+      });
+      await server.tools.get('get-test-row')!.handler({ driveId: 'drive-1', index: '12' });
+
+      expect(graphClient.graphRequest.mock.calls.map((call) => call[0])).toEqual([
+        "/drives/drive-1/search(q='Budget%231%2F%3F%20Stephen%27%27s%20report')",
+        "/drives/drive-1/workbook/range(address='Table1%5B%23All%5D')",
+        '/drives/drive-1/workbook/rows/itemAt(index=12)',
+      ]);
+
+      graphClient.graphRequest.mockClear();
+      const results = await Promise.all([
+        server.tools.get('search-test-drive')!.handler({
+          driveId: 'drive-1',
+          q: "report')/children",
+        }),
+        server.tools.get('get-test-range')!.handler({
+          driveId: 'drive-1',
+          address: 'A1/B2?route=blocked',
+        }),
+        server.tools.get('get-test-row')!.handler({
+          driveId: 'drive-1',
+          index: '0)/tables',
+        }),
+      ]);
+
+      expect(results[0].isError).toBeFalsy();
+      expect(results[1].isError).toBeFalsy();
+      expect(results[2].isError).toBe(true);
+      expect(results[2].content[0].text).toContain('Unsafe unencoded');
+      expect(graphClient.graphRequest.mock.calls.map((call) => call[0])).toEqual([
+        "/drives/drive-1/search(q='report%27%27)%2Fchildren')",
+        "/drives/drive-1/workbook/range(address='A1%2FB2%3Froute%3Dblocked')",
+      ]);
+    });
+  });
+
   // ---- 1. $count advanced query mode ----
   describe('$count advanced query mode', () => {
     it('should set ConsistencyLevel: eventual header when $count=true', async () => {
@@ -1938,7 +2288,13 @@ describe('graph-tools', () => {
         const graphClient = createMockGraphClient(paginatingResponses(5));
         const server = createMockServer();
         const { registerGraphTools } = await loadModule();
-        registerGraphTools(server as any, graphClient as any);
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
 
         await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
 
@@ -2746,6 +3102,245 @@ describe('graph-tools', () => {
     });
   });
 
+  describe('binary utility target canonicalization', () => {
+    it.each([
+      ['/me/messages/m1/attachments/a1/$value#ignored', 'raw fragment'],
+      ['/me/messages/m1/attachments/a1/$value?download=1', 'raw query'],
+      ['/me/messages/m1/attachments/a1/$value%23ignored', 'encoded fragment'],
+      ['/me/messages/m1/attachments/a1/$value%2523ignored', 'double-encoded fragment'],
+      ['/me/messages/m1/attachments/a1/$value%3Fdownload=1', 'encoded query'],
+      ['/me/messages%2Fm1/attachments/a1/$value', 'encoded route slash'],
+      ['/drives/d/items/decoy/../i/content', 'raw parent segment'],
+      ['/drives/d/items/decoy/./i/content', 'raw current segment'],
+      ['/drives/d/items/decoy//../i/content', 'raw parent after repeated slash'],
+      ['/drives/d/items/decoy/../', 'raw trailing parent segment'],
+      ['/drives/d/items/decoy/%2e/i/content', 'encoded current segment'],
+      ['/drives/d/items/decoy/%2e%2e/i/content', 'encoded parent segment'],
+      ['/drives/d1/root:/safe/%2e%2e/secret:/content', 'encoded dot segment'],
+    ])('rejects a %s target before every binary dispatch (%s)', async (target) => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn(),
+        downloadToFile: vi.fn(),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      const results = await Promise.all([
+        server.tools.get('download-bytes')!.handler({ target }),
+        server.tools.get('download-bytes-to-file')!.handler({
+          target,
+          outputPath: join(tmpdir(), 'should-not-be-created.bin'),
+        }),
+        server.tools.get('get-download-url')!.handler({ target }),
+      ]);
+
+      expect(results.every((result) => result.isError === true)).toBe(true);
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
+      expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+    });
+
+    it('preserves legitimate encoded dot and percent filename data for bounded dispatch', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/drive/root:/Reports/Budget%2525/report%2Epdf:/content/';
+      const canonicalTarget = target.slice(0, -1);
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn().mockResolvedValue({
+          bytes: Buffer.from('pdf'),
+          contentType: 'application/pdf',
+          contentLength: 3,
+        }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      await enableAttachmentUrls();
+      registerGraphTools(server as any, graphClient as any, {
+        readOnly: false,
+        orgMode: false,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: true,
+      });
+
+      const result = await server.tools.get('download-bytes')!.handler({ target });
+
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(canonicalTarget, 256 * 1024, {
+        accessToken: undefined,
+      });
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('preserves dotted drive filenames through every binary utility', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/drive/root:/Reports/Budget.v1.final.pdf:/content';
+      const itemTarget = '/me/drive/root:/Reports/Budget.v1.final.pdf:';
+      const outputDir = mkdtempSync(join(tmpdir(), 'binary-dots-'));
+      const outputPath = join(outputDir, 'Budget.v1.final.pdf');
+      const graphClient = {
+        graphRequest: vi.fn().mockImplementation(async (_path: string, options?: any) => {
+          if (options?.rawResponse) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ contentType: 'application/pdf', contentBytes: 'cGRm' }),
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  '@microsoft.graph.downloadUrl': 'https://download.example/dotted-file',
+                  name: 'Budget.v1.final.pdf',
+                }),
+              },
+            ],
+          };
+        }),
+        downloadToFile: vi
+          .fn()
+          .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      try {
+        const results = await Promise.all([
+          server.tools.get('download-bytes')!.handler({ target }),
+          server.tools.get('download-bytes-to-file')!.handler({
+            target,
+            outputPath,
+            confirm: true,
+          }),
+          server.tools.get('get-download-url')!.handler({ target }),
+        ]);
+
+        expect(results.every((result) => !result.isError)).toBe(true);
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
+          accessToken: undefined,
+          rawResponse: true,
+          forceBinary: true,
+        });
+        expect(graphClient.downloadToFile).toHaveBeenCalledWith(target, outputPath, {
+          accessToken: undefined,
+        });
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(itemTarget, {
+          accessToken: undefined,
+          forceJsonOutput: true,
+        });
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves an encoded hash inside a drive root path for every binary utility', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/drive/root:/Reports/Budget%231.pdf:/content';
+      const itemTarget = '/me/drive/root:/Reports/Budget%231.pdf:';
+      const outputDir = mkdtempSync(join(tmpdir(), 'binary-hash-'));
+      const outputPath = join(outputDir, 'Budget#1.pdf');
+      const graphClient = {
+        graphRequest: vi.fn().mockImplementation(async (_path: string, options?: any) => {
+          if (options?.rawResponse) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ contentType: 'application/pdf', contentBytes: 'cGRm' }),
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  '@microsoft.graph.downloadUrl': 'https://download.example/file',
+                  name: 'Budget#1.pdf',
+                }),
+              },
+            ],
+          };
+        }),
+        downloadToFile: vi
+          .fn()
+          .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      try {
+        const byteResult = await server.tools.get('download-bytes')!.handler({ target });
+        const fileResult = await server.tools.get('download-bytes-to-file')!.handler({
+          target,
+          outputPath,
+          confirm: true,
+        });
+        const urlResult = await server.tools.get('get-download-url')!.handler({ target });
+
+        expect(byteResult.isError).toBeFalsy();
+        expect(fileResult.isError).toBeFalsy();
+        expect(urlResult.isError).toBeFalsy();
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
+          accessToken: undefined,
+          rawResponse: true,
+          forceBinary: true,
+        });
+        expect(graphClient.downloadToFile).toHaveBeenCalledWith(target, outputPath, {
+          accessToken: undefined,
+        });
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(itemTarget, {
+          accessToken: undefined,
+          forceJsonOutput: true,
+        });
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('still rejects an encoded fragment after a drive path-addressed resource', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToFile: vi.fn(),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      const target = '/me/drive/root:/Reports/Budget.pdf:/content%23ignored';
+
+      const results = await Promise.all([
+        server.tools.get('download-bytes')!.handler({ target }),
+        server.tools.get('download-bytes-to-file')!.handler({
+          target,
+          outputPath: join(tmpdir(), 'should-not-be-created.bin'),
+          confirm: true,
+        }),
+        server.tools.get('get-download-url')!.handler({ target }),
+      ]);
+
+      expect(results.every((result) => result.isError === true)).toBe(true);
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+    });
+  });
+
   // ---- 9. download-bytes utility tool ----
   describe('download-bytes', () => {
     it('routes a relative Graph path through graphRequest', async () => {
@@ -2846,6 +3441,218 @@ describe('graph-tools', () => {
       const payload = JSON.parse(result.content[0].text);
       expect(payload.error).toMatch(/relative Microsoft Graph path/);
     });
+
+    it('refuses oversized inline content and points to get-download-url when attachment URLs are enabled', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      {
+        const graphClient = {
+          graphRequest: vi.fn(),
+          downloadToBuffer: vi.fn(),
+        };
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        await enableAttachmentUrls();
+        const { GraphDownloadSizeLimitError } = await import('../graph-client.js');
+        graphClient.downloadToBuffer.mockRejectedValue(
+          new GraphDownloadSizeLimitError(
+            'declared content is too large',
+            256 * 1024,
+            5 * 1024 * 1024
+          )
+        );
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
+
+        const tool = server.tools.get('download-bytes');
+        const result = await tool!.handler({ target: '/drives/d1/items/i1/content' });
+
+        expect(result.isError).toBe(true);
+        const payload = JSON.parse(result.content[0].text);
+        expect(payload.error).toMatch(/get-download-url/);
+        expect(payload.contentLength).toBe(5 * 1024 * 1024);
+        expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(
+          '/drives/d1/items/i1/content',
+          256 * 1024,
+          { accessToken: undefined }
+        );
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    });
+
+    it('streams bounded bytes before constructing an HTTP inline response', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn().mockResolvedValue({
+          bytes: Buffer.from('hello'),
+          contentType: 'text/plain',
+          contentLength: 5,
+        }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      await enableAttachmentUrls();
+      registerGraphTools(server as any, graphClient as any, {
+        readOnly: false,
+        orgMode: false,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: true,
+      });
+
+      const result = await server.tools
+        .get('download-bytes')!
+        .handler({ target: '/me/messages/m1/attachments/a1/$value' });
+
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        contentType: 'text/plain',
+        encoding: 'base64',
+        contentLength: 5,
+        contentBytes: 'aGVsbG8=',
+      });
+      expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(
+        '/me/messages/m1/attachments/a1/$value',
+        256 * 1024,
+        { accessToken: undefined }
+      );
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'unsupported authenticated content',
+        '/me/onlineMeetings/meeting1/transcripts/transcript1/content',
+        'text/vtt',
+      ],
+    ])(
+      'retains the reachable HTTP response path for %s targets',
+      async (_label, target, contentType) => {
+        mockEndpoints.length = 0;
+        mockEndpointsJson = [];
+
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  contentType,
+                  encoding: 'base64',
+                  contentLength: 5 * 1024 * 1024,
+                  contentBytes: 'eA==',
+                }),
+              },
+            ],
+          }),
+          downloadToBuffer: vi.fn(),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        await enableAttachmentUrls();
+        registerGraphTools(server as any, graphClient as any, {
+          readOnly: false,
+          orgMode: false,
+          multiAccount: false,
+          accountNames: [],
+          httpMode: true,
+        });
+
+        const result = await server.tools.get('download-bytes')!.handler({ target });
+
+        expect(result.isError).toBeFalsy();
+        expect(JSON.parse(result.content[0].text).contentBytes).toBe('eA==');
+        expect(graphClient.graphRequest).toHaveBeenCalledWith(target, {
+          accessToken: undefined,
+          rawResponse: true,
+          forceBinary: true,
+        });
+        expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
+      }
+    );
+
+    it('passes oversized content through in stdio, where attachment URLs are off', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const previousPublicUrl = process.env.MS365_MCP_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      try {
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  contentType: 'application/pdf',
+                  encoding: 'base64',
+                  contentLength: 5 * 1024 * 1024,
+                  contentBytes: 'eA==',
+                }),
+              },
+            ],
+          }),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const result = await server.tools
+          .get('download-bytes')!
+          .handler({ target: '/drives/d1/items/i1/content' });
+
+        expect(result.isError).toBeFalsy();
+        expect(JSON.parse(result.content[0].text).contentBytes).toBe('eA==');
+      } finally {
+        if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = previousPublicUrl;
+      }
+    });
+
+    it('passes oversized content through when attachment URLs are disabled', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const prev = process.env.MS365_MCP_PUBLIC_URL;
+      delete process.env.MS365_MCP_PUBLIC_URL;
+      try {
+        const big = {
+          contentType: 'application/pdf',
+          encoding: 'base64',
+          contentLength: 5 * 1024 * 1024,
+          contentBytes: 'eA==',
+        };
+        const graphClient = {
+          graphRequest: vi.fn().mockResolvedValue({
+            content: [{ type: 'text', text: JSON.stringify(big) }],
+          }),
+        };
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const tool = server.tools.get('download-bytes');
+        const result = await tool!.handler({ target: '/drives/d1/items/i1/content' });
+
+        expect(result.isError).toBeFalsy();
+        const payload = JSON.parse(result.content[0].text);
+        expect(payload.contentBytes).toBe('eA==');
+      } finally {
+        if (prev === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = prev;
+      }
+    });
   });
 
   // ---- 9a. download-bytes-to-file utility tool ----
@@ -2902,6 +3709,62 @@ describe('graph-tools', () => {
           http_status: 200,
         })
       );
+    });
+
+    it('registers as destructive and exposes the confirmation parameter', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, {} as any);
+
+      const tool = server.tools.get('download-bytes-to-file');
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: false,
+        destructiveHint: true,
+      });
+      expect(tool?.schema.confirm).toBeDefined();
+    });
+
+    it('requires confirm when the server confirmation gate is enabled', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const previous = process.env.MS365_MCP_REQUIRE_CONFIRM;
+      process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+
+      try {
+        const graphClient = {
+          downloadToFile: vi
+            .fn()
+            .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+        };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        const tool = server.tools.get('download-bytes-to-file')!;
+        const outputPath = join(tmpDir, 'confirmed.pdf');
+
+        const blocked = await tool.handler({ target: '/me/photo/$value', outputPath });
+        expect(blocked.isError).toBe(true);
+        expect(JSON.parse(blocked.content[0].text)).toMatchObject({
+          error: 'confirmation_required',
+          tool: 'download-bytes-to-file',
+          destructive: true,
+        });
+        expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+
+        const allowed = await tool.handler({
+          target: '/me/photo/$value',
+          outputPath,
+          confirm: true,
+        });
+        expect(allowed.isError).toBeUndefined();
+        expect(graphClient.downloadToFile).toHaveBeenCalledTimes(1);
+      } finally {
+        if (previous === undefined) delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+        else process.env.MS365_MCP_REQUIRE_CONFIRM = previous;
+      }
     });
 
     it('rejects a relative outputPath', async () => {
@@ -3363,7 +4226,7 @@ describe('graph-tools', () => {
       expect(result.isError).toBe(true);
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.error).toMatch(/do not expose a pre-authenticated download URL/);
+      expect(payload.error).toMatch(/does not expose a pre-authenticated download URL/);
     });
 
     it('rejects calendar event attachment $value paths (no pre-authed URL exists)', async () => {
@@ -3383,7 +4246,7 @@ describe('graph-tools', () => {
       expect(result.isError).toBe(true);
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.error).toMatch(/Mail and calendar event attachments/);
+      expect(payload.error).toMatch(/--enable-attachment-urls/);
     });
 
     it('rejects group mailbox attachment paths (no pre-authed URL exists)', async () => {
@@ -3403,7 +4266,7 @@ describe('graph-tools', () => {
       expect(result.isError).toBe(true);
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.error).toMatch(/Mail and calendar event attachments/);
+      expect(payload.error).toMatch(/--enable-attachment-urls/);
     });
 
     it('rejects list-item driveItem relationships until callers provide a drive item path', async () => {
@@ -3544,6 +4407,31 @@ describe('graph-tools', () => {
       expect(requestedPath).toBe('/me/drive/root:/messages/m1/attachments/a1/report.pdf:');
       const payload = JSON.parse(result.content[0].text);
       expect(payload.downloadUrl).toBe(downloadUrl);
+    });
+
+    it('does not mint a URL in stdio, where attachment URLs are off', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const previousPublicUrl = process.env.MS365_MCP_PUBLIC_URL;
+      process.env.MS365_MCP_PUBLIC_URL = 'https://mcp.example.com';
+      try {
+        const graphClient = { downloadToBuffer: vi.fn() };
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        const result = await server.tools.get('get-download-url')!.handler({
+          target: '/me/messages/m1/attachments/a1/$value',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(JSON.parse(result.content[0].text).error).toMatch(/--enable-attachment-urls/);
+        expect(graphClient.downloadToBuffer).not.toHaveBeenCalled();
+      } finally {
+        if (previousPublicUrl === undefined) delete process.env.MS365_MCP_PUBLIC_URL;
+        else process.env.MS365_MCP_PUBLIC_URL = previousPublicUrl;
+      }
     });
 
     it('allows SharePoint site drive item paths', async () => {
@@ -3947,7 +4835,8 @@ describe('graph-tools', () => {
       expect(targetParam.required).toBe(true);
       expect(targetParam.description).toContain('authenticated recording bytes');
       expect(targetParam.description).not.toContain('returns a URL');
-      expect(schema.description).toContain('For large drive/SharePoint file content');
+      expect(schema.description).toContain('For large content, prefer get-download-url');
+      expect(schema.description).toContain('--enable-attachment-urls');
     });
 
     it('execute-tool dispatches to download-bytes for a Graph path', async () => {
@@ -3982,6 +4871,55 @@ describe('graph-tools', () => {
       expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
       const [path] = graphClient.graphRequest.mock.calls[0];
       expect(path).toBe('/me/photo/$value');
+    });
+
+    it('gates download-bytes-to-file through execute-tool and exposes confirm in its schema', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const previous = process.env.MS365_MCP_REQUIRE_CONFIRM;
+      process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+      const discoveryTmpDir = mkdtempSync(join(tmpdir(), 'dbtf-discovery-'));
+
+      try {
+        const graphClient = {
+          downloadToFile: vi
+            .fn()
+            .mockResolvedValue({ contentType: 'application/pdf', contentLength: 3 }),
+        };
+        const server = createMockServer();
+        const { registerDiscoveryTools } = await loadModule();
+        registerDiscoveryTools(server as any, graphClient as any);
+
+        const schemaResult = await server.tools
+          .get('get-tool-schema')!
+          .handler({ tool_name: 'download-bytes-to-file' });
+        const schema = JSON.parse(schemaResult.content[0].text);
+        expect(schema.parameters).toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: 'confirm', required: false })])
+        );
+
+        const parameters = {
+          target: '/me/messages/m1/attachments/a1/$value',
+          outputPath: join(discoveryTmpDir, 'confirmed.pdf'),
+        };
+        const blocked = await server.tools.get('execute-tool')!.handler({
+          tool_name: 'download-bytes-to-file',
+          parameters,
+        });
+        expect(JSON.parse(blocked.content[0].text).error).toBe('confirmation_required');
+        expect(graphClient.downloadToFile).not.toHaveBeenCalled();
+
+        const allowed = await server.tools.get('execute-tool')!.handler({
+          tool_name: 'download-bytes-to-file',
+          parameters: { ...parameters, confirm: true },
+        });
+        expect(allowed.isError).toBeUndefined();
+        expect(graphClient.downloadToFile).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(discoveryTmpDir, { recursive: true, force: true });
+        if (previous === undefined) delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+        else process.env.MS365_MCP_REQUIRE_CONFIRM = previous;
+      }
     });
 
     it('execute-tool reports unknown tool when name matches neither registry', async () => {
@@ -4119,9 +5057,9 @@ describe('graph-tools', () => {
     });
   });
 
-  // ---- 12. Read-only mode filters utility tools without readOnlyHint ----
+  // ---- 12. Read-only mode filters mutating utility tools ----
   describe('utility tools in read-only mode', () => {
-    it('skips utility tools whose readOnlyHint is not true', async () => {
+    it('keeps read utilities and excludes the local file writer from direct registration', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
@@ -4129,10 +5067,36 @@ describe('graph-tools', () => {
       const { registerGraphTools } = await loadModule();
       registerGraphTools(server as any, {} as any, { readOnly: true });
 
-      // Both built-in utility tools (download-bytes, parse-teams-url) have
-      // readOnlyHint: true so they should be present.
       expect(server.tools.has('download-bytes')).toBe(true);
       expect(server.tools.has('parse-teams-url')).toBe(true);
+      expect(server.tools.has('get-download-url')).toBe(true);
+      expect(server.tools.has('download-bytes-to-file')).toBe(false);
+    });
+
+    it('excludes the local file writer from discovery and execute-tool dispatch', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = { downloadToFile: vi.fn() };
+      const server = createMockServer();
+      const { registerDiscoveryTools } = await loadModule();
+      registerDiscoveryTools(server as any, graphClient as any, { readOnly: true });
+
+      const searchResult = await server.tools.get('search-tools')!.handler({ limit: 50 });
+      const names = JSON.parse(searchResult.content[0].text).tools.map((tool: any) => tool.name);
+      expect(names).not.toContain('download-bytes-to-file');
+
+      const result = await server.tools.get('execute-tool')!.handler({
+        tool_name: 'download-bytes-to-file',
+        parameters: {
+          target: '/me/photo/$value',
+          outputPath: join(tmpdir(), 'read-only-blocked.bin'),
+          confirm: true,
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toMatch(/not found/i);
+      expect(graphClient.downloadToFile).not.toHaveBeenCalled();
     });
   });
 

@@ -1,10 +1,10 @@
-import { readFileSync } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import type { GraphClient } from '../src/graph-client.js';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { registerGraphTools } from '../src/graph-tools.js';
+import type { GraphClient } from '../src/graph-client.js';
 
 vi.mock('../src/logger.js', () => ({
   default: {
@@ -81,10 +81,17 @@ describe('get-sharepoint-site-by-path', () => {
     function getToolHandler(toolName: string) {
       // orgMode (5th arg) must be true: this endpoint declares only workScopes,
       // so it is skipped entirely in personal mode.
-      registerGraphTools(mockServer, mockGraphClient, { orgMode: true });
+      registerGraphTools(mockServer, mockGraphClient, { readOnly: false, orgMode: true });
       const call = mockServer.registerTool.mock.calls.find((c: unknown[]) => c[0] === toolName);
       expect(call).toBeDefined();
       return call![call!.length - 1] as (params: Record<string, unknown>) => Promise<unknown>;
+    }
+
+    function getToolRegistration(toolName: string) {
+      registerGraphTools(mockServer, mockGraphClient, { readOnly: false, orgMode: true });
+      const call = mockServer.registerTool.mock.calls.find((c: unknown[]) => c[0] === toolName);
+      expect(call).toBeDefined();
+      return call!;
     }
 
     it('builds /sites/{hostname}:/{relative-path} without percent-encoding the separators', async () => {
@@ -108,6 +115,43 @@ describe('get-sharepoint-site-by-path', () => {
       const calledPath = (mockGraphClient.graphRequest as ReturnType<typeof vi.fn>).mock
         .calls[0][0] as string;
       expect(calledPath).toContain('/sites/contoso.sharepoint.com:/teams/hr/benefits');
+    });
+
+    it('publishes route-safe validation in the direct tool schema', () => {
+      const registration = getToolRegistration('get-sharepoint-site-by-path');
+      const inputSchema = registration[1].inputSchema as z.ZodTypeAny;
+
+      expect(
+        inputSchema.safeParse({
+          siteId: 'contoso.sharepoint.com',
+          path: 'sites/marketing',
+        }).success
+      ).toBe(true);
+      expect(
+        inputSchema.safeParse({
+          siteId: 'contoso.sharepoint.com',
+          path: 'sites/marketing:/lists/blocked',
+        }).success
+      ).toBe(false);
+    });
+
+    it.each([
+      'sites/marketing:/lists/blocked',
+      'sites/marketing?route=/lists/blocked',
+      'sites/marketing#fragment',
+      'sites/%3A%2Flists%2Fblocked',
+      '../lists/blocked',
+    ])('rejects injected relative path %s before calling Graph', async (injectedPath) => {
+      const handler = getToolHandler('get-sharepoint-site-by-path');
+
+      const result = (await handler({
+        siteId: 'contoso.sharepoint.com',
+        path: injectedPath,
+      })) as { isError?: boolean; content: Array<{ text: string }> };
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Unsafe unencoded path parameter');
+      expect(mockGraphClient.graphRequest).not.toHaveBeenCalled();
     });
   });
 });

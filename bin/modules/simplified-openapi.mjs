@@ -1,5 +1,6 @@
 import fs from 'fs';
 import yaml from 'js-yaml';
+import { restrictRequestBodiesToWritableProperties } from './writable-request-bodies.mjs';
 
 export function createAndSaveSimplifiedOpenAPI(
   endpointsFile,
@@ -171,6 +172,15 @@ export function createAndSaveSimplifiedOpenAPI(
     removeODataTypeRecursively(openApiSpec.paths);
     simplifyAnyOfInPaths(openApiSpec.paths);
   }
+
+  // Restrict request bodies to writable properties before pruning, so the writable
+  // variants count as used and any entity left referenced only by a response gets
+  // pruned normally.
+  console.log('✂️  Restricting request bodies to writable properties...');
+  const writableReport = restrictRequestBodiesToWritableProperties(openApiSpec);
+  console.log(
+    `   Created ${writableReport.variantsCreated} writable variants, dropped ${writableReport.removed.length} read-only navigation properties`
+  );
 
   console.log('🧹 Pruning unused schemas...');
   const usedSchemas = findUsedSchemas(openApiSpec);

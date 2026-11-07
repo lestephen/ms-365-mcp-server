@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -217,6 +217,283 @@ describe('GraphClient binary response handling', () => {
 
       expect(result.value).toBe(42);
       expect(result.rawResponse).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
+describe('GraphClient bounded memory downloads', () => {
+  it('rejects an oversized Content-Length before acquiring a stream reader', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const body = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      getReader: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/octet-stream',
+          'content-length': '100',
+        }),
+        body,
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      await expect(client.downloadToBuffer('/me/photo/$value', 4)).rejects.toThrow(
+        /100 bytes, exceeding the configured limit of 4 bytes/
+      );
+      expect(body.cancel).toHaveBeenCalledOnce();
+      expect(body.getReader).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('cancels a stream as soon as bytes exceed the limit without a useful header', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([1, 2, 3]) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([4, 5, 6]) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([7]) }),
+      cancel: vi.fn().mockResolvedValue(undefined),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      await expect(client.downloadToBuffer('/me/photo/$value', 4)).rejects.toThrow(
+        /exceeded the configured limit of 4 bytes while streaming/
+      );
+      expect(reader.read).toHaveBeenCalledTimes(2);
+      expect(reader.cancel).toHaveBeenCalledOnce();
+      expect(reader.releaseLock).toHaveBeenCalledOnce();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('returns exact bytes and metadata when the bounded stream completes', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const bytes = new Uint8Array([0xff, 0x00, 0x7f, 0x42]);
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response(bytes, {
+        status: 200,
+        headers: {
+          'content-type': 'application/pdf',
+          'content-length': String(bytes.byteLength),
+        },
+      })) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      const result = await client.downloadToBuffer('/me/photo/$value', 4);
+
+      expect(result).toEqual({
+        bytes: Buffer.from(bytes),
+        allocatedBytes: 4,
+        contentType: 'application/pdf',
+        contentLength: 4,
+        // Upstream v0.144.0 (0ce5587) added httpStatus to GraphDownloadResult so the
+        // audit log can record the Graph outcome; downloadToBuffer reports it too.
+        httpStatus: 200,
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('streams into one reserved backing buffer without concatenating chunks', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const concat = vi.spyOn(Buffer, 'concat');
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([1, 2]) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array([3, 4]) })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      const result = await client.downloadToBuffer('/me/photo/$value', 8);
+
+      expect(result.bytes).toEqual(Buffer.from([1, 2, 3, 4]));
+      // Right-sized on the way out (#61). Streaming still uses one reserved backing
+      // buffer, which is what `concat` not being called pins; what must NOT survive the
+      // return is the oversized allocation, because the broker charges what is retained.
+      expect(result.allocatedBytes).toBe(4);
+      expect(result.bytes.buffer.byteLength).toBe(4);
+      expect(concat).not.toHaveBeenCalled();
+    } finally {
+      concat.mockRestore();
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('does not charge the broker the whole maximum for a small download', async () => {
+    // EnviroKinetics/ms365-mcp#61, at the real magnitudes. Node's fetch sends
+    // `accept-encoding: gzip, deflate`, so Graph responses are typically compressed and
+    // the wire Content-Length is not a usable bound. That put every brokered download on
+    // the `?? maximumBytes` path, and a subarray retains its backing allocation, so a
+    // 12-byte attachment was charged the full 50MB per-item cap. Ten downloads of any
+    // size then exhausted the 500MB aggregate budget and wedged the binary path for every
+    // user for a whole TTL window. 500MB / 50MB = 10 is exactly what the reported error
+    // showed.
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const body = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: body })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/octet-stream',
+          'content-encoding': 'gzip',
+        }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        { clientId: 'x', tenantId: 'common', cloudType: 'global' } as Parameters<
+          typeof GraphClient
+        >[1],
+        'json'
+      );
+
+      const FIFTY_MB = 50 * 1024 * 1024;
+      const result = await client.downloadToBuffer('/me/messages/x/attachments/y/$value', FIFTY_MB);
+
+      expect(result.contentLength).toBe(12);
+      // What the broker charges. Must track the file, not the cap.
+      expect(result.allocatedBytes).toBe(12);
+      expect(result.bytes.buffer.byteLength).toBe(12);
+      expect(result.allocatedBytes).toBeLessThan(FIFTY_MB);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('does not trust compressed Content-Length for a decoded response body', async () => {
+    const { default: GraphClient } = await import('../src/graph-client.js');
+    const decodedBytes = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const reader = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ done: false, value: decodedBytes })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(),
+      releaseLock: vi.fn(),
+    };
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      ({
+        status: 200,
+        statusText: 'OK',
+        ok: true,
+        headers: new Headers({
+          'content-type': 'application/octet-stream',
+          'content-encoding': 'gzip',
+          // Node fetch preserves the compressed wire length after decoding the body.
+          'content-length': '3',
+        }),
+        body: { getReader: () => reader },
+      }) as unknown as Response) as typeof fetch;
+
+    try {
+      const client = new GraphClient(
+        { getToken: async () => 'fake-token' } as Parameters<typeof GraphClient>[0],
+        {
+          clientId: 'x',
+          tenantId: 'common',
+          cloudType: 'global',
+        } as Parameters<typeof GraphClient>[1],
+        'json'
+      );
+
+      const result = await client.downloadToBuffer('/me/photo/$value', 8);
+
+      expect(result.bytes).toEqual(Buffer.from(decodedBytes));
+      // The compressed Content-Length is still not trusted as a bound, but the caller's
+      // maximum is no longer retained afterwards (#61).
+      expect(result.allocatedBytes).toBe(6);
+      expect(result.bytes.buffer.byteLength).toBe(6);
+      expect(reader.cancel).not.toHaveBeenCalled();
     } finally {
       global.fetch = originalFetch;
     }

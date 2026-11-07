@@ -223,6 +223,8 @@ describe('allowed scope HTTP behavior', () => {
         allowedScopes: 'Mail.Read',
         httpMode: true,
         userFields: undefined,
+        // Unset --blocked-tools.
+        blockedTools: undefined,
       })
     );
   });

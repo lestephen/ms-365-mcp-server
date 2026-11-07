@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Pins the Microsoft Graph OpenAPI specs this client is generated from.",
+    "Without a pin, `npm run generate` fetched refs/heads/master, so CI built against",
+    "whatever Microsoft had published that minute while a developer checkout silently",
+    "reused an older copy on disk. The same commit could produce different clients, and",
+    "nothing recorded which spec was used. See EnviroKinetics/ms365-mcp#27.",
+    "",
+    "To refresh: run `npm run generate -- --refresh-spec`, which fetches master, reports",
+    "the new ref and digests, and writes them here. Review the resulting client diff as",
+    "you would any other dependency bump, then commit this file with it."
+  ],
+  "repo": "microsoftgraph/msgraph-metadata",
+  "ref": "647ce681a1c7325a6cb151b11b39b1b1ca3c422b",
+  "specs": {
+    "v1.0": {
+      "path": "openapi/v1.0/openapi.yaml",
+      "bytes": 38050122,
+      "sha256": "2749e51f363a471cdaa4835493c2c57198aa834262666da39c03a2e7f9f9d831"
+    },
+    "beta": {
+      "path": "openapi/beta/openapi.yaml",
+      "bytes": 67837181,
+      "sha256": "6d8495ae73e101068ab141495a5b3b1e806972267f184e53f54b94815304ca0e"
+    }
+  }
+}

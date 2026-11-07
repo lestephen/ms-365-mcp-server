@@ -370,15 +370,22 @@ describe('get-upload-url', () => {
     expect(parse(result as never).error).toMatch(/--enable-attachment-urls/);
   });
 
-  it('names the small-file tool that fits the target when attachment URLs are not enabled', async () => {
+  // EKI fork: inline contentBytes is refused at any size, so the fallback names the upload
+  // session for the target instead of upstream's base64 add-*-attachment tool.
+  it('names the upload session that fits the target when attachment URLs are not enabled', async () => {
     resetAttachmentMinting();
     for (const [target, expected] of [
-      [DRAFT_ATTACHMENTS, 'add-mail-attachment'],
-      ['/me/events/EEE/attachments', 'add-calendar-event-attachment'],
-      ['/users/shared@example.com/messages/AAA/attachments', 'add-shared-mailbox-attachment'],
+      [DRAFT_ATTACHMENTS, 'create-mail-attachment-upload-session'],
+      ['/me/events/EEE/attachments', 'create-calendar-event-attachment-upload-session'],
+      [
+        '/users/shared@example.com/messages/AAA/attachments',
+        'no shared-mailbox attachment upload session',
+      ],
     ]) {
       const result = await tool.execute({ target, name: 'a.txt' }, ctx());
-      expect(parse(result as never).error, target).toContain(`with ${expected} (`);
+      const error = parse(result as never).error;
+      expect(error, target).toContain(expected);
+      expect(error, target).not.toContain('base64 contentBytes');
     }
   });
 });

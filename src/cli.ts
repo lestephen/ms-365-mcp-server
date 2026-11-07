@@ -110,6 +110,14 @@ program
     'Microsoft cloud environment: global (default), china (21Vianet) or gcc-high (US Government GCC High)'
   )
   .option(
+    '--blocked-tools <pattern>',
+    'Make tools matching this regex unregisterable and undispatchable BY NAME: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --eager-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. graph-batch subrequests are also checked against blocked endpoint operations. LIMITATION: Binary helpers (download-bytes and get-download-url) still accept arbitrary Graph read paths; block them too when read restrictions must hold. An invalid pattern is fatal rather than ignored.'
+  )
+  .option(
+    '--metrics [port]',
+    'Expose Prometheus metrics on a SEPARATE port (default 9464), not on the MCP app. Keeping it off the main listener means operational detail cannot leak through a public ingress route: expose it only on the Service and scrape it in-cluster. Off by default. Metrics are aggregate and carry no personal data; per-identity records stay in the audit log.'
+  )
+  .option(
     '--enable-dynamic-registration',
     'Enable OAuth Dynamic Client Registration endpoint (kept for backwards compatibility, now enabled by default in HTTP mode)'
   )
@@ -197,6 +205,8 @@ export interface CommandOptions {
   toon?: boolean;
   discovery?: boolean;
   eagerTools?: string[];
+  metrics?: string | boolean;
+  blockedTools?: string;
   cloud?: string;
   enableDynamicRegistration?: boolean;
   dynamicRegistration?: boolean;
@@ -417,6 +427,22 @@ export function parseArgs(): CommandOptions {
       console.error(
         `Error: invalid --enabled-tools regex pattern: "${options.enabledTools}". ` +
           `Without a valid filter, all tools would be exposed.`
+      );
+      process.exit(1);
+    }
+  }
+
+  // Same for the blocklist, and for a stronger reason. In HTTP mode the MCP server
+  // is constructed per request, so without this check an unparseable pattern yields
+  // a listener that comes up healthy and then fails every /mcp call, instead of the
+  // documented refusal to start.
+  if (options.blockedTools) {
+    try {
+      new RegExp(options.blockedTools, 'i');
+    } catch {
+      console.error(
+        `Error: invalid --blocked-tools regex pattern: "${options.blockedTools}". ` +
+          `Refusing to start, because the tools you asked to block would stay reachable.`
       );
       process.exit(1);
     }
