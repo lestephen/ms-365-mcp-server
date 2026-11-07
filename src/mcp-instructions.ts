@@ -1,6 +1,7 @@
 /** Shared context for MCP `initialize.instructions` (hosts that forward it to the model). */
 export type McpInstructionsContext = {
   orgMode: boolean;
+  appMode?: boolean;
   readOnly: boolean;
   multiAccount: boolean;
 };
@@ -15,6 +16,10 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
     'Teams chat and channel messages: prefer HTML contentType in the body; plain text is often mangled by Graph.',
     'Files / binary content: prefer get-download-url for large content. It returns native pre-authenticated URLs for drive/SharePoint files and, on a server running with --enable-attachment-urls, short-lived single-use URLs for mail and calendar attachments and meeting recordings; fetch each one once, straight to disk. Use download-bytes for small authenticated byte reads such as attachments, profile photos, Teams hosted content, and meeting recordings. In stdio mode (or HTTP with --http-local-file-tools), download-bytes-to-file writes authenticated bytes straight to a local absolute path and remains the out-of-band option for meeting recordings. These tools take relative Microsoft Graph paths, not absolute URLs. For uploads, prefer create-upload-session and send the bytes to the returned uploadUrl yourself, streaming them from disk; this server does not perform that PUT. To attach a file to a draft message or an event, use get-upload-url when available and PUT the file from disk to the URL it returns (e.g. curl -T), or create-mail-attachment-upload-session for a draft. upload-file-content instead carries the entire file as a base64 tool argument, and a truncated argument decodes to a truncated file with no error, so do not build that string regardless of how small the file looks.',
   ];
+  if (opts.appMode)
+    parts.push(
+      'App mode: there is no signed-in user, so /me paths do not work. Name the user in /users/{user-id} paths with a UPN or object id.'
+    );
   if (opts.readOnly) parts.push('This server is read-only; write operations are disabled.');
   if (opts.multiAccount)
     parts.push('Multiple accounts: pass the account parameter when required (see list-accounts).');
@@ -57,10 +62,10 @@ const HYBRID_MODE_INSTRUCTIONS_ADDON =
  * tools sitting in front of it.
  */
 export function buildMcpServerInstructions(
-  opts: McpInstructionsContext & { discovery: boolean; directTools?: boolean }
+  opts: McpInstructionsContext & { discovery: boolean; eagerTools?: string[] }
 ): string {
   const general = buildGeneralMcpInstructions(opts);
   if (!opts.discovery) return general;
-  if (opts.directTools) return `${general} ${HYBRID_MODE_INSTRUCTIONS_ADDON}`;
+  if (opts.eagerTools?.length) return `${general} ${HYBRID_MODE_INSTRUCTIONS_ADDON}`;
   return `${general} ${DISCOVERY_MODE_INSTRUCTIONS_ADDON}`;
 }

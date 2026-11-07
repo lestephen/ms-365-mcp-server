@@ -2,7 +2,9 @@ import { Command, Option } from 'commander';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { readEnabledToolsFromFile } from './lib/enabled-tools-file.js';
 import { assertSignoffMarkersVisible } from './lib/message-signoff.js';
+import { assertUploadDirsAbsolute } from './lib/upload-dirs.js';
 import { getCombinedPresetPattern, listPresets, presetRequiresOrgMode } from './tool-categories.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -66,6 +68,10 @@ program
     'Filter tools using regex pattern (e.g., "excel|contact" to enable Excel and Contact tools)'
   )
   .option(
+    '--enabled-tools-file <path>',
+    'Filter tools using a file with one regex per line (same semantics as --enabled-tools; blank lines and whole-line # comments ignored). Overrides --enabled-tools; overridden by --preset. ENABLED_TOOLS_FILE provides the file path through the environment and overrides --preset as well as the CLI filters.'
+  )
+  .option(
     '--allowed-scopes <scopes>',
     'Limit exposed tools to Graph scopes covered by this whitespace-separated allowlist'
   )
@@ -88,22 +94,29 @@ program
     'Enable organization/work mode from start (includes Teams, SharePoint, etc.)'
   )
   .option('--work-mode', 'Alias for --org-mode')
+  .option(
+    '--app-mode',
+    'Use application permissions with no signed-in user. stdio only. Needs one credential: MS365_MCP_CLIENT_SECRET, MS365_MCP_CLIENT_CERTIFICATE_PATH or MS365_MCP_FEDERATED_TOKEN_FILE (with your own app registration and MS365_MCP_TENANT_ID), or MS365_MCP_MANAGED_IDENTITY on an Azure host. Only tools that work with application permissions are offered.'
+  )
   .option('--force-work-scopes', 'Backwards compatibility alias for --org-mode (deprecated)')
   .option('--toon', '(experimental) Enable TOON output format for 30-60% token reduction')
+  .option(
+    '--eager-tools <names>',
+    'With --discovery, also expose these comma-separated exact Graph or utility tool names directly. All enabled tools remain discoverable. Env: MS365_MCP_EAGER_TOOLS.'
+  )
   .option('--discovery', 'Enable runtime tool discovery and loading (experimental feature)')
   .option(
-    '--direct-tools <pattern>',
-    'Use with --discovery for hybrid mode: also register tools matching this regex directly, by name, alongside search-tools/get-tool-schema/execute-tool. Every other tool stays reachable through execute-tool without its schema being sent up front, so a small named tool set can coexist with full Graph reach on a limited context budget.'
+    '--cloud <type>',
+    'Microsoft cloud environment: global (default), china (21Vianet) or gcc-high (US Government GCC High)'
   )
   .option(
     '--blocked-tools <pattern>',
-    'Make tools matching this regex unregisterable and undispatchable BY NAME: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --direct-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. LIMITATION: this matches tool names, not Graph operations, so a generic passthrough tool can still reach a blocked operation by method and path (graph-batch can issue POST /me/sendMail in a subrequest; download-bytes and get-download-url take arbitrary Graph paths). Block those tools too if your policy needs to hold. An invalid pattern is fatal rather than ignored.'
+    'Make tools matching this regex unregisterable and undispatchable BY NAME: direct registration, search-tools, get-tool-schema and execute-tool. Takes precedence over --enabled-tools, --preset and --eager-tools. Use this for operator policy (for example allowing mail drafts but never sends), because a client-side deny rule on a tool name does not survive execute-tool dispatch. graph-batch subrequests are also checked against blocked endpoint operations. LIMITATION: Binary helpers (download-bytes and get-download-url) still accept arbitrary Graph read paths; block them too when read restrictions must hold. An invalid pattern is fatal rather than ignored.'
   )
   .option(
     '--metrics [port]',
     'Expose Prometheus metrics on a SEPARATE port (default 9464), not on the MCP app. Keeping it off the main listener means operational detail cannot leak through a public ingress route: expose it only on the Service and scrape it in-cluster. Off by default. Metrics are aggregate and carry no personal data; per-identity records stay in the audit log.'
   )
-  .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)')
   .option(
     '--enable-dynamic-registration',
     'Enable OAuth Dynamic Client Registration endpoint (kept for backwards compatibility, now enabled by default in HTTP mode)'
@@ -130,7 +143,11 @@ program
   )
   .option(
     '--http-local-file-tools',
-    "In HTTP mode, also register download-bytes-to-file, which writes files on the server as the server's user. Anyone who can reach the port can use it, so enable only on a single-user machine. Refused unless --http binds a loopback host with no --public-url and no --trust-proxy-auth."
+    "In HTTP mode, also register the local file tools: download-bytes-to-file, which writes files on the server as the server's user, and upload-attachment-from-file, which reads files from the MS365_MCP_UPLOAD_DIRS directories when that is set. Anyone who can reach the port can use them, so enable only on a single-user machine. Refused unless --http binds a loopback host with no --public-url and no --trust-proxy-auth."
+  )
+  .option(
+    '--blob-output',
+    'File download tools (get-mail-message-mime, get-shared-mailbox-message-mime, get-mail-attachment-content, get-shared-mailbox-attachment-content) answer an MCP EmbeddedResource with the file instead of base64 JSON in a text block. Off by default.'
   )
   .option(
     '--allow-unauthenticated-discovery',
@@ -174,6 +191,7 @@ export interface CommandOptions {
    */
   attachmentHost?: string;
   enabledTools?: string;
+  enabledToolsFile?: string;
   allowedScopes?: string;
   userFields?: string;
   extraScopes?: string;
@@ -181,12 +199,13 @@ export interface CommandOptions {
   listPresets?: boolean;
   listPermissions?: boolean;
   orgMode?: boolean;
+  appMode?: boolean;
   workMode?: boolean;
   forceWorkScopes?: boolean;
   toon?: boolean;
   discovery?: boolean;
+  eagerTools?: string[];
   metrics?: string | boolean;
-  directTools?: string;
   blockedTools?: string;
   cloud?: string;
   enableDynamicRegistration?: boolean;
@@ -195,6 +214,7 @@ export interface CommandOptions {
   obo?: boolean;
   trustProxyAuth?: boolean;
   httpLocalFileTools?: boolean;
+  blobOutput?: boolean;
   allowUnauthenticatedDiscovery?: boolean;
   publicUrl?: string;
   /** @deprecated use publicUrl */
@@ -218,14 +238,51 @@ export function parseArgs(): CommandOptions {
     process.env.MS365_MCP_MESSAGE_SIGNOFF_SUFFIX = '';
     process.env.MS365_MCP_MESSAGE_SIGNOFF_PREFIX = '';
   }
+  // Same for blob output, which graph-client.ts reads per download
+  if (options.blobOutput) {
+    process.env.MS365_MCP_BLOB_OUTPUT = 'true';
+  }
   // Markup in a marker is allowed (e.g. a coloured <span>), but refuse to start
   // with one that renders as empty text - html sends would look unsigned.
   assertSignoffMarkersVisible();
+  assertUploadDirsAbsolute();
 
   if (options.listPresets) {
     const presets = listPresets();
     console.log(JSON.stringify({ presets }, null, 2));
     process.exit(0);
+  }
+
+  // Tool filter layering (later wins): --enabled-tools → --enabled-tools-file →
+  // --preset → ENABLED_TOOLS → ENABLED_TOOLS_FILE.
+  if (typeof options.enabledToolsFile === 'string') {
+    try {
+      options.enabledTools = readEnabledToolsFromFile(options.enabledToolsFile);
+    } catch (error) {
+      console.error(`Error: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  }
+  delete options.enabledToolsFile;
+
+  const eagerValue = options.eagerTools ?? (process.env.MS365_MCP_EAGER_TOOLS?.trim() || undefined);
+  if (eagerValue !== undefined) {
+    if (!options.discovery) throw new Error('--eager-tools requires --discovery');
+    const names = String(eagerValue)
+      .split(',')
+      .map((name) => name.trim());
+    if (names.some((name) => name === ''))
+      throw new Error('--eager-tools requires non-empty exact tool names');
+    options.eagerTools = [...new Set(names)];
+  }
+
+  if (process.env.MS365_MCP_APP_MODE === 'true' || process.env.MS365_MCP_APP_MODE === '1') {
+    options.appMode = true;
+  }
+
+  // App mode is tenant-only, so the work-account guidance and presets apply
+  if (options.appMode) {
+    options.orgMode = true;
   }
 
   if (options.preset) {
@@ -254,6 +311,15 @@ export function parseArgs(): CommandOptions {
 
   if (process.env.ENABLED_TOOLS) {
     options.enabledTools = process.env.ENABLED_TOOLS;
+  }
+
+  if (process.env.ENABLED_TOOLS_FILE) {
+    try {
+      options.enabledTools = readEnabledToolsFromFile(process.env.ENABLED_TOOLS_FILE);
+    } catch (error) {
+      console.error(`Error: ${(error as Error).message}`);
+      process.exit(1);
+    }
   }
 
   if (options.allowedScopes === undefined && process.env.MS365_MCP_ALLOWED_SCOPES !== undefined) {
@@ -377,22 +443,6 @@ export function parseArgs(): CommandOptions {
       console.error(
         `Error: invalid --blocked-tools regex pattern: "${options.blockedTools}". ` +
           `Refusing to start, because the tools you asked to block would stay reachable.`
-      );
-      process.exit(1);
-    }
-  }
-
-  // And --direct-tools, where the runtime fallback is actively harmful: registration
-  // logs an invalid filter and carries on with no filter at all, which registers the
-  // whole catalogue. That reintroduces the context-window blowout hybrid mode exists
-  // to avoid, from a single typo, with only a log line to show for it.
-  if (options.directTools) {
-    try {
-      new RegExp(options.directTools, 'i');
-    } catch {
-      console.error(
-        `Error: invalid --direct-tools regex pattern: "${options.directTools}". ` +
-          `Without a valid filter, every tool would be registered directly.`
       );
       process.exit(1);
     }

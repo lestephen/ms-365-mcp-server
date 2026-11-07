@@ -16,7 +16,7 @@ import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom
  *    routes and outcomes from fixed unions.
  *
  * These exist to answer specific questions with data instead of inference:
- *  - is the --direct-tools set right? (tool_calls_total by route)
+ *  - is the --eager-tools set right? (tool_calls_total by route)
  *  - are callers hitting tools that are not registered? (unknown_tool_total; this is
  *    the signal that would have surfaced #29 before a human tripped over it)
  *  - is the mail blocklist ever exercised? (blocked_operations_total)

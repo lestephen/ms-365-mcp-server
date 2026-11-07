@@ -20,7 +20,7 @@ import {
 
 /**
  * Metrics exist so the open questions from the hybrid rollout get answered with data
- * rather than inference: whether the --direct-tools set is right, whether callers are
+ * rather than inference: whether the --eager-tools set is right, whether callers are
  * hitting unregistered names (#29), whether the mail blocklist is ever exercised, and
  * what graph-batch is actually used for.
  */
@@ -127,7 +127,7 @@ describe('metric hygiene', () => {
     recordToolCall('update-place', 'execute_tool', 'ok');
     recordToolCall('get-mail-message', 'direct', 'ok');
     const text = (await sample('ms365_mcp_tool_calls_total')).join('\n');
-    // A tool repeatedly reached via execute-tool is a candidate for --direct-tools.
+    // A tool repeatedly reached via execute-tool is a candidate for --eager-tools.
     expect(text).toMatch(/tool="update-place",route="execute_tool"[^\n]*1/);
     expect(text).toMatch(/tool="get-mail-message",route="direct"[^\n]*1/);
   });

@@ -147,6 +147,7 @@
     "microsoft.graph.teamsAppInstallation": ["teamsApp", "teamsAppDefinition"],
     "microsoft.graph.teamsTab": ["teamsApp"],
     "microsoft.graph.todoTask": ["attachmentSessions"],
-    "microsoft.graph.todoTaskList": ["tasks"]
+    "microsoft.graph.todoTaskList": ["tasks"],
+    "microsoft.graph.plannerPlan": ["buckets", "details", "tasks"]
   }
 }

@@ -21,13 +21,18 @@ import type { CommandOptions } from './cli.ts';
 import { getCloudEndpoints } from './cloud-config.js';
 import { dumpError } from './crash-logging.js';
 import GraphClient from './graph-client.js';
-import { registerDiscoveryTools, registerGraphTools, type ToolNameMatcher } from './graph-tools.js';
+import {
+  registerDiscoveryTools,
+  registerGraphTools,
+  validateEagerToolNames,
+} from './graph-tools.js';
 import { configureAttachmentMinting } from './lib/attachment-minting.js';
 import { AttachmentTicketStore } from './lib/attachment-tickets.js';
 import { ATTACHMENT_ROUTE, loadAttachmentUrlConfig } from './lib/attachment-url-config.js';
 import {
   exchangeCodeForToken,
   microsoftBearerTokenAuthMiddleware,
+  buildWwwAuthenticate,
   OAuthUpstreamError,
   refreshAccessToken,
   toOAuthErrorResponse,
@@ -41,6 +46,7 @@ import { buildMcpServerInstructions } from './mcp-instructions.js';
 import { installToolSchemaRefNormalization } from './normalize-tool-schema.js';
 import { MicrosoftOAuthProvider } from './oauth-provider.js';
 import OboClient from './obo-client.js';
+import { isRejectedAssertion, oboAllowlistRefusal, readOboAllowlist } from './lib/obo-access.js';
 import { requestContext } from './request-context.js';
 import { getSecrets, type AppSecrets } from './secrets.js';
 
@@ -116,26 +122,6 @@ export function resolvePublicBaseUrl(options: CommandOptions): string | undefine
     options.baseUrl ||
     process.env.MS365_MCP_BASE_URL;
   return raw ? new URL(raw).href.replace(/\/$/, '') : undefined;
-}
-
-/** Compile independent filters and require both, without concatenating regex sources. */
-function intersectToolPatterns(
-  enabledTools: string | undefined,
-  directTools: string | undefined
-): ToolNameMatcher | undefined {
-  if (!directTools) return undefined;
-  try {
-    const direct = new RegExp(directTools, 'i');
-    const enabled = enabledTools ? new RegExp(enabledTools, 'i') : undefined;
-    return (name: string) => direct.test(name) && (enabled?.test(name) ?? true);
-  } catch (error) {
-    // CLI validation normally catches this. If options reach the server by another
-    // path, direct registration must fail closed rather than exposing the full catalog.
-    logger.error(
-      `Invalid hybrid tool filter; registering no direct Graph tools: ${(error as Error).message}`
-    );
-    return () => false;
-  }
 }
 
 /**
@@ -313,8 +299,16 @@ class MicrosoftGraphServer {
 
   // Two-leg PKCE: stores client's code_challenge and server's code_verifier, keyed by OAuth state
   private pkceStore: Map<string, PkceEntry> = new Map();
+  private reportedUnavailableEagerTools = new Set<string>();
+
+  private reportUnavailableEagerTool = (name: string): void => {
+    if (this.reportedUnavailableEagerTools.has(name)) return;
+    this.reportedUnavailableEagerTools.add(name);
+    logger.info(`Eager tool ${name} is unavailable under the current filters or transport`);
+  };
 
   constructor(authManager: AuthManager, options: CommandOptions = {}) {
+    if (options.eagerTools?.length) validateEagerToolNames(options.eagerTools);
     this.authManager = authManager;
     this.options = options;
     this.graphClient = null; // Initialized in start() after secrets are loaded
@@ -346,8 +340,9 @@ class MicrosoftGraphServer {
       {
         instructions: buildMcpServerInstructions({
           discovery: Boolean(this.options.discovery),
-          directTools: Boolean(this.options.discovery && this.options.directTools),
+          eagerTools: this.options.eagerTools,
           orgMode: Boolean(this.options.orgMode),
+          appMode: Boolean(this.options.appMode),
           readOnly: Boolean(this.options.readOnly),
           multiAccount: this.multiAccount,
         }),
@@ -361,15 +356,20 @@ class MicrosoftGraphServer {
     // because execute-tool/get-tool-schema/search-tools read that, not a registration.
     const registrar = withToolBlocklist(server, this.options.blockedTools);
 
-    const shouldRegisterAuthTools = !this.options.http || this.options.enableAuthTools;
+    // App mode has no accounts to log in to, list or switch between
+    const shouldRegisterAuthTools =
+      !this.options.appMode && (!this.options.http || this.options.enableAuthTools);
     if (shouldRegisterAuthTools) {
       registerAuthTools(registrar, this.authManager);
     }
 
     const registrationOptions = {
       readOnly: this.options.readOnly,
+      eagerTools: this.options.eagerTools,
+      onUnavailableEagerTool: this.reportUnavailableEagerTool,
       enabledTools: this.options.enabledTools,
       orgMode: this.options.orgMode,
+      appMode: this.options.appMode,
       authManager: this.authManager,
       multiAccount: this.multiAccount,
       accountNames: this.accountNames,
@@ -380,30 +380,7 @@ class MicrosoftGraphServer {
     };
 
     if (this.options.discovery) {
-      // Hybrid named tools must stay inside the same enabled surface as discovery. A
-      // preset is resolved to enabledTools before the server is built, so intersecting
-      // here covers both --enabled-tools and --preset without duplicating preset logic.
-      const effectiveDirectTools = intersectToolPatterns(
-        this.options.enabledTools,
-        this.options.directTools
-      );
-      registerDiscoveryTools(registrar, this.graphClient!, {
-        ...registrationOptions,
-        // So discovery output can tell a caller whether a tool is callable by name
-        // here or only through execute-tool (#29).
-        directTools: effectiveDirectTools,
-      });
-
-      // Hybrid mode: named tools for the common operations, with the discovery triad
-      // still covering everything else. Additive on purpose. Loading every Graph tool
-      // costs roughly 260k tokens of schemas, which does not fit a 256k context, while
-      // trimming to a preset would put the rarely used tools out of reach entirely.
-      if (effectiveDirectTools) {
-        registerGraphTools(registrar, this.graphClient!, {
-          ...registrationOptions,
-          enabledTools: effectiveDirectTools,
-        });
-      }
+      registerDiscoveryTools(registrar, this.graphClient!, registrationOptions);
     } else {
       registerGraphTools(registrar, this.graphClient!, registrationOptions);
     }
@@ -437,7 +414,8 @@ class MicrosoftGraphServer {
   }
 
   async initialize(version: string): Promise<void> {
-    this.secrets = await getSecrets();
+    // A managed identity must not fall back to Key Vault or the built-in client id here
+    this.secrets = this.authManager.getAppSecrets?.() ?? (await getSecrets());
     this.version = version;
 
     // Detect multi-account mode and cache account names for schema enum.
@@ -482,11 +460,11 @@ class MicrosoftGraphServer {
         );
       }
       logger.warn(
-        "--http-local-file-tools: download-bytes-to-file is registered over HTTP; anyone who can reach this port can write files as the server's user."
+        "--http-local-file-tools: download-bytes-to-file is registered over HTTP, and upload-attachment-from-file too when MS365_MCP_UPLOAD_DIRS is set; anyone who can reach this port can write files, and read files from those directories, as the server's user."
       );
     } else if (this.options.httpLocalFileTools) {
       logger.warn(
-        '--http-local-file-tools has no effect in stdio mode, where download-bytes-to-file is always registered.'
+        '--http-local-file-tools has no effect in stdio mode, where the local file tools need no flag.'
       );
     }
 
@@ -517,30 +495,22 @@ class MicrosoftGraphServer {
 
     if (this.options.discovery) {
       logger.info(
-        this.options.directTools
-          ? `Hybrid mode enabled (experimental) - discovery tools plus direct tools matching ${this.options.directTools}`
-          : 'Discovery mode enabled (experimental) - registering discovery tool only'
+        this.options.eagerTools?.length
+          ? `Hybrid mode enabled - discovery plus eager tools: ${this.options.eagerTools.join(', ')}`
+          : 'Discovery mode enabled - registering discovery tools only'
       );
-    } else if (this.options.directTools) {
-      logger.warn('--direct-tools has no effect without --discovery; ignoring it');
     }
 
-    // The blocklist matches tool NAMES, so a generic passthrough tool that takes an
-    // arbitrary Graph method and path can still reach a blocked operation: graph-batch
-    // can carry POST /me/sendMail as a subrequest, and the download helpers accept any
-    // Graph path. Enforcing this properly means authorizing normalized method/path
-    // pairs on every request and every batch subrequest, which is tracked separately.
-    // Until then, say so plainly at startup rather than letting an operator believe a
-    // name-based policy is airtight.
+    // Batch subrequests are guarded by endpoint operation. Binary helpers still
+    // accept arbitrary Graph read paths beyond the name-based blocklist.
     if (this.options.blockedTools) {
-      const passthrough = ['graph-batch', 'download-bytes', 'get-download-url'].filter(
+      const passthrough = ['download-bytes', 'get-download-url'].filter(
         (name) => !new RegExp(this.options.blockedTools!, 'i').test(name)
       );
       if (passthrough.length > 0) {
         logger.warn(
-          `--blocked-tools matches tool names only. These generic passthrough tools are ` +
-            `still registered and can reach a blocked Graph operation by method and path: ` +
-            `${passthrough.join(', ')}. Add them to --blocked-tools if your policy must hold.`
+          `--blocked-tools cannot restrict arbitrary Graph read paths through: ` +
+            `${passthrough.join(', ')}. Block these tools too when read restrictions must hold.`
         );
       }
     }
@@ -1198,6 +1168,13 @@ class MicrosoftGraphServer {
       // Microsoft Graph MCP endpoints with bearer token auth (or pass-through
       // when --trust-proxy-auth is set; see microsoftBearerTokenAuthMiddleware
       // for the AuthManager fallback that makes that mode work).
+      // Optional caller allowlist for --obo (MS365_MCP_OBO_ALLOWED_TENANTS / _USERS).
+      const oboAllowlist = this.oboClient ? readOboAllowlist() : null;
+      if (oboAllowlist && (oboAllowlist.tenants.size > 0 || oboAllowlist.users.size > 0)) {
+        logger.info(
+          `OBO allowlist: ${oboAllowlist.tenants.size} tenant(s), ${oboAllowlist.users.size} user(s)`
+        );
+      }
       const mcpAuth = microsoftBearerTokenAuthMiddleware({
         trustProxyAuth: this.options.trustProxyAuth,
         allowUnauthenticatedDiscovery: this.options.allowUnauthenticatedDiscovery,
@@ -1238,7 +1215,28 @@ class MicrosoftGraphServer {
             if (req.microsoftAuth) {
               let accessToken = req.microsoftAuth.accessToken;
               if (this.oboClient) {
-                accessToken = await this.oboClient.exchangeToken(accessToken);
+                const refusal = oboAllowlist && oboAllowlistRefusal(accessToken, oboAllowlist);
+                if (refusal) {
+                  logger.warn(`OBO caller refused by the allowlist: ${refusal}`);
+                  res.status(403).json({ error: 'access_denied', error_description: refusal });
+                  return;
+                }
+                try {
+                  accessToken = await this.oboClient.exchangeToken(accessToken);
+                } catch (error) {
+                  // Entra refused the assertion itself: ask the client to sign in again
+                  // instead of reporting a server fault (#696).
+                  if (!isRejectedAssertion(error)) throw error;
+                  const description = 'The access token was rejected; sign in again';
+                  res
+                    .status(401)
+                    .set(
+                      'WWW-Authenticate',
+                      buildWwwAuthenticate(req, 'invalid_token', description, publicBase)
+                    )
+                    .json({ error: 'invalid_token', error_description: description });
+                  return;
+                }
               }
               await requestContext.run({ accessToken }, handler);
             } else {

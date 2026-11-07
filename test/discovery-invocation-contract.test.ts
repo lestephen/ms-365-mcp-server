@@ -48,7 +48,7 @@ describe('discovery payload states how to invoke each tool', () => {
   // triad still go through tool. Both must be observed.
   let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
-  const DIRECT = '^(get-mail-message)$';
+  const EAGER = ['get-mail-message'];
 
   function handlerFor(name: string) {
     const call = toolSpy.mock.calls.find((c) => c[0] === name);
@@ -75,7 +75,7 @@ describe('discovery payload states how to invoke each tool', () => {
       multiAccount: false,
       accountNames: [],
       httpMode: false,
-      directTools: DIRECT,
+      eagerTools: EAGER,
     });
 
     const schema = await parse('get-tool-schema', { tool_name: 'delete-mail-attachment' });
@@ -96,14 +96,14 @@ describe('discovery payload states how to invoke each tool', () => {
       multiAccount: false,
       accountNames: [],
       httpMode: false,
-      directTools: DIRECT,
+      eagerTools: EAGER,
     });
 
     const schema = await parse('get-tool-schema', { tool_name: 'get-mail-message' });
     expect(schema.invocation.via).toBe('direct');
   });
 
-  it('defaults to execute-tool when no direct pattern is configured', async () => {
+  it('defaults to execute-tool when no eager tools are configured', async () => {
     // Discovery-only mode: nothing is registered by name, so every tool routes
     // through execute-tool.
     registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
@@ -121,7 +121,7 @@ describe('discovery payload states how to invoke each tool', () => {
       multiAccount: false,
       accountNames: [],
       httpMode: false,
-      directTools: DIRECT,
+      eagerTools: EAGER,
     });
 
     const found = await parse('search-tools', { query: 'mail attachment message' });

@@ -44,7 +44,7 @@ vi.mock('../src/graph-tools.js', async (importOriginal) => {
 });
 
 const BLOCKED = '^(send-mail|send-draft-message|reply-mail-message)$';
-const DIRECT = '^(graph-batch|create-draft-email|get-current-user)$';
+const EAGER = ['graph-batch', 'create-draft-email', 'get-current-user'];
 
 // registerGraphTools(server, graphClient, options) and registerDiscoveryTools likewise.
 type RegistrationOptions = Record<string, unknown>;
@@ -71,56 +71,39 @@ describe('registerGraphTools wiring', () => {
   });
 
   it('passes the blocklist to the batch guard in hybrid mode', () => {
-    buildServer({ http: '3000', discovery: true, directTools: DIRECT, blockedTools: BLOCKED });
+    buildServer({ http: '3000', discovery: true, eagerTools: EAGER, blockedTools: BLOCKED });
 
-    expect(registerGraphTools).toHaveBeenCalledTimes(1);
-    const options = optionsOf(registerGraphTools);
+    expect(registerGraphTools).not.toHaveBeenCalled();
+    expect(registerDiscoveryTools).toHaveBeenCalledTimes(1);
+    const options = optionsOf(registerDiscoveryTools);
     // The regression: the hybrid call site dropping the blocklist and leaving the
     // batch guard with nothing to match against.
     expect(options.blockedTools).toBe(BLOCKED);
     expect(options.httpMode).toBe(true);
   });
 
-  it('intersects hybrid direct tools with the preset-enabled surface', () => {
+  it('passes eager names and the preset filter to the single discovery registrar', () => {
     const mailPreset = getCombinedPresetPattern(['mail']);
     buildServer({
       discovery: true,
       enabledTools: mailPreset,
-      directTools: '^get-',
+      eagerTools: ['get-mail-message', 'get-calendar-event'],
       orgMode: true,
     });
 
-    expect(registerGraphTools).toHaveBeenCalledTimes(1);
-    const effectiveDirectTools = optionsOf(registerGraphTools).enabledTools as (
-      name: string
-    ) => boolean;
-    expect(typeof effectiveDirectTools).toBe('function');
-    expect(effectiveDirectTools('get-mail-message')).toBe(true);
-    expect(effectiveDirectTools('get-calendar-event')).toBe(false);
-    expect(effectiveDirectTools('get-drive-item')).toBe(false);
-
-    // Discovery uses the same intersection for its invocation hints, so it cannot
-    // advertise a tool outside the preset as directly callable.
-    expect(optionsOf(registerDiscoveryTools).directTools).toBe(effectiveDirectTools);
-  });
-
-  it('intersects independently valid regexes with duplicate named captures', () => {
-    buildServer({
-      discovery: true,
-      enabledTools: '^(?<kind>get)-mail',
-      directTools: '^(?<kind>get)-',
-      orgMode: true,
-    });
-
-    const effective = optionsOf(registerGraphTools).enabledTools as (name: string) => boolean;
-    expect(typeof effective).toBe('function');
-    expect(effective('get-mail-message')).toBe(true);
-    expect(effective('get-calendar-event')).toBe(false);
-    expect(optionsOf(registerDiscoveryTools).directTools).toBe(effective);
+    expect(registerGraphTools).not.toHaveBeenCalled();
+    expect(registerDiscoveryTools).toHaveBeenCalledTimes(1);
+    const options = optionsOf(registerDiscoveryTools);
+    expect(options.enabledTools).toBe(mailPreset);
+    expect(options.eagerTools).toEqual(['get-mail-message', 'get-calendar-event']);
   });
 
   it('passes the blocklist in non-hybrid mode', () => {
-    buildServer({ http: '3000', enabledTools: DIRECT, blockedTools: BLOCKED });
+    buildServer({
+      http: '3000',
+      enabledTools: '^(graph-batch|create-draft-email|get-current-user)$',
+      blockedTools: BLOCKED,
+    });
 
     const options = optionsOf(registerGraphTools);
     expect(options.blockedTools).toBe(BLOCKED);
@@ -131,9 +114,9 @@ describe('registerGraphTools wiring', () => {
     // The shifted argument was a regex string, which is truthy, so httpMode was
     // accidentally correct in production HTTP and wrong for stdio with a blocklist:
     // stdioOnly tools would have been filtered out of a stdio server.
-    buildServer({ discovery: true, directTools: DIRECT, blockedTools: BLOCKED });
+    buildServer({ discovery: true, eagerTools: EAGER, blockedTools: BLOCKED });
 
-    const options = optionsOf(registerGraphTools);
+    const options = optionsOf(registerDiscoveryTools);
     expect(options.httpMode).toBe(false);
     expect(typeof options.httpMode).toBe('boolean');
   });

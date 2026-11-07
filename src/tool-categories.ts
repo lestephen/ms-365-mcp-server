@@ -89,15 +89,20 @@ const PRESET_META: Record<
 // enumerated list because a list would silently miss apps and every future preset.
 const UNIVERSAL_UTILITY_TOOLS = ['download-bytes', 'download-bytes-to-file'];
 
-// Scoped utilities are only meaningful where the resources they act on appear. get-download-url
-// resolves Graph's native pre-authenticated URLs for drive/SharePoint files and, on a server running
-// with --enable-attachment-urls, server-minted URLs for mail or calendar attachments, recordings and
-// other $value bytes, so every preset exposing those resources carries it (getCombinedPresetPattern
-// also adds it to every preset when that flag is on). parse-teams-url only parses Teams meeting URLs.
+// Scoped utilities are only meaningful where the resources they act on appear. Graph itself
+// publishes a pre-authenticated URL for drive/SharePoint file content ONLY (not mail/event
+// attachments or recordings), so get-download-url rides with the drive-backed presets; where it is
+// absent the universal download-bytes still reads the bytes. A server running with
+// --enable-attachment-urls mints its own URL for those other byte resources, so
+// getCombinedPresetPattern adds it to every preset then. parse-teams-url only parses Teams meeting
+// URLs.
+// read-mail-text reads mail, so it rides with the mail-backed presets.
 const SCOPED_UTILITY_TOOLS: Record<string, string[]> = {
   'get-download-url': ['files', 'onedrive', 'personal', 'work', 'search'],
   'get-upload-url': ['mail', 'calendar', 'outlook', 'personal', 'work'],
+  'upload-attachment-from-file': ['mail', 'calendar', 'outlook', 'personal', 'work'],
   'parse-teams-url': ['teams', 'teams-write', 'work'],
+  'read-mail-text': ['mail', 'outlook', 'personal', 'work'],
 };
 
 // Fail fast if a scoped utility references a preset that does not exist (e.g. a typo like
@@ -112,7 +117,18 @@ for (const [tool, presets] of Object.entries(SCOPED_UTILITY_TOOLS)) {
   }
 }
 
-function presetPattern(preset: string): RegExp {
+/**
+ * Exact tool names unlocked by a named preset (endpoints.json membership plus
+ * utility-tool rules). Sorted for stable docs and tests. The `all` preset lists
+ * every endpoint tool plus every utility that belongs to at least one named preset.
+ */
+function getToolsForPreset(preset: string): string[] {
+  if (preset === 'all') {
+    const endpointNames = [...new Set(endpointEntries.map((e) => e.toolName))];
+    const utilityNames = [...UNIVERSAL_UTILITY_TOOLS, ...Object.keys(SCOPED_UTILITY_TOOLS)];
+    return [...new Set([...endpointNames, ...utilityNames])].sort();
+  }
+
   const endpointNames = [
     ...new Set(endpointEntries.filter((e) => e.presets?.includes(preset)).map((e) => e.toolName)),
   ];
@@ -121,14 +137,19 @@ function presetPattern(preset: string): RegExp {
   if (endpointNames.length === 0) {
     throw new Error(`Preset "${preset}" matches no endpoints in endpoints.json`);
   }
-  const names = [
-    ...endpointNames,
-    ...(PRESET_META[preset]?.omitUniversalUtilities ? [] : UNIVERSAL_UTILITY_TOOLS),
-    ...Object.entries(SCOPED_UTILITY_TOOLS)
-      .filter(([, presets]) => presets.includes(preset))
-      .map(([name]) => name),
-  ];
-  return new RegExp(`^(?:${names.join('|')})$`);
+  return [
+    ...new Set([
+      ...endpointNames,
+      ...(PRESET_META[preset]?.omitUniversalUtilities ? [] : UNIVERSAL_UTILITY_TOOLS),
+      ...Object.entries(SCOPED_UTILITY_TOOLS)
+        .filter(([, presets]) => presets.includes(preset))
+        .map(([name]) => name),
+    ]),
+  ].sort();
+}
+
+function presetPattern(preset: string): RegExp {
+  return new RegExp(`^(?:${getToolsForPreset(preset).join('|')})$`);
 }
 
 export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
@@ -176,11 +197,13 @@ export function listPresets(): Array<{
   description: string;
   requiresOrgMode?: boolean;
 }> {
-  return Object.values(TOOL_CATEGORIES).map((category) => ({
-    name: category.name,
-    description: category.description,
-    requiresOrgMode: category.requiresOrgMode,
-  }));
+  return Object.values(TOOL_CATEGORIES)
+    .map((category) => ({
+      name: category.name,
+      description: category.description,
+      requiresOrgMode: category.requiresOrgMode,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function presetRequiresOrgMode(preset: string): boolean {

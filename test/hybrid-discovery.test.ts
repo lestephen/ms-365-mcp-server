@@ -1,152 +1,201 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { GraphClient } from '../src/graph-client.js';
 import { registerDiscoveryTools, registerGraphTools } from '../src/graph-tools.js';
-import { buildMcpServerInstructions } from '../src/mcp-instructions.js';
-import GraphClient from '../src/graph-client.js';
+import type { GraphToolRegistrationOptions } from '../src/graph-tools.js';
 
-vi.mock('../src/logger.js', () => ({
-  default: { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
-}));
+vi.mock('../src/logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
+const clients: Client[] = [];
+afterEach(async () => {
+  delete process.env.MS365_MCP_REQUIRE_CONFIRM;
+  await Promise.all(clients.splice(0).map((client) => client.close()));
+});
 
-vi.mock('../src/generated/client-beta.js', () => ({ api: { endpoints: [] } }));
-vi.mock('../src/generated/client.js', () => ({
-  api: {
-    endpoints: [
-      {
-        alias: 'get-mail-message',
-        method: 'GET',
-        path: '/me/messages/{id}',
-        description: 'Get a mail message',
-      },
-      {
-        alias: 'create-draft-email',
-        method: 'POST',
-        path: '/me/messages',
-        description: 'Create a draft email',
-      },
-      // Stands in for the long tail: a rarely used tool that should stay reachable
-      // without its schema being loaded up front.
-      {
-        alias: 'update-place',
-        method: 'PATCH',
-        path: '/places/{id}',
-        description: 'Update a place',
-      },
-      {
-        alias: 'list-webinar-sessions',
-        method: 'GET',
-        path: '/solutions/virtualEvents/webinars/{id}/sessions',
-        description: 'List webinar sessions',
-      },
-    ],
-  },
-}));
+async function connect(options: GraphToolRegistrationOptions, discovery = true) {
+  const graphRequest = vi
+    .fn()
+    .mockResolvedValue({ content: [{ type: 'text', text: '{"value":[]}' }] });
+  const graph = { graphRequest } as unknown as GraphClient;
+  const server = new McpServer({ name: 'hybrid-test', version: '1' });
+  if (discovery) registerDiscoveryTools(server, graph, options);
+  else registerGraphTools(server, graph, options);
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  const client = new Client({ name: 'test-client', version: '1' });
+  await client.connect(b);
+  clients.push(client);
+  return { client, graphRequest };
+}
+const filter = '^(list-mail-messages|send-mail|list-users|download-bytes)$';
 
-/**
- * Hybrid mode: register the handful of tools skills name directly, and keep
- * search-tools / get-tool-schema / execute-tool alongside them so the long tail is
- * still reachable. Loading all Graph tools costs roughly 260k tokens of schemas
- * even after the request bodies are narrowed, which does not fit a 256k context.
- * Trimming to a preset would fit but would amputate the rarely used tools, so the
- * point of this mode is full reach at a fraction of the up-front cost.
- */
-describe('hybrid discovery mode', () => {
-  let server: McpServer;
-  let graphClient: GraphClient;
-  let toolSpy: ReturnType<typeof vi.spyOn>;
-  // Graph endpoints go through registerTool upstream; utilities and the discovery
-  // triad still go through tool. Both must be observed.
-  let registerToolSpy: ReturnType<typeof vi.spyOn>;
-
-  const registeredNames = () => [
-    ...toolSpy.mock.calls.map((call) => call[0] as string),
-    ...registerToolSpy.mock.calls.map((call) => call[0] as string),
-  ];
-  const DISCOVERY_TRIAD = ['search-tools', 'get-tool-schema', 'execute-tool'];
-
-  beforeEach(() => {
-    server = new McpServer({ name: 'test', version: '0' });
-    graphClient = {} as GraphClient;
-    toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => ({}) as never);
-    registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation(() => ({}) as never);
+describe('hybrid discovery', () => {
+  it('leaves plain discovery at three tools', async () => {
+    const { client } = await connect({ orgMode: true, httpMode: true, enabledTools: filter });
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual([
+      'search-tools',
+      'get-tool-schema',
+      'execute-tool',
+    ]);
   });
-
-  it('registers the direct tools matching the pattern alongside the discovery triad', () => {
-    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
-    registerGraphTools(server, graphClient, {
-      readOnly: false,
-      enabledTools: '^(get-mail-message|create-draft-email)$',
+  it('exposes only selected tools alongside complete discovery', async () => {
+    const { client } = await connect({
       orgMode: true,
+      httpMode: true,
+      enabledTools: filter,
+      eagerTools: ['list-mail-messages', 'download-bytes', 'list-mail-messages'],
     });
-
-    const names = registeredNames();
-    for (const tool of DISCOVERY_TRIAD) expect(names).toContain(tool);
-    expect(names).toContain('get-mail-message');
-    expect(names).toContain('create-draft-email');
+    const tools = (await client.listTools()).tools;
+    expect(tools.map((t) => t.name)).toEqual([
+      'list-mail-messages',
+      'download-bytes',
+      'search-tools',
+      'get-tool-schema',
+      'execute-tool',
+    ]);
+    const search = await client.callTool({
+      name: 'search-tools',
+      arguments: { query: 'send mail' },
+    });
+    expect(JSON.stringify(search)).toContain('send-mail');
+    const eagerSearch = await client.callTool({
+      name: 'search-tools',
+      arguments: { query: 'list mail messages' },
+    });
+    expect(JSON.stringify(eagerSearch)).toContain('list-mail-messages');
   });
-
-  it('does not load schemas for tools outside the direct pattern', () => {
-    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
-    registerGraphTools(server, graphClient, {
-      readOnly: false,
-      enabledTools: '^(get-mail-message|create-draft-email)$',
+  it('preserves direct schemas and execution on both paths', async () => {
+    const options = { orgMode: true, httpMode: true, enabledTools: filter };
+    const normal = await connect(options, false);
+    const hybrid = await connect({ ...options, eagerTools: ['list-mail-messages'] });
+    const schema = async (client: Client) =>
+      (await client.listTools()).tools.find((t) => t.name === 'list-mail-messages');
+    expect(await schema(hybrid.client)).toEqual(await schema(normal.client));
+    const args = { top: 2, select: 'id' };
+    const direct = await hybrid.client.callTool({ name: 'list-mail-messages', arguments: args });
+    const discovered = await hybrid.client.callTool({
+      name: 'execute-tool',
+      arguments: { tool_name: 'list-mail-messages', parameters: args },
+    });
+    expect(discovered).toEqual(direct);
+    expect(hybrid.graphRequest).toHaveBeenCalledTimes(2);
+    expect(hybrid.graphRequest.mock.calls[0]).toEqual(hybrid.graphRequest.mock.calls[1]);
+  });
+  it('cannot restore tools excluded by global filters or read-only mode', async () => {
+    const { client, graphRequest } = await connect({
       orgMode: true,
+      httpMode: true,
+      readOnly: true,
+      enabledTools: '^list-mail-messages$',
+      eagerTools: ['send-mail', 'list-users'],
     });
-
-    const names = registeredNames();
-    expect(names).not.toContain('update-place');
-    expect(names).not.toContain('list-webinar-sessions');
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain('send-mail');
+    const denied = await client.callTool({
+      name: 'execute-tool',
+      arguments: { tool_name: 'send-mail', parameters: { confirm: true } },
+    });
+    expect(denied.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
   });
-
-  it('keeps every tool reachable through execute-tool, including ones not registered directly', async () => {
-    // The discovery registry is built without a filter, so the long tail stays
-    // executable even though its schema was never sent to the model.
-    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
-
-    const executeTool = toolSpy.mock.calls.find((call) => call[0] === 'execute-tool');
-    expect(executeTool).toBeDefined();
-    const handler = executeTool![executeTool!.length - 1] as (args: {
-      tool_name: string;
-      parameters?: Record<string, unknown>;
-    }) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
-
-    const result = await handler({ tool_name: 'update-place', parameters: {} });
-    // Reached dispatch rather than being rejected as unknown. Without credentials it
-    // cannot go further, which is enough to prove the tool is in the registry.
-    expect(result.content[0].text).not.toContain('Tool not found');
-  });
-
-  it('registers only the triad when no direct pattern is given, preserving discovery-only behaviour', () => {
-    registerDiscoveryTools(server, graphClient, { readOnly: false, orgMode: true });
-
-    const names = registeredNames();
-    for (const tool of DISCOVERY_TRIAD) expect(names).toContain(tool);
-    expect(names).not.toContain('get-mail-message');
-    expect(names).not.toContain('create-draft-email');
-  });
-
-  it('tells the model that named tools and the discovery triad coexist', () => {
-    const hybrid = buildMcpServerInstructions({
-      discovery: true,
-      directTools: true,
+  it('cannot restore blocked eager tools through registration or discovery dispatch', async () => {
+    const { client, graphRequest } = await connect({
       orgMode: true,
-      readOnly: false,
-      multiAccount: false,
+      httpMode: true,
+      enabledTools: filter,
+      eagerTools: ['send-mail', 'list-mail-messages'],
+      blockedTools: '^send-mail$',
     });
-    const discoveryOnly = buildMcpServerInstructions({
-      discovery: true,
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain('list-mail-messages');
+    expect(names).not.toContain('send-mail');
+    const denied = await client.callTool({
+      name: 'execute-tool',
+      arguments: { tool_name: 'send-mail', parameters: { body: {}, confirm: true } },
+    });
+    expect(denied.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
+    const schema = await client.callTool({
+      name: 'get-tool-schema',
+      arguments: { tool_name: 'send-mail' },
+    });
+    expect(schema.isError).toBe(true);
+  });
+  it('cannot restore scope-denied or HTTP-local tools', async () => {
+    const { client } = await connect({
       orgMode: true,
-      readOnly: false,
-      multiAccount: false,
+      httpMode: true,
+      allowedScopes: 'Mail.Read',
+      eagerTools: ['send-mail', 'download-bytes-to-file'],
     });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain('send-mail');
+    expect(names).not.toContain('download-bytes-to-file');
+  });
+  it('retains mutation confirmation on both paths', async () => {
+    process.env.MS365_MCP_REQUIRE_CONFIRM = 'true';
+    const { client, graphRequest } = await connect({
+      orgMode: true,
+      httpMode: true,
+      enabledTools: filter,
+      eagerTools: ['send-mail'],
+    });
+    for (const name of ['send-mail', 'execute-tool']) {
+      const arguments_ =
+        name === 'send-mail' ? { body: {} } : { tool_name: 'send-mail', parameters: { body: {} } };
+      expect((await client.callTool({ name, arguments: arguments_ })).isError).toBe(true);
+    }
+    expect(graphRequest).not.toHaveBeenCalled();
+    await client.callTool({ name: 'send-mail', arguments: { body: {}, confirm: true } });
+    await client.callTool({
+      name: 'execute-tool',
+      arguments: { tool_name: 'send-mail', parameters: { body: {}, confirm: true } },
+    });
+    expect(graphRequest).toHaveBeenCalledTimes(2);
+  });
+  it('isolates a failed direct registration while preserving discovery', async () => {
+    const server = new McpServer({ name: 'failure-test', version: '1' });
+    const register = vi.spyOn(server, 'registerTool').mockImplementationOnce(() => {
+      throw new Error('Synthetic registration failure');
+    });
+    registerDiscoveryTools(server, {} as GraphClient, {
+      orgMode: true,
+      httpMode: true,
+      enabledTools: filter,
+      eagerTools: ['list-mail-messages'],
+    });
+    register.mockRestore();
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const client = new Client({ name: 'failure-client', version: '1' });
+    await client.connect(b);
+    clients.push(client);
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual([
+      'search-tools',
+      'get-tool-schema',
+      'execute-tool',
+    ]);
+    const schema = await client.callTool({
+      name: 'get-tool-schema',
+      arguments: { tool_name: 'list-mail-messages' },
+    });
+    expect(schema.isError).not.toBe(true);
+    const payload = JSON.parse((schema.content as Array<{ text: string }>)[0].text);
+    expect(payload.invocation.via).toBe('execute-tool');
+    const search = await client.callTool({
+      name: 'search-tools',
+      arguments: { query: 'list mail messages' },
+    });
+    const results = JSON.parse((search.content as Array<{ text: string }>)[0].text).tools;
+    const match = results.find((tool: { name: string }) => tool.name === 'list-mail-messages');
+    expect(match.invoke_via).toBe('execute-tool');
+  });
 
-    // Discovery-only must keep saying Graph is reached only via the triad.
-    expect(discoveryOnly).toContain('search-tools');
-    expect(discoveryOnly).not.toMatch(/already registered directly/i);
-
-    // Hybrid must say both paths exist, or the model will route everything through
-    // execute-tool and ignore the named tools it can see.
-    expect(hybrid).toContain('search-tools');
-    expect(hybrid).toMatch(/already registered directly/i);
+  it('rejects unknown eager names before exposing a server', () => {
+    expect(() =>
+      registerDiscoveryTools(new McpServer({ name: 'test', version: '1' }), {} as GraphClient, {
+        eagerTools: ['not-a-tool'],
+      })
+    ).toThrow('Unknown eager tool names');
   });
 });
