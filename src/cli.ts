@@ -69,7 +69,7 @@ program
   )
   .option(
     '--enabled-tools-file <path>',
-    'Filter tools using a file with one regex per line (same semantics as --enabled-tools; blank lines and whole-line # comments ignored). Overrides --enabled-tools; overridden by --preset. Equivalent env var: ENABLED_TOOLS_FILE.'
+    'Filter tools using a file with one regex per line (same semantics as --enabled-tools; blank lines and whole-line # comments ignored). Overrides --enabled-tools; overridden by --preset. ENABLED_TOOLS_FILE provides the file path through the environment and overrides --preset as well as the CLI filters.'
   )
   .option(
     '--allowed-scopes <scopes>',

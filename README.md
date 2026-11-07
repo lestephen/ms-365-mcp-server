@@ -755,8 +755,8 @@ mode. They also remain searchable and executable through discovery. Existing
 `--preset`, `--enabled-tools`, `--allowed-scopes`, `--read-only`, organization-mode
 and transport restrictions apply first: an eager selection cannot enable a
 filtered-out tool or add permissions. Recognized but unavailable tools are
-omitted with a diagnostic logged once per server instance. HTTP still excludes
-server-local file tools.
+omitted with a diagnostic logged once per server instance. HTTP excludes
+server-local file tools unless `--http-local-file-tools` is set.
 
 Select a small set: exposing many generated Graph schemas can consume substantial
 model context. This option does not shrink individual schemas. Without

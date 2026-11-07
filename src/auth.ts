@@ -1,6 +1,7 @@
 import type { AccountInfo, Configuration, ICachePlugin, TokenCacheContext } from '@azure/msal-node';
 import { AuthError, PublicClientApplication } from '@azure/msal-node';
 import logger from './logger.js';
+import { UTILITY_SCOPE_METADATA } from './lib/utility-scope-metadata.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -51,8 +52,8 @@ const endpointsData = JSON.parse(
   readFileSync(path.join(__dirname, 'endpoints.json'), 'utf8')
 ) as EndpointConfig[];
 
-const endpoints = {
-  default: endpointsData,
+const endpoints: { default: EndpointConfig[] } = {
+  default: [...endpointsData, ...UTILITY_SCOPE_METADATA],
 };
 
 /**

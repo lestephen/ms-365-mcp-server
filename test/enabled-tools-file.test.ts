@@ -26,9 +26,14 @@ mail|calendar
     expect(parseEnabledToolsFileContent('foo#bar\n# skip\nbaz')).toBe('foo#bar|baz');
   });
 
-  it('returns an empty string for a comment-only file', () => {
-    expect(parseEnabledToolsFileContent('# nothing\n\n')).toBe('');
-  });
+  it.each(['', ' \t\r\n', '# nothing\n\n', '  # disabled\r\n\t# still disabled\r\n'])(
+    'rejects content with no active patterns: %j',
+    (content) => {
+      expect(() => parseEnabledToolsFileContent(content)).toThrow(
+        'enabled tools file must contain at least one active pattern'
+      );
+    }
+  );
 });
 
 describe('readEnabledToolsFromFile', () => {

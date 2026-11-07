@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { auditLog, getUserIdentityForAudit, type AuditEvent } from './audit-log.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
 import { compileBlockedToolsRegex } from './lib/tool-blocklist.js';
+import { getUtilityScopeMetadata } from './lib/utility-scope-metadata.js';
 import {
   recordBatchSubrequest,
   recordBlockedOperation,
@@ -985,15 +986,37 @@ interface UtilityTool {
   enabled?: () => boolean;
   // Works only on the signed-in user's own /me paths, so it is hidden in --app-mode.
   meOnly?: boolean;
+  // Caller-selected Graph targets cannot be bounded by endpoint scope metadata.
+  dynamicGraphTarget?: boolean;
 }
 
 export function isUtilityToolAvailable(
   utility: UtilityTool,
-  options: { readOnly: boolean; httpMode: boolean; scopeMode: ScopeMode }
+  options: {
+    readOnly: boolean;
+    httpMode: boolean;
+    scopeMode: ScopeMode;
+    allowedScopesValue?: string;
+  }
 ): boolean {
   if (options.readOnly && utility.mutatesState) return false;
   if (options.httpMode && utility.stdioOnly) return false;
   if (options.scopeMode === 'app' && utility.meOnly) return false;
+  if (
+    options.scopeMode === 'app' &&
+    options.allowedScopesValue !== undefined &&
+    utility.dynamicGraphTarget
+  )
+    return false;
+  const scopeMetadata = getUtilityScopeMetadata(utility.name);
+  if (
+    scopeMetadata &&
+    getMissingAllowedScopesForGroups(
+      getEndpointScopeGroups(scopeMetadata, options.scopeMode),
+      parseAllowedScopes(options.allowedScopesValue)
+    ).length > 0
+  )
+    return false;
   if (utility.enabled && !utility.enabled()) return false;
   return true;
 }
@@ -1035,6 +1058,20 @@ function deniedToolPolicyForGraphTool(
   };
 }
 
+/** Application tokens use /.default, so endpoint filtering must also close generic dispatch. */
+function missingToolScopes(
+  tool: (typeof allEndpoints)[number],
+  config: EndpointConfig | undefined,
+  mode: boolean | ScopeMode,
+  allowedScopes: string[] | undefined
+): string[] {
+  if (mode === 'app' && allowedScopes !== undefined && tool.path === '/$batch') {
+    return ['batch subrequest scope enforcement'];
+  }
+  if (allowedScopes !== undefined && !config) return ['endpoint scope metadata'];
+  return getMissingAllowedScopesForGroups(getEndpointScopeGroups(config, mode), allowedScopes);
+}
+
 function collectDeniedToolPolicies(options: {
   readOnly: boolean;
   scopeMode: ScopeMode;
@@ -1064,13 +1101,7 @@ function collectDeniedToolPolicies(options: {
       continue;
     }
 
-    const missingScopes =
-      allowedScopes !== undefined && !endpointConfig
-        ? ['endpoint scope metadata']
-        : getMissingAllowedScopesForGroups(
-            getEndpointScopeGroups(endpointConfig, options.scopeMode),
-            allowedScopes
-          );
+    const missingScopes = missingToolScopes(tool, endpointConfig, options.scopeMode, allowedScopes);
     if (missingScopes.length > 0) {
       deniedTools.set(
         tool.alias,
@@ -1602,6 +1633,7 @@ async function mintDownloadUrl(
 export const UTILITY_TOOLS: readonly UtilityTool[] = [
   {
     name: 'get-upload-url',
+    dynamicGraphTarget: true,
     method: 'PUT',
     path: 'tool:get-upload-url',
     searchKeywords:
@@ -1663,6 +1695,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
   {
     name: 'upload-attachment-from-file',
+    dynamicGraphTarget: true,
     method: 'POST',
     path: 'tool:upload-attachment-from-file',
     searchKeywords:
@@ -2013,6 +2046,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
   {
     name: 'download-bytes',
+    dynamicGraphTarget: true,
     method: 'GET',
     path: 'tool:download-bytes',
     description:
@@ -2172,6 +2206,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
   {
     name: 'download-bytes-to-file',
+    dynamicGraphTarget: true,
     method: 'GET',
     path: 'tool:download-bytes-to-file',
     searchKeywords:
@@ -2345,6 +2380,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
   {
     name: 'get-download-url',
+    dynamicGraphTarget: true,
     method: 'GET',
     path: 'tool:get-download-url',
     searchKeywords:
@@ -4254,13 +4290,7 @@ export function registerGraphTools(
       continue;
     }
 
-    const missingScopes =
-      allowedScopes !== undefined && !endpointConfig
-        ? ['endpoint scope metadata']
-        : getMissingAllowedScopesForGroups(
-            getEndpointScopeGroups(endpointConfig, scopeMode),
-            allowedScopes
-          );
+    const missingScopes = missingToolScopes(tool, endpointConfig, scopeMode, allowedScopes);
     if (missingScopes.length > 0) {
       disabledByAllowedScopes.push({ toolName: tool.alias, missingScopes });
       skippedCount++;
@@ -4317,7 +4347,8 @@ export function registerGraphTools(
     userFields,
   };
   for (const utility of UTILITY_TOOLS) {
-    if (!isUtilityToolAvailable(utility, { readOnly, httpMode, scopeMode })) continue;
+    if (!isUtilityToolAvailable(utility, { readOnly, httpMode, scopeMode, allowedScopesValue }))
+      continue;
     if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
     if (blockedToolsRegex && blockedToolsRegex.test(utility.name)) continue;
     try {
@@ -4470,13 +4501,7 @@ export function buildToolsRegistry(
       continue;
     }
 
-    const missingScopes =
-      allowedScopes !== undefined && !endpointConfig
-        ? ['endpoint scope metadata']
-        : getMissingAllowedScopesForGroups(
-            getEndpointScopeGroups(endpointConfig, mode),
-            allowedScopes
-          );
+    const missingScopes = missingToolScopes(tool, endpointConfig, mode, allowedScopes);
     if (missingScopes.length > 0) {
       disabledByAllowedScopes.push({ toolName: tool.alias, missingScopes });
       continue;
@@ -4675,7 +4700,8 @@ export function registerDiscoveryTools(
     );
   }
   const utilityTools = UTILITY_TOOLS.filter((u) => {
-    if (!isUtilityToolAvailable(u, { readOnly, httpMode, scopeMode })) return false;
+    if (!isUtilityToolAvailable(u, { readOnly, httpMode, scopeMode, allowedScopesValue }))
+      return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
     if (blockedToolsRegex && blockedToolsRegex.test(u.name)) return false;
     return true;

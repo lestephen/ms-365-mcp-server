@@ -671,6 +671,25 @@ describe('CLI Module', () => {
       expect(allows(enabledTools, 'list-mail-messages')).toBe(false);
     });
 
+    it.each([
+      { source: 'flag', contents: '' },
+      { source: 'flag', contents: '  # no enabled tools\n\n' },
+      { source: 'environment', contents: '' },
+      { source: 'environment', contents: '  # no enabled tools\n\n' },
+    ])('rejects an empty filter from $source, including with a preset', ({ source, contents }) => {
+      const path = writeToolsFile(contents);
+      if (source === 'environment') process.env.ENABLED_TOOLS_FILE = path;
+      commanderMocks.mockCommand.opts.mockReturnValue({
+        preset: 'mail',
+        ...(source === 'flag' ? { enabledToolsFile: path } : {}),
+      });
+      parseArgs();
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('enabled tools file must contain at least one active pattern')
+      );
+      expect(process.exit).toHaveBeenCalledWith(1);
+    });
+
     it('fails when the file path is empty', () => {
       commanderMocks.mockCommand.opts.mockReturnValue({ enabledToolsFile: '   ' });
       parseArgs();
