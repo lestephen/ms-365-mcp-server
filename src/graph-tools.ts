@@ -1060,13 +1060,14 @@ function deniedToolPolicyForGraphTool(
 
 /** Application tokens use /.default, so endpoint filtering must also close generic dispatch. */
 function missingToolScopes(
-  tool: (typeof allEndpoints)[number],
   config: EndpointConfig | undefined,
   mode: boolean | ScopeMode,
   allowedScopes: string[] | undefined
 ): string[] {
-  if (mode === 'app' && allowedScopes !== undefined && tool.path === '/$batch') {
-    return ['batch subrequest scope enforcement'];
+  // Empty appScopes means permissions depend on the requested resource (batch
+  // subrequests and subscription targets), not that the operation needs no roles.
+  if (mode === 'app' && allowedScopes !== undefined && config?.appScopes?.length === 0) {
+    return ['resource-dependent application scope enforcement'];
   }
   if (allowedScopes !== undefined && !config) return ['endpoint scope metadata'];
   return getMissingAllowedScopesForGroups(getEndpointScopeGroups(config, mode), allowedScopes);
@@ -1101,7 +1102,7 @@ function collectDeniedToolPolicies(options: {
       continue;
     }
 
-    const missingScopes = missingToolScopes(tool, endpointConfig, options.scopeMode, allowedScopes);
+    const missingScopes = missingToolScopes(endpointConfig, options.scopeMode, allowedScopes);
     if (missingScopes.length > 0) {
       deniedTools.set(
         tool.alias,
@@ -4290,7 +4291,7 @@ export function registerGraphTools(
       continue;
     }
 
-    const missingScopes = missingToolScopes(tool, endpointConfig, scopeMode, allowedScopes);
+    const missingScopes = missingToolScopes(endpointConfig, scopeMode, allowedScopes);
     if (missingScopes.length > 0) {
       disabledByAllowedScopes.push({ toolName: tool.alias, missingScopes });
       skippedCount++;
@@ -4501,7 +4502,7 @@ export function buildToolsRegistry(
       continue;
     }
 
-    const missingScopes = missingToolScopes(tool, endpointConfig, mode, allowedScopes);
+    const missingScopes = missingToolScopes(endpointConfig, mode, allowedScopes);
     if (missingScopes.length > 0) {
       disabledByAllowedScopes.push({ toolName: tool.alias, missingScopes });
       continue;

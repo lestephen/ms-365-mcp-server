@@ -13,6 +13,12 @@ vi.mock('../src/lib/attachment-minting.js', () => ({ getAttachmentMinting: () =>
 const clients: Client[] = [];
 const passthrough = [
   'graph-batch',
+  'list-subscriptions',
+  'create-subscription',
+  'get-subscription',
+  'update-subscription',
+  'delete-subscription',
+  'reauthorize-subscription',
   'download-bytes',
   'download-bytes-to-file',
   'get-download-url',
@@ -48,6 +54,17 @@ async function connect(
   return { client, graphRequest };
 }
 
+const subscriptionArgs = {
+  body: {
+    changeType: 'created',
+    notificationUrl: 'https://example.com/notifications',
+    resource: '/users/victim/messages',
+    expirationDateTime: '2030-01-01T00:00:00Z',
+    clientState: 'test-state',
+  },
+  confirm: true,
+};
+
 const batchArgs = {
   body: { requests: [{ id: '1', method: 'DELETE', url: '/users/victim' }] },
   confirm: true,
@@ -65,7 +82,9 @@ describe('application scope restrictions close generic Graph paths', () => {
           const args =
             name === 'graph-batch'
               ? batchArgs
-              : { target: '/users/victim/messages/message/$value', confirm: true };
+              : name === 'create-subscription'
+                ? subscriptionArgs
+                : { target: '/users/victim/messages/message/$value', confirm: true };
           expect((await client.callTool({ name, arguments: args })).isError).toBe(true);
           if (mode !== 'direct') {
             expect(
