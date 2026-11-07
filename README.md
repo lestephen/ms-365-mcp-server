@@ -166,7 +166,7 @@ npx @softeria/ms-365-mcp-server \
   --allowed-scopes 'User.Read Mail.Read Files.Read'
 ```
 
-For longer filters, put one regex per line in a file and pass `--enabled-tools-file` / `ENABLED_TOOLS_FILE`. Blank lines and whole-line `#` comments are dropped; the rest are joined with `|`, so the file is equivalent to `--enabled-tools=line1|line2|…`:
+For longer filters, put one regex per line in a file and pass `--enabled-tools-file` / `ENABLED_TOOLS_FILE`. A file containing no active pattern is rejected and the server refuses to start. Blank lines and whole-line `#` comments are dropped; the rest are joined with `|`, so the file is equivalent to `--enabled-tools=line1|line2|…`:
 
 ```text
 # tools.txt
@@ -817,7 +817,8 @@ When running as an MCP server, the following options can be used:
 --enabled-tools <pattern> Filter tools using regex pattern (e.g., "excel|contact" to enable Excel and Contact tools)
 --enabled-tools-file <path> Filter tools using a file with one regex per line (same as --enabled-tools;
                   blank lines and whole-line # comments ignored). Overrides --enabled-tools;
-                  overridden by --preset. Equivalent env var: ENABLED_TOOLS_FILE
+                  overridden by --preset. ENABLED_TOOLS_FILE provides the file path through the
+                  environment and overrides --preset as well as the CLI filters.
 --preset <names>  Use preset tool categories (comma-separated). See "Tool Presets" section above
 --list-presets    List all available presets and exit
 --toon            (experimental) Enable TOON output format for 30-60% token reduction
@@ -831,7 +832,7 @@ Environment variables:
 
 - `READ_ONLY=true|1`: Alternative to --read-only flag
 - `ENABLED_TOOLS`: Filter tools using a regex pattern (alternative to --enabled-tools flag)
-- `ENABLED_TOOLS_FILE`: Path to a file with one regex per line (alternative to --enabled-tools-file). Blank lines and whole-line `#` comments are dropped, then lines are joined with `|` (same as `ENABLED_TOOLS=line1|line2|…`). Layering (later wins): `--enabled-tools` → `--enabled-tools-file` → `--preset` → `ENABLED_TOOLS` → `ENABLED_TOOLS_FILE`
+- `ENABLED_TOOLS_FILE`: Path to a file with one regex per line (alternative to --enabled-tools-file). A file with no active pattern is rejected at startup. Blank lines and whole-line `#` comments are dropped, then lines are joined with `|` (same as `ENABLED_TOOLS=line1|line2|…`). Layering (later wins): `--enabled-tools` → `--enabled-tools-file` → `--preset` → `ENABLED_TOOLS` → `ENABLED_TOOLS_FILE`
 - `MS365_MCP_ORG_MODE=true|1`: Enable organization/work mode (alternative to --org-mode flag)
 - `MS365_MCP_FORCE_WORK_SCOPES=true|1`: Backwards compatibility for MS365_MCP_ORG_MODE
 - `MS365_MCP_APP_MODE=true|1`: Enable app mode (alternative to --app-mode flag)
