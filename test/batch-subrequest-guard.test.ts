@@ -314,6 +314,10 @@ describe('blocked writes reached through another path are refused (#95)', () => 
     ['POST', '/me/messages/AAMk/graph.send'],
     ['POST', '/me/events/e1/graph.forward'],
     ['POST', '/users/u1/sendMail()'],
+    // Path-addressed items with the action after the closing colon, slash optional.
+    ['PUT', '/me/drive/root:/notes.txt:content'],
+    ['PUT', '/me/drive/root:/notes.txt:/content:'],
+    ['POST', '/me/drive/root:/folder:invite'],
   ])('refuses %s %s', (method, url) => {
     expect(check(method, url)).toHaveLength(1);
   });
@@ -329,6 +333,14 @@ describe('blocked writes reached through another path are refused (#95)', () => 
     ['POST', '/me/messages/AAMk/graph.createReply()'],
   ])('allows %s %s', (method, url) => {
     expect(check(method, url)).toEqual([]);
+  });
+
+  it('strips trailing empty argument lists in linear time', () => {
+    const long = '/me/messages/AAMk/' + '()'.repeat(50_000) + 'x';
+    const started = performance.now();
+    expect(check('POST', long)).toEqual([]);
+    expect(check('POST', '/me/messages/AAMk/send' + '( )'.repeat(50_000))).toHaveLength(1);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it('blocks no allowed catalogue tool by the write-alias rule', () => {

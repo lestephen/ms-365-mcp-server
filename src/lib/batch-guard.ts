@@ -242,12 +242,39 @@ export function canonicalizeBatchBody(body: unknown): CanonicalBatch {
  * `send( )` all reach the same action, so the guard compares them as one.
  */
 function canonicalSegment(segment: string): string {
-  return segment.replace(/^(?:microsoft\.graph|graph)\./i, '').replace(/(?:\(\s*\))+$/, '');
+  return withoutEmptyCalls(segment.replace(/^(?:microsoft\.graph|graph)\./i, ''));
 }
 
+/**
+ * Drop trailing empty argument lists, `()` or `( )`, by one backward scan. A regex such as
+ * `(?:\(\s*\))+$` backtracks quadratically on a long caller-controlled segment, and this
+ * runs synchronously on every batch subrequest.
+ */
+function withoutEmptyCalls(segment: string): string {
+  let end = segment.length;
+  for (;;) {
+    let i = end;
+    if (i === 0 || segment[i - 1] !== ')') break;
+    i -= 1;
+    while (i > 0 && /\s/.test(segment[i - 1])) i -= 1;
+    if (i === 0 || segment[i - 1] !== '(') break;
+    end = i - 1;
+  }
+  return segment.slice(0, end);
+}
+
+/**
+ * The final action of a path, lowercased. Path-addressed drive items put the action after
+ * a closing colon, `root:/a.txt:/content`, and Graph's syntax may also allow it without the
+ * slash, `root:/a.txt:content`; compare only the text after the last colon, failing closed.
+ */
 function lastSegment(resource: string): string {
   const segments = resource.split('/').filter(Boolean);
-  return canonicalSegment(segments[segments.length - 1] ?? '').toLowerCase();
+  let last = canonicalSegment(segments[segments.length - 1] ?? '');
+  let end = last.length;
+  while (end > 0 && last[end - 1] === ':') end -= 1;
+  last = last.slice(0, end);
+  return canonicalSegment(last.slice(last.lastIndexOf(':') + 1)).toLowerCase();
 }
 
 /**
