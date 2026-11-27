@@ -115,6 +115,7 @@ describe('--attachment-port (split attachment listener)', () => {
     delete process.env.MS365_MCP_ATTACHMENT_PORT;
     delete process.env.MS365_MCP_ATTACHMENT_HOST;
     delete process.env.MS365_MCP_ATTACHMENT_URL_KEY_FILE;
+    delete process.env.MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS;
     process.env.MS365_MCP_ATTACHMENT_URL_KEY = 'shared-hmac-key';
     // Graph is never dialled; every case either redeems a ticket against these
     // stubs or never gets as far as the handler. makeRequest answers the check
@@ -948,12 +949,25 @@ describe('parseAttachmentRequestTimeout', () => {
     expect(parseAttachmentRequestTimeout('')).toBe(900_000);
   });
 
-  it('accepts a non-negative integer, including 0 (no limit)', () => {
+  it('accepts 0 (no limit) and integers within the bounds', () => {
     expect(parseAttachmentRequestTimeout('0')).toBe(0);
+    expect(parseAttachmentRequestTimeout('60000')).toBe(60_000);
     expect(parseAttachmentRequestTimeout('1800000')).toBe(1_800_000);
+    expect(parseAttachmentRequestTimeout('2147483647')).toBe(2_147_483_647);
   });
 
-  it.each(['-1', '1.5', '15m', ' 900000', '1e6', '99999999999999999999'])('refuses %j', (value) => {
+  it.each([
+    '-1',
+    '1.5',
+    '15m',
+    ' 900000',
+    '1e6',
+    '1',
+    '59999',
+    '2147483648',
+    '4294967296',
+    '99999999999999999999',
+  ])('refuses %j', (value) => {
     expect(() => parseAttachmentRequestTimeout(value)).toThrow(
       /MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS/
     );

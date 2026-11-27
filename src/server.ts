@@ -176,17 +176,27 @@ export function resolvePublicBaseUrl(options: CommandOptions): string | undefine
  * Set MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS to change it; 0 disables the limit, as
  * in Node. Validated strictly: a typo must not silently fall back to Node's default.
  * `headersTimeout` is left alone, so slow-header connections are still cut early.
+ *
+ * Any other value must lie between the bounds below. Node's connection checker reads
+ * the timeout as a uint32, so a larger value wraps to a tiny limit or to none, and a
+ * value under the untouched 60 s `headersTimeout` makes Node swap the two deadlines.
  */
 export const DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS = 900_000;
+export const MIN_ATTACHMENT_REQUEST_TIMEOUT_MS = 60_000;
+export const MAX_ATTACHMENT_REQUEST_TIMEOUT_MS = 2_147_483_647;
 
 export function parseAttachmentRequestTimeout(value: string | undefined): number {
   if (value === undefined || value === '') return DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS;
-  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+  const ms = /^\d+$/.test(value) ? Number(value) : NaN;
+  if (
+    ms !== 0 &&
+    !(ms >= MIN_ATTACHMENT_REQUEST_TIMEOUT_MS && ms <= MAX_ATTACHMENT_REQUEST_TIMEOUT_MS)
+  ) {
     throw new Error(
-      `MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS must be a non-negative integer number of milliseconds, got ${JSON.stringify(value)}`
+      `MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS must be 0 (no limit) or an integer from ${MIN_ATTACHMENT_REQUEST_TIMEOUT_MS} to ${MAX_ATTACHMENT_REQUEST_TIMEOUT_MS} milliseconds, got ${JSON.stringify(value)}`
     );
   }
-  return Number(value);
+  return ms;
 }
 
 /**
