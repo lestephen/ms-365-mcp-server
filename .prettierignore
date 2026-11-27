@@ -5,7 +5,3 @@ coverage
 # Local working / tooling output directories (not source).
 scratch
 .tako
-
-# Generated consumer-contract fixtures: their exact bytes are the contract
-# (JSON.stringify(value, null, 2) plus a newline), so prettier must not reflow them.
-contracts/consumer/**/*.json
