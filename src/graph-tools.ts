@@ -4073,7 +4073,7 @@ async function executeGraphTool(
     if (opaqueSubrequests.length > 0) {
       recordBlockedOperation(tool.alias, route);
       logger.warn(
-        `Refusing ${tool.alias}: subrequest(s) ${opaqueSubrequests.join(', ')} carry a string body that is not JSON`
+        `Refusing ${tool.alias}: subrequest(s) ${JSON.stringify(opaqueSubrequests)} carry a string body that is not JSON`
       );
       return finish(
         {
@@ -4143,7 +4143,8 @@ async function executeGraphTool(
         for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
         logger.warn(
           `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
-            hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
+            // JSON-escaped: method and url are caller text and may carry line breaks.
+            hits.map((h) => JSON.stringify(`${h.method} ${h.url} (${h.toolName})`)).join(', ')
         );
         return finish(
           {
