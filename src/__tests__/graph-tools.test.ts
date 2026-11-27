@@ -183,22 +183,10 @@ function createMockServer() {
   };
   return {
     server: lowLevelServer,
-    tool: vi.fn(
-      (
-        name: string,
-        description: string,
-        schema: any,
-        annotations: any,
-        handler: (...args: any[]) => any
-      ) => {
-        tools.set(name, { description, schema, annotations, handler });
-        installDefaultToolCallHandler();
-      }
-    ),
     registerTool: vi.fn(
       (
         name: string,
-        config: { description: string; inputSchema: any },
+        config: { description: string; inputSchema: any; annotations?: Record<string, unknown> },
         handler: (...args: any[]) => any
       ) => {
         // Expose the zod object's shape so tests can keep asserting on params
@@ -728,9 +716,9 @@ describe('graph-tools', () => {
 
         const [payload] = auditLogMock.mock.calls[0];
         expect(payload.result_count).toBe(2);
-        // Truncated at the cap: the merged body drops @odata.nextLink, so the
-        // audit event is the only place Graph-has-more survives.
-        expect(JSON.parse(result.content[0].text)['@odata.nextLink']).toBeUndefined();
+        expect(JSON.parse(result.content[0].text)['@odata.nextLink']).toBe(
+          'https://graph.microsoft.com/v1.0/me/messages?$skip=2'
+        );
         expect(payload.result_has_more).toBe(true);
         expect(payload.response_bytes).toBe(100);
       } finally {
@@ -2039,6 +2027,171 @@ describe('graph-tools', () => {
       expect(path).toContain('$top=5');
       expect(path).toContain('$skiptoken=tok');
     });
+
+    it('points a deltaToken tool at token when skiptoken gets a token= link', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'drive-delta', path: '/me/drive/delta()' }));
+      mockEndpointsJson = [
+        makeConfig({ toolName: 'drive-delta', pathPattern: '/me/drive/delta()', deltaToken: true }),
+      ];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      const result = await server.tools.get('drive-delta')!.handler({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/drive/delta?token=abc',
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.error).toBe('invalid_skiptoken');
+      expect(payload.message).toContain('pass that link as token');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---- 2a2. token= delta paging ----
+  describe('delta token', () => {
+    const deltaEndpoint = () =>
+      makeEndpoint({
+        alias: 'items-delta',
+        path: '/sites/:siteId/lists/:listId/items/delta()',
+        parameters: [
+          { name: 'select', type: 'Query', schema: z.string().optional() },
+          { name: 'expand', type: 'Query', schema: z.string().optional() },
+          { name: 'top', type: 'Query', schema: z.number().optional() },
+        ],
+      });
+
+    const register = async (deltaToken: boolean | undefined) => {
+      mockEndpoints.push(deltaEndpoint());
+      mockEndpointsJson = [
+        makeConfig({
+          toolName: 'items-delta',
+          pathPattern: '/sites/{site-id}/lists/{list-id}/items/delta()',
+          queryParams: ['select', 'expand', 'top'],
+          ...(deltaToken === undefined ? {} : { deltaToken }),
+        }),
+      ];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      return { server, graphClient };
+    };
+
+    const callForResult = async (args: Record<string, unknown>) => {
+      const { server, graphClient } = await register(true);
+      const result = await server.tools.get('items-delta')!.handler({
+        siteId: 's1',
+        listId: 'l1',
+        ...args,
+      });
+      return { result, graphClient };
+    };
+
+    /** The request path the tool sent to Graph. */
+    const callWith = async (args: Record<string, unknown>) => {
+      const { result, graphClient } = await callForResult(args);
+      expect(result.isError).not.toBe(true);
+      return graphClient.graphRequest.mock.calls[0][0] as string;
+    };
+
+    it('advertises token on a deltaToken tool', async () => {
+      const { server } = await register(true);
+      expect(server.tools.get('items-delta')!.schema.token).toBeDefined();
+    });
+
+    it.each([undefined, false])('omits token when deltaToken is %s', async (flag) => {
+      const { server } = await register(flag);
+      expect(server.tools.get('items-delta')!.schema.token).toBeUndefined();
+    });
+
+    it('shows token in discovery mode only on a deltaToken tool', async () => {
+      const { describeToolSchema } = await import('../lib/tool-schema.js');
+      const names = (deltaToken?: boolean) =>
+        describeToolSchema(deltaEndpoint() as any, {
+          queryParams: ['select', 'expand', 'top'],
+          deltaToken,
+        }).parameters.map((p) => p.name);
+      expect(names(true)).toContain('token');
+      expect(names()).not.toContain('token');
+    });
+
+    it('sends a bare token as token=', async () => {
+      const path = await callWith({ token: 'abc123' });
+      expect(path).toBe('/sites/s1/lists/l1/items/delta()?token=abc123');
+    });
+
+    it('sends latest as token=latest', async () => {
+      const path = await callWith({ token: 'latest' });
+      expect(path).toContain('?token=latest');
+    });
+
+    it('reads the token out of a whole @odata.deltaLink', async () => {
+      const path = await callWith({
+        token:
+          'https://graph.microsoft.com/v1.0/sites/s1/lists/l1/items/delta?token=MzslMjM0OyUyMzE7Mw',
+      });
+      expect(path).toBe('/sites/s1/lists/l1/items/delta()?token=MzslMjM0OyUyMzE7Mw');
+    });
+
+    it('reads the token out of a @odata.nextLink with params after it', async () => {
+      const path = await callWith({
+        token: 'https://graph.microsoft.com/v1.0/sites/s1/lists/l1/items/delta?token=tok1&$top=5',
+        top: 5,
+      });
+      expect(path).toContain('token=tok1');
+      expect(path).not.toContain('tok1%26');
+      expect(path).not.toContain('graph.microsoft.com');
+    });
+
+    it.each([
+      ['token=tok1', 'tok1'],
+      ["https://graph.microsoft.com/v1.0/me/drive/root/delta(token='tok1')", 'tok1'],
+      ["https://graph.microsoft.com/v1.0/me/drive/root/delta?(token='tok1')", 'tok1'],
+      ['https://graph.microsoft.com/v1.0/me/drive/delta(token=tok1)', 'tok1'],
+    ])('reads the token out of %s', async (value, expected) => {
+      const path = await callWith({ token: value });
+      expect(path).toContain(`?token=${expected}`);
+      expect(path).not.toContain("'");
+    });
+
+    it('percent-decodes a token copied out of a link once, so it is not encoded twice', async () => {
+      const path = await callWith({
+        token: 'https://graph.microsoft.com/v1.0/sites/delta?token=a%2Bb%3D%3D',
+      });
+      expect(path).toContain('token=a%2Bb%3D%3D');
+      expect(path).not.toContain('%25');
+    });
+
+    it('does not read a $deltatoken or $skiptoken as token=', async () => {
+      const path = await callWith({
+        token: 'https://graph.microsoft.com/v1.0/sites/delta?$deltatoken=dt1',
+      });
+      expect(path).toContain('$deltatoken=dt1');
+      expect(path).not.toContain('?token=');
+    });
+
+    it.each(['', '   '])('sends no token when blank (%j)', async (blank) => {
+      const path = await callWith({ token: blank });
+      expect(path).not.toContain('token');
+    });
+
+    it.each([
+      'https://graph.microsoft.com/v1.0/sites/s1/lists/l1/items/delta?$top=5',
+      'https://graph.microsoft.com/v1.0/sites/s1/lists/l1/items/delta?token=&$top=5',
+    ])('refuses a link with no token to resume from: %s', async (link) => {
+      const { result, graphClient } = await callForResult({ token: link });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_delta_token');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('drops token on a tool without deltaToken', async () => {
+      const { server, graphClient } = await register(undefined);
+      await server.tools.get('items-delta')!.handler({ siteId: 's1', listId: 'l1', token: 'x' });
+      expect(graphClient.graphRequest.mock.calls[0][0]).not.toContain('token');
+    });
   });
 
   // ---- 2. fetchAllPages pagination ----
@@ -3177,6 +3330,42 @@ describe('graph-tools', () => {
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
     });
 
+    it('forwards the Accept override on the bounded inline download', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/messages/m1/attachments/a1/$value';
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn().mockResolvedValue({
+          bytes: Buffer.from('text'),
+          contentType: 'text/plain',
+          contentLength: 4,
+        }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      await enableAttachmentUrls();
+      registerGraphTools(server as any, graphClient as any, {
+        readOnly: false,
+        orgMode: false,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: true,
+      });
+
+      const result = await server.tools.get('download-bytes')!.handler({
+        target,
+        accept: 'text/plain',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(target, 256 * 1024, {
+        accessToken: undefined,
+        headers: { Accept: 'text/plain' },
+      });
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
     it('preserves dotted drive filenames through every binary utility', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
@@ -3711,7 +3900,7 @@ describe('graph-tools', () => {
       );
     });
 
-    it('registers as destructive and exposes the confirmation parameter', async () => {
+    it('registers as mutating, non-destructive, and exposes the confirmation parameter', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
 
@@ -3720,9 +3909,12 @@ describe('graph-tools', () => {
       registerGraphTools(server as any, {} as any);
 
       const tool = server.tools.get('download-bytes-to-file');
-      expect(tool?.annotations).toMatchObject({
+      const call = server.registerTool.mock.calls.find((c) => c[0] === 'download-bytes-to-file');
+      // It writes local files (so not read-only and still confirm-gated), but only ever
+      // creates new ones, so clients are told it destroys nothing (upstream #851).
+      expect(call?.[1].annotations).toMatchObject({
         readOnlyHint: false,
-        destructiveHint: true,
+        destructiveHint: false,
       });
       expect(tool?.schema.confirm).toBeDefined();
     });
@@ -4641,7 +4833,17 @@ describe('graph-tools', () => {
           },
           {}
         )
-      ).rejects.toThrow(/not found/);
+      ).resolves.toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: expect.stringMatching(
+              /^Tool get-drive-item is not available in this server configuration: .*Files\.Read/
+            ),
+          },
+        ],
+      });
 
       expect(auditLogMock).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -4782,7 +4984,17 @@ describe('graph-tools', () => {
           },
           {}
         )
-      ).rejects.toThrow(/not found/);
+      ).resolves.toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: expect.stringMatching(
+              /^Tool get-drive-item is not available in this server configuration: .*Files\.Read/
+            ),
+          },
+        ],
+      });
 
       expect(auditLogMock).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -4835,7 +5047,7 @@ describe('graph-tools', () => {
       expect(targetParam.required).toBe(true);
       expect(targetParam.description).toContain('authenticated recording bytes');
       expect(targetParam.description).not.toContain('returns a URL');
-      expect(schema.description).toContain('For large content, prefer get-download-url');
+      expect(schema.description).toContain('prefer get-download-url');
       expect(schema.description).toContain('--enable-attachment-urls');
     });
 
@@ -6177,7 +6389,6 @@ describe('graph-tools', () => {
       ['update-channel-message', 'patch'],
       ['update-channel-message-reply', 'patch'],
       ['send-chat-message', 'post'],
-      ['reply-to-chat-message', 'post'],
       ['update-chat-message', 'patch'],
     ] as const;
 

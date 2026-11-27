@@ -1,12 +1,24 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
+import { withServedInputSchema } from '../src/lib/body-schema-budget.js';
 import {
   normalizeToolSchemaRefs,
-  installToolSchemaRefNormalization,
   tidyToolJsonSchema,
   toolInputJsonSchema,
 } from '../src/normalize-tool-schema.js';
+
+async function listTools(server: McpServer) {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: 'test-client', version: '0.0.0' });
+  await client.connect(clientTransport);
+  const { tools } = await client.listTools();
+  await client.close();
+  await server.close();
+  return tools;
+}
 
 // Collect every $ref value in a schema.
 function collectRefs(node: unknown, out: string[] = []): string[] {
@@ -138,6 +150,36 @@ describe('normalizeToolSchemaRefs', () => {
     for (const r of refs) expect(resolvePointer(out, r)).toBeDefined();
   });
 
+  it('still inlines scalar defs when the rest would more than double the schema', () => {
+    // create-planner-plan and create-sharepoint-list-item take this path: the fat def
+    // keeps its ref, but confirm must not hide its type behind one (#793)
+    const shared = {
+      type: 'object',
+      properties: Object.fromEntries(
+        Array.from({ length: 40 }, (_, i) => [
+          `field${i}`,
+          { type: 'string', description: 'x'.repeat(40) },
+        ])
+      ),
+    };
+    const properties: Record<string, unknown> = {
+      shared,
+      flag: { type: 'boolean' },
+      confirm: { description: 'Approved.', allOf: [{ $ref: '#/properties/flag' }] },
+    };
+    for (let i = 0; i < 10; i++) properties[`use${i}`] = { $ref: '#/properties/shared' };
+
+    const out = normalizeToolSchemaRefs({ type: 'object', properties });
+    tidyToolJsonSchema(out);
+    const served = out.properties as Record<string, unknown>;
+    expect(served.confirm).toEqual({ type: 'boolean', description: 'Approved.' });
+    expect(served.use0).toEqual({ $ref: expect.stringMatching(/^#\/\$defs\//) });
+    expect(Object.keys(out.$defs as object)).toHaveLength(1);
+    const refs = collectRefs(out);
+    expect(refs.every((r) => r.startsWith('#/$defs/'))).toBe(true);
+    for (const r of refs) expect(resolvePointer(out, r)).toBeDefined();
+  });
+
   it('still inlines a small def reused many times', () => {
     // Same shape, tiny def - 10 copies still fit under the cap
     const properties: Record<string, unknown> = { shared: { type: 'string' } };
@@ -148,12 +190,25 @@ describe('normalizeToolSchemaRefs', () => {
     expect((out.properties as Record<string, unknown>).use7).toEqual({ type: 'string' });
   });
 
-  it('skips inlining entirely once any def is cyclic', () => {
-    // `wrapper` would expand fine on its own, but `body` recurses so a ref survives
-    // regardless. Expanding wrapper would just add bytes.
+  it('inlines scalar defs while retaining complex defs alongside a recursive def', () => {
     const schema = {
       type: 'object',
       properties: {
+        confirm: {
+          description: 'Set only after approval.',
+          allOf: [{ $ref: '#/properties/confirmType' }],
+        },
+        confirmType: { type: 'boolean' },
+        excludeResponse: {
+          description: 'Omit the response body.',
+          allOf: [{ $ref: '#/properties/excludeType' }],
+        },
+        excludeType: { type: 'boolean' },
+        includeHeaders: {
+          description: 'Include response headers.',
+          allOf: [{ $ref: '#/properties/headersType' }],
+        },
+        headersType: { type: 'boolean' },
         body: {
           type: 'object',
           properties: {
@@ -166,7 +221,21 @@ describe('normalizeToolSchemaRefs', () => {
       },
     };
     const out = normalizeToolSchemaRefs(schema);
+    tidyToolJsonSchema(out);
     expect(Object.keys(out.$defs as object)).toHaveLength(2); // body and wrapper both kept
+    const properties = out.properties as Record<string, Record<string, unknown>>;
+    expect(properties.confirm).toEqual({
+      type: 'boolean',
+      description: 'Set only after approval.',
+    });
+    expect(properties.excludeResponse).toEqual({
+      type: 'boolean',
+      description: 'Omit the response body.',
+    });
+    expect(properties.includeHeaders).toEqual({
+      type: 'boolean',
+      description: 'Include response headers.',
+    });
     const refs = collectRefs(out);
     expect(refs.every((r) => r.startsWith('#/$defs/'))).toBe(true);
     for (const r of refs) expect(resolvePointer(out, r)).toBeDefined();
@@ -391,6 +460,23 @@ describe('normalizeToolSchemaRefs', () => {
     });
   });
 
+  it('keeps an existing def named __proto__', () => {
+    // A plain assignment would hit the prototype setter and drop the def, leaving its ref
+    // dangling
+    const schema = JSON.parse(`{
+      "type": "object",
+      "properties": {
+        "shared": { "type": "object", "properties": { "email": { "type": "string" } } },
+        "a": { "$ref": "#/properties/shared" },
+        "b": { "$ref": "#/$defs/__proto__" }
+      },
+      "$defs": { "__proto__": { "type": "string" } }
+    }`);
+    const out = normalizeToolSchemaRefs(schema);
+    expect(Object.keys(out.$defs as object)).toEqual(['__proto__']);
+    for (const r of collectRefs(out)) expect(resolvePointer(out, r)).toBeDefined();
+  });
+
   it('terminates on a cycle that runs through a pre-existing def', () => {
     // findCyclicDefs only sees edges between hoisted defs, so this cycle is invisible to
     // it. Termination rests on refusing to expand a name we didn't hoist.
@@ -451,7 +537,7 @@ describe('normalizeToolSchemaRefs', () => {
   });
 });
 
-describe('installToolSchemaRefNormalization (end-to-end against the real SDK)', () => {
+describe('withServedInputSchema (end-to-end against the real SDK)', () => {
   it('normalizes recursive tool schemas in the tools/list response', async () => {
     const server = new McpServer({ name: 'test', version: '0.0.0' });
 
@@ -462,37 +548,39 @@ describe('installToolSchemaRefNormalization (end-to-end against the real SDK)', 
       z.object({ name: z.string().optional(), childFolders: z.array(folder).optional() })
     );
 
+    // Built like the confirm and excludeResponse params graph-tools adds to every tool
     server.registerTool(
       'create-folder',
-      { description: 'create', inputSchema: z.object({ body: folder }).loose() },
+      {
+        description: 'create',
+        inputSchema: withServedInputSchema(
+          z
+            .object({
+              body: folder,
+              confirm: z.boolean().optional().describe('Approved.'),
+              excludeResponse: z.boolean().optional().describe('Exclude the response'),
+            })
+            .loose(),
+          'create-folder'
+        ),
+      },
       async () => ({ content: [] })
     );
 
-    installToolSchemaRefNormalization(server);
+    const tools = await listTools(server);
 
-    const handler = (
-      server.server as unknown as {
-        _requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
-      }
-    )._requestHandlers.get('tools/list')!;
-
-    const result = (await handler(
-      { method: 'tools/list' },
-      { signal: new AbortController().signal }
-    )) as { tools: Array<{ name: string; inputSchema: unknown }> };
-
-    const tool = result.tools.find((t) => t.name === 'create-folder')!;
+    const tool = tools.find((t) => t.name === 'create-folder')!;
     const refs = collectRefs(tool.inputSchema);
     expect(refs.length).toBeGreaterThan(0); // the recursion did produce a ref
     expect(refs.every((r) => r.startsWith('#/$defs/'))).toBe(true);
     for (const r of refs) expect(resolvePointer(tool.inputSchema, r)).toBeDefined();
-  });
-
-  it('no-ops without throwing when no tools/list handler exists', () => {
-    // A fresh server with no tools registered has no tools/list handler yet, so the
-    // installer must fall back gracefully rather than crash startup.
-    const server = new McpServer({ name: 'test', version: '0.0.0' });
-    expect(() => installToolSchemaRefNormalization(server)).not.toThrow();
+    // The recursion must not hide the type of a flag next to it (#793)
+    const properties = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(properties.confirm).toEqual({ type: 'boolean', description: 'Approved.' });
+    expect(properties.excludeResponse).toEqual({
+      type: 'boolean',
+      description: 'Exclude the response',
+    });
   });
 
   // zod 4's own conversion inlines every shared sub-schema and writes them in its own
@@ -522,24 +610,18 @@ describe('installToolSchemaRefNormalization (end-to-end against the real SDK)', 
       'create-event',
       {
         description: 'create',
-        inputSchema: z
-          .object({ body, excludeResponse: flag.optional().describe('Exclude the response') })
-          .loose(),
+        inputSchema: withServedInputSchema(
+          z
+            .object({ body, excludeResponse: flag.optional().describe('Exclude the response') })
+            .loose(),
+          'create-event'
+        ),
       },
       async () => ({ content: [] })
     );
-    installToolSchemaRefNormalization(server);
-    const handler = (
-      server.server as unknown as {
-        _requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
-      }
-    )._requestHandlers.get('tools/list')!;
-    const result = (await handler(
-      { method: 'tools/list' },
-      { signal: new AbortController().signal }
-    )) as { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> };
+    const tools = await listTools(server);
 
-    const schema = result.tools[0].inputSchema;
+    const schema = tools[0].inputSchema as Record<string, unknown>;
     const text = JSON.stringify(schema);
     expect(collectRefs(schema)).toEqual([]);
     expect(text).not.toContain('allOf');

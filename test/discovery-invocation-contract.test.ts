@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { registerDiscoveryTools } from '../src/graph-tools.js';
 import GraphClient from '../src/graph-client.js';
 
@@ -43,15 +43,13 @@ vi.mock('../src/generated/client.js', () => ({
 describe('discovery payload states how to invoke each tool', () => {
   let server: McpServer;
   let graphClient: GraphClient;
-  let toolSpy: ReturnType<typeof vi.spyOn>;
-  // Graph endpoints go through registerTool upstream; utilities and the discovery
-  // triad still go through tool. Both must be observed.
+  // SDK v2 has a single registration entry point, registerTool.
   let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
   const EAGER = ['get-mail-message'];
 
   function handlerFor(name: string) {
-    const call = toolSpy.mock.calls.find((c) => c[0] === name);
+    const call = registerToolSpy.mock.calls.find((c) => c[0] === name);
     if (!call) throw new Error(`${name} not registered`);
     return call[call.length - 1] as (
       args: Record<string, unknown>
@@ -64,7 +62,6 @@ describe('discovery payload states how to invoke each tool', () => {
   beforeEach(() => {
     server = new McpServer({ name: 'test', version: '0' });
     graphClient = {} as GraphClient;
-    toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => ({}) as never);
     registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation(() => ({}) as never);
   });
 

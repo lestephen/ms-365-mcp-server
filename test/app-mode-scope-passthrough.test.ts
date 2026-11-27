@@ -1,10 +1,20 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphClient } from '../src/graph-client.js';
 import { registerDiscoveryTools, registerGraphTools } from '../src/graph-tools.js';
 import type { GraphToolRegistrationOptions } from '../src/graph-tools.js';
+
+// SDK v2 answers a call to an unregistered tool with a JSON-RPC -32602 error rather
+// than an isError result. Either outcome is a refusal; what matters is that Graph is
+// never reached.
+async function refused(call: Promise<unknown>): Promise<boolean> {
+  try {
+    return ((await call) as { isError?: boolean }).isError === true;
+  } catch (error) {
+    return (error as { code?: number }).code === -32602;
+  }
+}
 
 vi.mock('../src/logger.js', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -85,7 +95,7 @@ describe('application scope restrictions close generic Graph paths', () => {
               : name === 'create-subscription'
                 ? subscriptionArgs
                 : { target: '/users/victim/messages/message/$value', confirm: true };
-          expect((await client.callTool({ name, arguments: args })).isError).toBe(true);
+          expect(await refused(client.callTool({ name, arguments: args }))).toBe(true);
           if (mode !== 'direct') {
             expect(
               (

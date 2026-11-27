@@ -1,15 +1,52 @@
 import { z } from 'zod';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, ToolAnnotations, ToolCallback } from '@modelcontextprotocol/server';
 import AuthManager from './auth.js';
+import { withServedInputSchema } from './lib/body-schema-budget.js';
 import logger from './logger.js';
 import { getRequestTokens } from './request-context.js';
 
-export function registerAuthTools(server: McpServer, authManager: AuthManager): void {
-  server.tool(
+export interface AuthToolsOptions {
+  /** --enabled-tools regex; applied to the account tools like to every other tool. */
+  enabledTools?: string;
+  /** --read-only: skip the account tools whose readOnlyHint is not true. */
+  readOnly?: boolean;
+}
+
+export function registerAuthTools(
+  mcpServer: McpServer,
+  authManager: AuthManager,
+  options: AuthToolsOptions = {}
+): void {
+  let enabledToolsRegex: RegExp | undefined;
+  if (options.enabledTools) {
+    try {
+      enabledToolsRegex = new RegExp(options.enabledTools, 'i');
+    } catch {
+      // Same as the Graph tools: an invalid pattern is ignored (and logged there).
+    }
+  }
+  // Same gate as the utility tools (#440): --read-only keeps only readOnlyHint: true.
+  const register = <Shape extends z.ZodRawShape>(
+    name: string,
+    config: { description: string; inputSchema: z.ZodObject<Shape>; annotations: ToolAnnotations },
+    cb: ToolCallback<z.ZodObject<Shape>>
+  ): void => {
+    if (options.readOnly && config.annotations.readOnlyHint !== true) return;
+    if (enabledToolsRegex && !enabledToolsRegex.test(name)) return;
+    mcpServer.registerTool(
+      name,
+      { ...config, inputSchema: withServedInputSchema(config.inputSchema, name) },
+      cb
+    );
+  };
+  register(
     'login',
-    'Authenticate with Microsoft account',
     {
-      force: z.boolean().default(false).describe('Force a new login even if already logged in'),
+      description: 'Authenticate with Microsoft account',
+      inputSchema: z.object({
+        force: z.boolean().default(false).describe('Force a new login even if already logged in'),
+      }),
+      annotations: { title: 'login', readOnlyHint: false, openWorldHint: false },
     },
     async ({ force }) => {
       try {
@@ -81,58 +118,77 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   );
 
-  server.tool('logout', 'Log out from Microsoft account', {}, async () => {
-    try {
-      await authManager.logout();
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ message: 'Logged out successfully' }),
-          },
-        ],
-      };
-    } catch {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ error: 'Logout failed' }),
-          },
-        ],
-      };
-    }
-  });
-
-  server.tool('verify-login', 'Check current Microsoft authentication status', {}, async () => {
-    let testResult: Awaited<ReturnType<AuthManager['testLogin']>>;
-    try {
-      testResult = await authManager.testLogin();
-    } catch (error) {
-      testResult = {
-        success: false,
-        message: `Login failed: ${(error as Error).message}`,
-      };
-    }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(testResult),
-        },
-      ],
-    };
-  });
-
-  server.tool(
-    'list-accounts',
-    'List all Microsoft accounts configured in this server. Use this to discover available account emails before making tool calls. Reflects accounts added mid-session via --login.',
-    {},
+  register(
+    'logout',
     {
-      title: 'list-accounts',
-      readOnlyHint: true,
-      openWorldHint: false,
+      description: 'Log out from Microsoft account',
+      inputSchema: z.object({}),
+      annotations: { title: 'logout', readOnlyHint: false, openWorldHint: false },
+    },
+    async () => {
+      try {
+        await authManager.logout();
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ message: 'Logged out successfully' }),
+            },
+          ],
+        };
+      } catch {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'Logout failed' }),
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  register(
+    'verify-login',
+    {
+      description: 'Check current Microsoft authentication status',
+      inputSchema: z.object({}),
+      annotations: { title: 'verify-login', readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      let testResult: Awaited<ReturnType<AuthManager['testLogin']>>;
+      try {
+        testResult = await authManager.testLogin();
+      } catch (error) {
+        testResult = {
+          success: false,
+          message: `Login failed: ${(error as Error).message}`,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(testResult),
+          },
+        ],
+      };
+    }
+  );
+
+  register(
+    'list-accounts',
+    {
+      description:
+        'List all Microsoft accounts configured in this server. Use this to discover available account emails before making tool calls. Reflects accounts added mid-session via --login.',
+      inputSchema: z.object({}),
+      annotations: {
+        title: 'list-accounts',
+        readOnlyHint: true,
+        openWorldHint: false,
+      },
     },
     async () => {
       try {
@@ -180,11 +236,15 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   );
 
-  server.tool(
+  register(
     'select-account',
-    'Select a Microsoft account as the default. Accepts email address (e.g. user@outlook.com) or account ID. Use list-accounts to discover available accounts.',
     {
-      account: z.string().describe('Email address or account ID of the account to select'),
+      description:
+        'Select a Microsoft account as the default. Accepts email address (e.g. user@outlook.com) or account ID. Use list-accounts to discover available accounts.',
+      inputSchema: z.object({
+        account: z.string().describe('Email address or account ID of the account to select'),
+      }),
+      annotations: { title: 'select-account', readOnlyHint: false, openWorldHint: false },
     },
     async ({ account }) => {
       try {
@@ -213,11 +273,15 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   );
 
-  server.tool(
+  register(
     'remove-account',
-    'Remove a Microsoft account from the cache. Accepts email address (e.g. user@outlook.com) or account ID. Use list-accounts to discover available accounts.',
     {
-      account: z.string().describe('Email address or account ID of the account to remove'),
+      description:
+        'Remove a Microsoft account from the cache. Accepts email address (e.g. user@outlook.com) or account ID. Use list-accounts to discover available accounts.',
+      inputSchema: z.object({
+        account: z.string().describe('Email address or account ID of the account to remove'),
+      }),
+      annotations: { title: 'remove-account', readOnlyHint: false, openWorldHint: false },
     },
     async ({ account }) => {
       try {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import {
   buildToolsRegistry,
   registerDiscoveryTools,
@@ -53,18 +53,14 @@ const BLOCKED = '^(send-mail|send-draft-message|reply-mail-message|forward-mail-
 describe('blocked tools', () => {
   let server: McpServer;
   let graphClient: GraphClient;
-  let toolSpy: ReturnType<typeof vi.spyOn>;
-  // Graph endpoints go through registerTool upstream; utilities and the discovery
-  // triad still go through tool. Both must be observed.
+  // SDK v2 has a single registration entry point, registerTool, used by every
+  // registrar (Graph, utilities, the discovery triad, auth).
   let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
-  const registeredNames = () => [
-    ...toolSpy.mock.calls.map((call) => call[0] as string),
-    ...registerToolSpy.mock.calls.map((call) => call[0] as string),
-  ];
+  const registeredNames = () => registerToolSpy.mock.calls.map((call) => call[0] as string);
 
   function handlerFor(name: string) {
-    const call = toolSpy.mock.calls.find((c) => c[0] === name);
+    const call = registerToolSpy.mock.calls.find((c) => c[0] === name);
     if (!call) throw new Error(`${name} was not registered`);
     return call[call.length - 1] as (args: Record<string, unknown>) => Promise<{
       content: Array<{ text: string }>;
@@ -75,7 +71,6 @@ describe('blocked tools', () => {
   beforeEach(() => {
     server = new McpServer({ name: 'test', version: '0' });
     graphClient = {} as GraphClient;
-    toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => ({}) as never);
     registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation(() => ({}) as never);
   });
 
@@ -187,6 +182,10 @@ describe('blocked tools', () => {
   });
 
   it('blocks a tool even when an enable pattern explicitly selects it', () => {
+    // An enable pattern installs the denied-tool audit hook on the real tools/call
+    // handler, so registration must reach the SDK here rather than a stub.
+    registerToolSpy.mockRestore();
+    registerToolSpy = vi.spyOn(server, 'registerTool');
     registerGraphTools(server, graphClient, {
       readOnly: false,
       enabledTools: '^(send-mail|create-draft-email)$',
