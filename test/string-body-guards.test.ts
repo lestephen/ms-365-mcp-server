@@ -219,4 +219,34 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     expect(result.isError).toBeFalsy();
     expect(graphRequest).toHaveBeenCalledTimes(1);
   });
+
+  it('refuses a graph-batch whose subrequest keys are capitalized (#96)', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', {
+      body: { requests: [{ id: '1', Method: 'POST', Url: '/me/sendMail', Body: { message: {} } }] },
+    });
+    expect(result.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
+  });
+
+  it('refuses a send reached through a mail folder path (#95)', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', {
+      body: {
+        requests: [{ id: '1', method: 'POST', url: '/me/mailFolders/drafts/messages/AAMk/send' }],
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
+  });
+
+  it('sends an allowed mixed-case batch to Graph with canonical keys', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', {
+      body: { requests: [{ ID: '1', Method: 'GET', Url: '/me' }] },
+    });
+    expect(result.isError).toBeFalsy();
+    const sent = JSON.parse((graphRequest.mock.calls[0][1] as { body: string }).body);
+    expect(sent.requests[0]).toEqual({ id: '1', method: 'GET', url: '/me' });
+  });
 });

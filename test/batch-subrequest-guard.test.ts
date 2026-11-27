@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   allOperationMatchers,
+  blockedWriteVerbs,
   buildBlockedOperationMatchers,
+  canonicalizeBatchBody,
   findBlockedSubrequests,
   resetOperationMatcherMemoForTests,
 } from '../src/lib/batch-guard.js';
@@ -235,5 +237,103 @@ describe('version-prefixed subrequest URLs cannot dodge the blocklist (#24)', ()
   it('does not over-block: a read of the same resource still passes', () => {
     expect(refuses('GET', '/me/messages')).toBe(false);
     expect(refuses('GET', '/v1.0/me/messages')).toBe(false);
+  });
+});
+
+describe('batch subrequest keys are read the way Graph reads them (#96)', () => {
+  const matchers = buildBlockedOperationMatchers(BLOCKED);
+
+  it('canonicalizes mixed-case keys so the guard sees a capitalized send', () => {
+    const canonical = canonicalizeBatchBody({
+      Requests: [{ ID: '1', Method: 'POST', Url: '/me/sendMail', Body: {}, DependsOn: [] }],
+    });
+    expect('body' in canonical).toBe(true);
+    const body = (canonical as { body: { requests: Array<Record<string, unknown>> } }).body;
+    expect(body.requests[0]).toEqual({
+      id: '1',
+      method: 'POST',
+      url: '/me/sendMail',
+      body: {},
+      dependsOn: [],
+    });
+    expect(findBlockedSubrequests(body, matchers)).toHaveLength(1);
+  });
+
+  it('refuses a property spelled twice in different cases', () => {
+    const canonical = canonicalizeBatchBody({
+      requests: [{ id: '1', method: 'GET', url: '/me', URL: '/me/sendMail' }],
+    });
+    expect(canonical).toEqual({ error: expect.stringContaining('"url" more than once') });
+  });
+
+  it('refuses a subrequest without a string method and url', () => {
+    expect(canonicalizeBatchBody({ requests: [{ id: '1', url: '/me' }] })).toEqual({
+      error: expect.stringContaining('no string method and url'),
+    });
+    expect(canonicalizeBatchBody({ requests: ['GET /me'] })).toEqual({
+      error: expect.stringContaining('not an object'),
+    });
+  });
+
+  it('leaves a well-formed lowercase batch unchanged', () => {
+    const body = { requests: [{ id: '1', method: 'GET', url: '/me' }] };
+    expect(canonicalizeBatchBody(body)).toEqual({ body });
+  });
+});
+
+describe('blocked writes reached through another path are refused (#95)', () => {
+  const PRODUCTION =
+    '^((send|reply|reply-all|forward)-[a-z-]*(mail|draft)[a-z-]*|forward-calendar-event|share-drive-item|reply-to-group-thread|upload-file-content|upload-my-profile-photo|list-adhoc-call-transcripts|get-adhoc-call-transcript-content)$';
+  const matchers = buildBlockedOperationMatchers(PRODUCTION);
+  const check = (method: string, url: string) =>
+    findBlockedSubrequests({ requests: [{ id: '1', method, url }] }, matchers);
+
+  it.each([
+    ['POST', '/me/mailFolders/drafts/messages/AAMk/send'],
+    ['POST', '/me/mailFolders/inbox/childFolders/x/messages/AAMk/reply'],
+    ['POST', '/me/messages/AAMk/microsoft.graph.send'],
+    ['POST', '/users/someone@contoso.com/mailFolders/inbox/messages/AAMk/forward'],
+    ['POST', '/groups/g1/threads/t1/posts/p1/reply'],
+    ['POST', '/groups/g1/conversations/c1/threads/t1/reply'],
+    ['POST', '/me/drive/items/abc/invite'],
+    ['PUT', '/me/drive/root:/notes.txt:/content'],
+    ['PUT', '/users/u1/drive/items/abc/content'],
+    ['PUT', '/sites/s1/drive/items/abc/content'],
+    ['PUT', '/users/u1/photo/$value'],
+    ['post', '/ME/MESSAGES/AAMk/SEND'],
+  ])('refuses %s %s', (method, url) => {
+    expect(check(method, url)).toHaveLength(1);
+  });
+
+  it.each([
+    ['POST', '/me/messages/AAMk/createReply'],
+    ['POST', '/me/messages/AAMk/createForward'],
+    ['POST', '/me/events/e1/accept'],
+    ['POST', '/teams/t1/channels/c1/messages/m1/replies'],
+    ['GET', '/me/messages/AAMk/send'],
+    ['PATCH', '/me/messages/AAMk'],
+    ['POST', '/me/messages'],
+  ])('allows %s %s', (method, url) => {
+    expect(check(method, url)).toEqual([]);
+  });
+
+  it('blocks no allowed catalogue tool by the write-alias rule', () => {
+    const blockedNames = new Set(matchers.map((m) => m.toolName));
+    const verbs = blockedWriteVerbs(matchers);
+    const collisions = allOperationMatchers()
+      .filter((m) => !blockedNames.has(m.toolName) && m.method !== 'GET' && m.lastLiteral)
+      .filter((m) => verbs.has(`${m.method} ${m.lastLiteral}`))
+      .map((m) => m.toolName);
+    expect(collisions).toEqual([]);
+  });
+
+  it('labels batch metrics without the alias rule', () => {
+    const all = allOperationMatchers();
+    const hits = findBlockedSubrequests(
+      { requests: [{ id: '1', method: 'POST', url: '/me/mailFolders/x/messages/y/send' }] },
+      all,
+      { matchWriteAliases: false }
+    );
+    expect(hits).toEqual([]);
   });
 });

@@ -31,6 +31,7 @@ import {
   describeBlockedSubrequests,
   findBlockedSubrequests,
   type BlockedOperationMatcher,
+  canonicalizeBatchBody,
 } from './lib/batch-guard.js';
 import AuthManager, {
   getEndpointScopeGroups,
@@ -3516,7 +3517,11 @@ function recordBatchSubrequestsFor(body: unknown, blocked: BlockedOperationMatch
     if (!entry || typeof entry !== 'object') continue;
     const sub = entry as { method?: unknown; url?: unknown };
     if (typeof sub.method !== 'string' || typeof sub.url !== 'string') continue;
-    const hit = findBlockedSubrequests({ requests: [entry] }, all.length > 0 ? all : blocked);
+    const hit = findBlockedSubrequests({ requests: [entry] }, all.length > 0 ? all : blocked, {
+      // Labelling only: the write-alias rule would attribute every catalogue reply to the
+      // first tool with that verb.
+      matchWriteAliases: false,
+    });
     recordBatchSubrequest(hit[0]?.toolName ?? 'unmatched', sub.method);
   }
 }
@@ -4053,6 +4058,35 @@ async function executeGraphTool(
     // Binary uploads and text/html bodies are strings by design and are left alone.
     if (typeof body === 'string' && sendsJsonBody(tool, config)) {
       body = decodeJsonObject(body) ?? body;
+    }
+    // graph-batch: give every subrequest property one spelling before any guard reads it,
+    // and send that canonical body, so guards and Graph see the same request (#96).
+    if (tool.path === '/$batch') {
+      const canonicalBatch = canonicalizeBatchBody(body);
+      if ('error' in canonicalBatch) {
+        recordBlockedOperation(tool.alias, route);
+        logger.warn(`Refusing ${tool.alias}: ${canonicalBatch.error}`);
+        return finish(
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'invalid_batch_subrequest',
+                  tool: tool.alias,
+                  message:
+                    `This batch was refused because ${canonicalBatch.error}. Give each ` +
+                    'subrequest one id, method, url and optional body and headers, each ' +
+                    'spelled once.',
+                }),
+              },
+            ],
+            isError: true,
+          },
+          'blocked'
+        );
+      }
+      body = canonicalBatch.body;
     }
     // A blocked tool is unreachable by name, but graph-batch carries arbitrary
     // method/url subrequests, so the operation itself has to be checked (#24). Inspect
