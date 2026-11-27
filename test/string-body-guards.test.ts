@@ -136,6 +136,13 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
       'application/json',
       Buffer.from(JSON.stringify(fileAttachment)).toString('base64'),
     ],
+    [
+      'a lenient-JSON attachment Graph would decode',
+      'POST',
+      '/me/messages/AAMkAGI2/attachments',
+      'application/json',
+      "{'@odata.type':'#microsoft.graph.fileAttachment',name:'a.pdf',contentBytes:'JVBERi0xLjQK'}",
+    ],
   ])(
     'refuses a graph-batch subrequest carrying %s (#93)',
     async (_label, method, url, type, body) => {
@@ -185,12 +192,70 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     expect(sent.requests[1].body).toBe(JSON.stringify(event));
   });
 
-  it('forwards a top-level non-JSON string body unchanged, as upstream does', async () => {
+  // Graph's request reader is lenient (verified live with GET-only batches): it executes
+  // bodies with a byte order mark, comments, trailing commas, single quotes or unquoted
+  // names, none of which JSON.parse reads. Such a string must never reach Graph as the
+  // request body, because Graph would act on a payload no guard inspected.
+  const lenientBatches = [
+    ['a comment', '/*x*/' + JSON.stringify(sendMailBatch)],
+    ['a trailing comma', JSON.stringify(sendMailBatch).replace(/]}$/, ',]}')],
+    ['unquoted names', "{requests:[{id:'1',method:'POST',url:'/me/sendMail',body:{}}]}"],
+  ];
+  it.each(lenientBatches)(
+    'never sends a graph-batch string body with %s as the batch',
+    async (_label, body) => {
+      const { client, graphRequest } = await connect();
+      await executeTool(client, 'graph-batch', { body });
+      // Either refused, or wrapped by the schema repair as {body: "<string>"}, which Graph
+      // reads as a batch with no requests. Never the string itself.
+      for (const call of graphRequest.mock.calls) {
+        expect(call[1].body).not.toBe(body);
+        expect(JSON.parse(call[1].body as string).requests).toBeUndefined();
+      }
+    }
+  );
+
+  it.each([
+    ['unquoted names', "{subject:'x',toRecipients:[]}"],
+    ['a byte order mark and a comment', '\uFEFF/*x*/{"subject":"x"}'],
+  ])(
+    'refuses a string body with %s when the schema repair cannot wrap it',
+    async (_label, body) => {
+      const { client, graphRequest } = await connect();
+      const { result, payload } = await executeTool(client, 'create-draft-email', { body });
+      expect(result.isError).toBe(true);
+      expect(payload.error).toBe('unparseable_json_body');
+      expect(graphRequest).not.toHaveBeenCalled();
+    }
+  );
+
+  it('forwards a top-level plain-text string body unchanged, as upstream does', async () => {
     const { client, graphRequest } = await connect();
     const { result } = await executeTool(client, 'create-draft-email', { body: 'not json' });
     expect(result.isError).toBeFalsy();
     expect(graphRequest).toHaveBeenCalledTimes(1);
     expect(graphRequest.mock.calls[0][1].body).toBe('not json');
+  });
+
+  it('never sends lenient JSON carrying inline bytes as the request body', async () => {
+    const { client, graphRequest } = await connect();
+    const body =
+      "{'@odata.type':'#microsoft.graph.fileAttachment',name:'a.pdf',contentBytes:'JVBERi0xLjQK'}";
+    await executeTool(client, 'add-mail-attachment', { 'message-id': 'AAMkAGI2', body });
+    for (const call of graphRequest.mock.calls) {
+      expect(call[1].body).not.toBe(body);
+      expect(JSON.parse(call[1].body as string).contentBytes).toBeUndefined();
+    }
+  });
+
+  it('guards a byte-order-marked JSON body instead of forwarding it unread', async () => {
+    const { client, graphRequest } = await connect();
+    const { result, payload } = await executeTool(client, 'graph-batch', {
+      body: '\uFEFF' + JSON.stringify(sendMailBatch),
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(payload)).toMatch(/send-mail|blocked/i);
+    expect(graphRequest).not.toHaveBeenCalled();
   });
 
   it('sends a valid string body exactly as the equivalent object body', async () => {
@@ -218,5 +283,35 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     });
     expect(result.isError).toBeFalsy();
     expect(graphRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a graph-batch whose subrequest keys are capitalized (#96)', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', {
+      body: { requests: [{ id: '1', Method: 'POST', Url: '/me/sendMail', Body: { message: {} } }] },
+    });
+    expect(result.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
+  });
+
+  it('refuses a send reached through a mail folder path (#95)', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', {
+      body: {
+        requests: [{ id: '1', method: 'POST', url: '/me/mailFolders/drafts/messages/AAMk/send' }],
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(graphRequest).not.toHaveBeenCalled();
+  });
+
+  it('sends an allowed mixed-case batch to Graph with canonical keys', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', {
+      body: { requests: [{ ID: '1', Method: 'GET', Url: '/me' }] },
+    });
+    expect(result.isError).toBeFalsy();
+    const sent = JSON.parse((graphRequest.mock.calls[0][1] as { body: string }).body);
+    expect(sent.requests[0]).toEqual({ id: '1', method: 'GET', url: '/me' });
   });
 });

@@ -34,6 +34,8 @@ export interface BlockedOperationMatcher {
   toolName: string;
   method: string;
   pattern: RegExp;
+  /** Final path segment when it is a literal action rather than a placeholder, lowercased. */
+  lastLiteral?: string;
 }
 
 export interface BlockedSubrequest {
@@ -71,7 +73,12 @@ function pathSegmentToRegex(segment: string): string {
 
 /** `/me/messages/{message-id}/reply` -> anchored regex with one segment per parameter. */
 function pathPatternToRegex(pathPattern: string): RegExp {
-  const escaped = pathPattern.split('/').map(pathSegmentToRegex).join('/');
+  // Segments are canonicalized like request paths, so `microsoft.graph.x()` in the
+  // catalogue matches however the caller spells it.
+  const escaped = pathPattern
+    .split('/')
+    .map((segment) => pathSegmentToRegex(canonicalSegment(segment)))
+    .join('/');
   // Anchored at both ends so a deeper path under a blocked one is not mistaken for it.
   return new RegExp(`^${escaped}$`, 'i');
 }
@@ -99,11 +106,19 @@ export function buildBlockedOperationMatchers(
 
   return endpointsData
     .filter((endpoint) => blocked.test(endpoint.toolName))
-    .map((endpoint) => ({
-      toolName: endpoint.toolName,
-      method: endpoint.method.toUpperCase(),
-      pattern: pathPatternToRegex(endpoint.pathPattern),
-    }));
+    .map((endpoint) => {
+      const last = endpoint.pathPattern.split('/').filter(Boolean).pop() ?? '';
+      const literal =
+        /[{}:=']/.test(last) || /\((?!\s*\)$)/.test(last)
+          ? undefined
+          : canonicalSegment(last).toLowerCase();
+      return {
+        toolName: endpoint.toolName,
+        method: endpoint.method.toUpperCase(),
+        pattern: pathPatternToRegex(endpoint.pathPattern),
+        ...(literal ? { lastLiteral: literal } : {}),
+      };
+    });
 }
 
 type NormalizedSubrequestUrl = { resource: string } | { error: string };
@@ -147,7 +162,7 @@ function normalizeSubrequestUrl(url: string): NormalizedSubrequestUrl {
       canonicalSegments.pop();
       continue;
     }
-    canonicalSegments.push(decoded);
+    canonicalSegments.push(canonicalSegment(decoded));
   }
 
   // Unconditionally, not just for absolute URLs. A relative `/v1.0/me/sendMail` is a
@@ -157,18 +172,179 @@ function normalizeSubrequestUrl(url: string): NormalizedSubrequestUrl {
   return { resource: versionless.length > 0 ? `/${versionless.join('/')}` : '/' };
 }
 
+/** The $batch subrequest properties Graph reads, in the spelling this server uses. */
+const CANONICAL_SUBREQUEST_KEYS: Record<string, string> = {
+  id: 'id',
+  method: 'method',
+  url: 'url',
+  body: 'body',
+  headers: 'headers',
+  dependson: 'dependsOn',
+};
+
+export type CanonicalBatch = { body: unknown } | { error: string };
+
+/**
+ * Rewrite a `$batch` body so every property Graph reads has one spelling.
+ *
+ * Graph reads `$batch` property names case-insensitively (verified against live Graph:
+ * `Method`/`Url` and `METHOD`/`URL` subrequests execute), while the guards read the
+ * lowercase names. A subrequest spelled `{"Method": "POST", "Url": "/me/sendMail"}` was
+ * therefore invisible to the blocklist and still sent mail (EnviroKinetics/ms365-mcp#96).
+ * The canonical body is what every guard inspects AND what is sent to Graph, so the two
+ * cannot disagree. A subrequest that spells one property twice in different cases is
+ * refused, because which one Graph honors is unspecified; so is one without a string
+ * method and url, which Graph would reject anyway and the guards cannot classify.
+ */
+export function canonicalizeBatchBody(body: unknown): CanonicalBatch {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { body };
+  // Null-prototype accumulators: a caller key named `__proto__` must stay an ordinary
+  // property, not replace the prototype and supply an inherited `requests` array.
+  const top: Record<string, unknown> = Object.create(null);
+  let requestsKey: string | undefined;
+  for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+    if (key.toLowerCase() === 'requests') {
+      if (requestsKey !== undefined) {
+        return { error: 'the batch body names "requests" more than once in different cases' };
+      }
+      requestsKey = key;
+      top.requests = value;
+    } else {
+      top[key] = value;
+    }
+  }
+  if (!Array.isArray(top.requests)) return { body: { ...top } };
+
+  const requests: unknown[] = [];
+  for (const [index, entry] of (top.requests as unknown[]).entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { error: `subrequest at index ${index} is not an object` };
+    }
+    const canonical: Record<string, unknown> = Object.create(null);
+    for (const [key, value] of Object.entries(entry as Record<string, unknown>)) {
+      const lower = key.toLowerCase();
+      const name = Object.hasOwn(CANONICAL_SUBREQUEST_KEYS, lower)
+        ? CANONICAL_SUBREQUEST_KEYS[lower]
+        : key;
+      if (Object.hasOwn(canonical, name)) {
+        return {
+          error: `subrequest at index ${index} spells "${name}" more than once in different cases`,
+        };
+      }
+      canonical[name] = value;
+    }
+    if (typeof canonical.method !== 'string' || typeof canonical.url !== 'string') {
+      return { error: `subrequest at index ${index} has no string method and url` };
+    }
+    const override = methodOverrideHeader(canonical.headers);
+    if (override !== undefined) {
+      return {
+        error:
+          `subrequest at index ${index} carries a ${override} header, and the guards ` +
+          'check only the method property',
+      };
+    }
+    requests.push({ ...canonical });
+  }
+  return { body: { ...top, requests } };
+}
+
+/**
+ * Headers some HTTP stacks read as the real method. Graph's support for them inside a
+ * batch was not verified (probing would need a non-GET request), so a subrequest carrying
+ * one is refused: the method the guards read must be the only method.
+ */
+const METHOD_OVERRIDE_HEADERS = new Set([
+  'x-http-method-override',
+  'x-http-method',
+  'x-method-override',
+]);
+
+function methodOverrideHeader(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined;
+  return Object.keys(headers).find((name) =>
+    METHOD_OVERRIDE_HEADERS.has(name.trim().toLowerCase())
+  );
+}
+
+/**
+ * One spelling for a path segment Graph routes several ways. Verified against live Graph:
+ * `send`, `microsoft.graph.send`, `graph.send` (the CSDL namespace alias) and `send()`,
+ * `send( )` all reach the same action, so the guard compares them as one.
+ */
+function canonicalSegment(segment: string): string {
+  return withoutEmptyCalls(segment.replace(/^(?:microsoft\.graph|graph)\./i, ''));
+}
+
+/**
+ * Drop trailing empty argument lists, `()` or `( )`, by one backward scan. A regex such as
+ * `(?:\(\s*\))+$` backtracks quadratically on a long caller-controlled segment, and this
+ * runs synchronously on every batch subrequest.
+ */
+function withoutEmptyCalls(segment: string): string {
+  let end = segment.length;
+  for (;;) {
+    let i = end;
+    if (i === 0 || segment[i - 1] !== ')') break;
+    i -= 1;
+    while (i > 0 && /\s/.test(segment[i - 1])) i -= 1;
+    if (i === 0 || segment[i - 1] !== '(') break;
+    end = i - 1;
+  }
+  return segment.slice(0, end);
+}
+
+/**
+ * The final action of a path, lowercased. Path-addressed drive items put the action after
+ * a closing colon, `root:/a.txt:/content`, and Graph's syntax may also allow it without the
+ * slash, `root:/a.txt:content`; compare only the text after the last colon, failing closed.
+ */
+function lastSegment(resource: string): string {
+  const segments = resource.split('/').filter(Boolean);
+  let last = canonicalSegment(segments[segments.length - 1] ?? '');
+  let end = last.length;
+  while (end > 0 && last[end - 1] === ':') end -= 1;
+  last = last.slice(0, end);
+  return canonicalSegment(last.slice(last.lastIndexOf(':') + 1)).toLowerCase();
+}
+
+/**
+ * Write operations the blocklist names, keyed by method and final path segment.
+ *
+ * Graph exposes the same action under several roots: a draft is sent by
+ * `/me/messages/{id}/send` and equally by `/me/mailFolders/{id}/messages/{id}/send`, a
+ * file is replaced by `PUT /drives/{d}/items/{i}/content` and by
+ * `PUT /me/drive/root:/a.txt:/content`. The catalogue records one path per tool, so exact
+ * path matching missed the others (EnviroKinetics/ms365-mcp#95). For a blocked write whose
+ * final segment is a literal action (send, sendMail, reply, replyAll, forward, invite,
+ * content, $value), any subrequest with the same method and final segment is refused,
+ * whatever precedes it. No allowed catalogue tool shares such a pair today; the test suite
+ * checks that so a future upstream tool cannot be blocked silently.
+ */
+export function blockedWriteVerbs(matchers: BlockedOperationMatcher[]): Map<string, string> {
+  const verbs = new Map<string, string>();
+  for (const matcher of matchers) {
+    if (matcher.method === 'GET' || !matcher.lastLiteral) continue;
+    const key = `${matcher.method} ${matcher.lastLiteral}`;
+    if (!verbs.has(key)) verbs.set(key, matcher.toolName);
+  }
+  return verbs;
+}
+
 /**
  * Return every subrequest in a `$batch` body that matches a blocked operation. Tolerates a
  * malformed body: a caller sending nonsense should get Graph's own error, not a crash here.
  */
 export function findBlockedSubrequests(
   body: unknown,
-  matchers: BlockedOperationMatcher[]
+  matchers: BlockedOperationMatcher[],
+  options: { matchWriteAliases?: boolean } = {}
 ): BlockedSubrequest[] {
   if (matchers.length === 0) return [];
   if (!body || typeof body !== 'object') return [];
   const requests = (body as { requests?: unknown }).requests;
   if (!Array.isArray(requests)) return [];
+  const verbs = options.matchWriteAliases === false ? undefined : blockedWriteVerbs(matchers);
 
   const hits: BlockedSubrequest[] = [];
   for (const [index, entry] of requests.entries()) {
@@ -190,12 +366,13 @@ export function findBlockedSubrequests(
     }
     const resource = normalized.resource;
     const match = matchers.find((m) => m.method === method && m.pattern.test(resource));
-    if (match) {
+    const aliasOf = match ? undefined : verbs?.get(`${method} ${lastSegment(resource)}`);
+    if (match || aliasOf) {
       hits.push({
         id: typeof sub.id === 'string' ? sub.id : String(sub.id ?? index),
         method,
         url: sub.url,
-        toolName: match.toolName,
+        toolName: match ? match.toolName : (aliasOf as string),
       });
     }
   }

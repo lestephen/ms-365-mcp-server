@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   allOperationMatchers,
+  blockedWriteVerbs,
   buildBlockedOperationMatchers,
+  canonicalizeBatchBody,
   findBlockedSubrequests,
   resetOperationMatcherMemoForTests,
 } from '../src/lib/batch-guard.js';
@@ -235,5 +237,155 @@ describe('version-prefixed subrequest URLs cannot dodge the blocklist (#24)', ()
   it('does not over-block: a read of the same resource still passes', () => {
     expect(refuses('GET', '/me/messages')).toBe(false);
     expect(refuses('GET', '/v1.0/me/messages')).toBe(false);
+  });
+});
+
+describe('batch subrequest keys are read the way Graph reads them (#96)', () => {
+  const matchers = buildBlockedOperationMatchers(BLOCKED);
+
+  it('canonicalizes mixed-case keys so the guard sees a capitalized send', () => {
+    const canonical = canonicalizeBatchBody({
+      Requests: [{ ID: '1', Method: 'POST', Url: '/me/sendMail', Body: {}, DependsOn: [] }],
+    });
+    expect('body' in canonical).toBe(true);
+    const body = (canonical as { body: { requests: Array<Record<string, unknown>> } }).body;
+    expect(body.requests[0]).toEqual({
+      id: '1',
+      method: 'POST',
+      url: '/me/sendMail',
+      body: {},
+      dependsOn: [],
+    });
+    expect(findBlockedSubrequests(body, matchers)).toHaveLength(1);
+  });
+
+  it('refuses a property spelled twice in different cases', () => {
+    const canonical = canonicalizeBatchBody({
+      requests: [{ id: '1', method: 'GET', url: '/me', URL: '/me/sendMail' }],
+    });
+    expect(canonical).toEqual({ error: expect.stringContaining('"url" more than once') });
+  });
+
+  it('refuses a subrequest without a string method and url', () => {
+    expect(canonicalizeBatchBody({ requests: [{ id: '1', url: '/me' }] })).toEqual({
+      error: expect.stringContaining('no string method and url'),
+    });
+    expect(canonicalizeBatchBody({ requests: ['GET /me'] })).toEqual({
+      error: expect.stringContaining('not an object'),
+    });
+  });
+
+  it('leaves a well-formed lowercase batch unchanged', () => {
+    const body = { requests: [{ id: '1', method: 'GET', url: '/me' }] };
+    expect(canonicalizeBatchBody(body)).toEqual({ body });
+  });
+
+  it.each(['X-HTTP-Method-Override', 'x-http-method', ' X-Method-Override '])(
+    'refuses a subrequest carrying a %s header',
+    (header) => {
+      const canonical = canonicalizeBatchBody({
+        requests: [{ id: '1', method: 'GET', url: '/me/sendMail', headers: { [header]: 'POST' } }],
+      });
+      expect(canonical).toEqual({ error: expect.stringContaining('header') });
+    }
+  );
+
+  it('does not let a __proto__ key supply an inherited requests array', () => {
+    const envelope = JSON.parse(
+      '{"__proto__":{"requests":[{"id":"1","method":"DELETE","url":"/me/events/e1"}]}}'
+    );
+    const canonical = canonicalizeBatchBody(envelope) as { body: Record<string, unknown> };
+    expect(Object.hasOwn(canonical.body, 'requests')).toBe(false);
+    expect(JSON.parse(JSON.stringify(canonical.body)).requests).toBeUndefined();
+  });
+
+  it('keeps a subrequest key named like an Object.prototype member as written', () => {
+    const canonical = canonicalizeBatchBody({
+      requests: [{ id: '1', method: 'GET', url: '/me', constructor: 'x' }],
+    }) as { body: { requests: Array<Record<string, unknown>> } };
+    expect(canonical.body.requests[0].constructor).toBe('x');
+  });
+});
+
+describe('blocked writes reached through another path are refused (#95)', () => {
+  const PRODUCTION =
+    '^((send|reply|reply-all|forward)-[a-z-]*(mail|draft)[a-z-]*|forward-calendar-event|share-drive-item|reply-to-group-thread|upload-file-content|upload-my-profile-photo|list-adhoc-call-transcripts|get-adhoc-call-transcript-content)$';
+  const matchers = buildBlockedOperationMatchers(PRODUCTION);
+  const check = (method: string, url: string) =>
+    findBlockedSubrequests({ requests: [{ id: '1', method, url }] }, matchers);
+
+  it.each([
+    ['POST', '/me/mailFolders/drafts/messages/AAMk/send'],
+    ['POST', '/me/mailFolders/inbox/childFolders/x/messages/AAMk/reply'],
+    ['POST', '/me/messages/AAMk/microsoft.graph.send'],
+    ['POST', '/users/someone@contoso.com/mailFolders/inbox/messages/AAMk/forward'],
+    ['POST', '/groups/g1/threads/t1/posts/p1/reply'],
+    ['POST', '/groups/g1/conversations/c1/threads/t1/reply'],
+    ['POST', '/me/drive/items/abc/invite'],
+    ['PUT', '/me/drive/root:/notes.txt:/content'],
+    ['PUT', '/users/u1/drive/items/abc/content'],
+    ['PUT', '/sites/s1/drive/items/abc/content'],
+    ['PUT', '/users/u1/photo/$value'],
+    ['post', '/ME/MESSAGES/AAMk/SEND'],
+    // Spellings Graph routes to the same action (verified live with GET probes, which
+    // return 405 "An action can only be invoked as a 'POST' request").
+    ['POST', '/me/sendMail()'],
+    ['POST', '/me/sendMail( )'],
+    ['POST', '/me/sendMail%28%29'],
+    ['POST', '/me/sendMail()/'],
+    ['POST', '/me/graph.sendMail'],
+    ['POST', '/me/graph.sendMail()'],
+    ['POST', '/me/microsoft.graph.sendMail(\t)'],
+    ['POST', '/me/messages/AAMk/send()'],
+    ['POST', '/me/messages/AAMk/graph.send'],
+    ['POST', '/me/events/e1/graph.forward'],
+    ['POST', '/users/u1/sendMail()'],
+    // Path-addressed items with the action after the closing colon, slash optional.
+    ['PUT', '/me/drive/root:/notes.txt:content'],
+    ['PUT', '/me/drive/root:/notes.txt:/content:'],
+    ['POST', '/me/drive/root:/folder:invite'],
+  ])('refuses %s %s', (method, url) => {
+    expect(check(method, url)).toHaveLength(1);
+  });
+
+  it.each([
+    ['POST', '/me/messages/AAMk/createReply'],
+    ['POST', '/me/messages/AAMk/createForward'],
+    ['POST', '/me/events/e1/accept'],
+    ['POST', '/teams/t1/channels/c1/messages/m1/replies'],
+    ['GET', '/me/messages/AAMk/send'],
+    ['PATCH', '/me/messages/AAMk'],
+    ['POST', '/me/messages'],
+    ['POST', '/me/messages/AAMk/graph.createReply()'],
+  ])('allows %s %s', (method, url) => {
+    expect(check(method, url)).toEqual([]);
+  });
+
+  it('strips trailing empty argument lists in linear time', () => {
+    const long = '/me/messages/AAMk/' + '()'.repeat(50_000) + 'x';
+    const started = performance.now();
+    expect(check('POST', long)).toEqual([]);
+    expect(check('POST', '/me/messages/AAMk/send' + '( )'.repeat(50_000))).toHaveLength(1);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('blocks no allowed catalogue tool by the write-alias rule', () => {
+    const blockedNames = new Set(matchers.map((m) => m.toolName));
+    const verbs = blockedWriteVerbs(matchers);
+    const collisions = allOperationMatchers()
+      .filter((m) => !blockedNames.has(m.toolName) && m.method !== 'GET' && m.lastLiteral)
+      .filter((m) => verbs.has(`${m.method} ${m.lastLiteral}`))
+      .map((m) => m.toolName);
+    expect(collisions).toEqual([]);
+  });
+
+  it('labels batch metrics without the alias rule', () => {
+    const all = allOperationMatchers();
+    const hits = findBlockedSubrequests(
+      { requests: [{ id: '1', method: 'POST', url: '/me/mailFolders/x/messages/y/send' }] },
+      all,
+      { matchWriteAliases: false }
+    );
+    expect(hits).toEqual([]);
   });
 });

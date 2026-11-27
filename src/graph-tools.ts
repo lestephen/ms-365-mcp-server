@@ -31,6 +31,7 @@ import {
   describeBlockedSubrequests,
   findBlockedSubrequests,
   type BlockedOperationMatcher,
+  canonicalizeBatchBody,
 } from './lib/batch-guard.js';
 import AuthManager, {
   getEndpointScopeGroups,
@@ -3346,10 +3347,32 @@ function sendsJsonBody(
   return contentType === undefined || contentType.startsWith('application/json');
 }
 
+/** A JSON text without the leading byte order mark Graph's reader skips and JSON.parse rejects. */
+function withoutBom(value: string): string {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+}
+
+/**
+ * True for a string Graph's lenient JSON reader could turn into an object or array that
+ * JSON.parse cannot: it contains `{` or `[` but is not strict JSON. Graph executes bodies
+ * with comments, trailing commas, single quotes or unquoted names (verified live), so such
+ * a string would carry a payload no guard here inspected. Plain text without a bracket
+ * cannot encode a container and is forwarded unchanged, as upstream does.
+ */
+function isLenientJsonContainer(value: string): boolean {
+  if (!/[{[]/.test(value)) return false;
+  try {
+    JSON.parse(withoutBom(value));
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /** The object or array a JSON string encodes, or undefined for anything else. */
 function decodeJsonObject(value: string): Record<string, unknown> | unknown[] | undefined {
   try {
-    const decoded: unknown = JSON.parse(value);
+    const decoded: unknown = JSON.parse(withoutBom(value));
     return decoded !== null && typeof decoded === 'object'
       ? (decoded as Record<string, unknown> | unknown[])
       : undefined;
@@ -3516,7 +3539,11 @@ function recordBatchSubrequestsFor(body: unknown, blocked: BlockedOperationMatch
     if (!entry || typeof entry !== 'object') continue;
     const sub = entry as { method?: unknown; url?: unknown };
     if (typeof sub.method !== 'string' || typeof sub.url !== 'string') continue;
-    const hit = findBlockedSubrequests({ requests: [entry] }, all.length > 0 ? all : blocked);
+    const hit = findBlockedSubrequests({ requests: [entry] }, all.length > 0 ? all : blocked, {
+      // Labelling only: the write-alias rule would attribute every catalogue reply to the
+      // first tool with that verb.
+      matchWriteAliases: false,
+    });
     recordBatchSubrequest(hit[0]?.toolName ?? 'unmatched', sub.method);
   }
 }
@@ -4048,11 +4075,65 @@ async function executeGraphTool(
     // decodes it. The payload guards below walk objects, so a string body slipped past
     // both of them: a graph-batch carrying POST /me/sendMail, and an attachment carrying
     // contentBytes (EnviroKinetics/ms365-mcp#92). Guard what Graph will read: parse the
-    // string into the object or array it encodes. A string that is not JSON for an object
-    // or array is forwarded unchanged, as upstream does; Graph cannot act on it.
+    // string into the object or array it encodes. Plain text is forwarded unchanged, as
+    // upstream does; a string that only Graph's lenient reader would decode into an object
+    // or array is refused (see isLenientJsonContainer).
     // Binary uploads and text/html bodies are strings by design and are left alone.
     if (typeof body === 'string' && sendsJsonBody(tool, config)) {
+      if (isLenientJsonContainer(body)) {
+        recordBlockedOperation(tool.alias, route);
+        logger.warn(`Refusing ${tool.alias}: the JSON request body sent as a string is not JSON`);
+        return finish(
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'unparseable_json_body',
+                  tool: tool.alias,
+                  message:
+                    'This request was refused because its body is a string that looks like ' +
+                    'JSON but is not strict JSON. Send the body as a JSON object, or as a ' +
+                    'string JSON.parse accepts (no comments, trailing commas, single quotes ' +
+                    'or unquoted names).',
+                }),
+              },
+            ],
+            isError: true,
+          },
+          'blocked'
+        );
+      }
       body = decodeJsonObject(body) ?? body;
+    }
+    // graph-batch: give every subrequest property one spelling before any guard reads it,
+    // and send that canonical body, so guards and Graph see the same request (#96).
+    if (tool.path === '/$batch') {
+      const canonicalBatch = canonicalizeBatchBody(body);
+      if ('error' in canonicalBatch) {
+        recordBlockedOperation(tool.alias, route);
+        logger.warn(`Refusing ${tool.alias}: ${canonicalBatch.error}`);
+        return finish(
+          {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'invalid_batch_subrequest',
+                  tool: tool.alias,
+                  message:
+                    `This batch was refused because ${canonicalBatch.error}. Give each ` +
+                    'subrequest one id, method, url and optional body and headers, each ' +
+                    'spelled once.',
+                }),
+              },
+            ],
+            isError: true,
+          },
+          'blocked'
+        );
+      }
+      body = canonicalBatch.body;
     }
     // A blocked tool is unreachable by name, but graph-batch carries arbitrary
     // method/url subrequests, so the operation itself has to be checked (#24). Inspect
