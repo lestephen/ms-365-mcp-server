@@ -1,0 +1,35 @@
+{
+  "case": "get-download-url.error-unknown-attachment",
+  "tool": "get-download-url",
+  "route": "direct",
+  "input": {
+    "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEMAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAA=/attachments/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAABEgAQAJ5Ewq0Bq1VGhZ2n6wQfxDE=/$value"
+  },
+  "call": {
+    "name": "get-download-url",
+    "arguments": {
+      "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEMAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAA=/attachments/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAABEgAQAJ5Ewq0Bq1VGhZ2n6wQfxDE=/$value"
+    }
+  },
+  "result": {
+    "_meta": {
+      "http_status": 404,
+      "error_code": "ErrorItemNotFound"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"error\":\"No download URL was made: Microsoft Graph API error: 404 Not Found - {\\\"error\\\":{\\\"code\\\":\\\"ErrorItemNotFound\\\",\\\"message\\\":\\\"The specified object was not found in the store.\\\",\\\"innerError\\\":{\\\"date\\\":\\\"2030-01-01T00:00:00\\\",\\\"request-id\\\":\\\"5f7a3c2e-8b1d-4e6a-9c0f-2d4b6a8e1c3f\\\",\\\"client-request-id\\\":\\\"5f7a3c2e-8b1d-4e6a-9c0f-2d4b6a8e1c3f\\\"}}} Check the ids in the target: copy them exactly as Graph returned them, including any trailing \\\"=\\\".\"}"
+      }
+    ],
+    "isError": true
+  },
+  "decoded": {
+    "error": "No download URL was made: Microsoft Graph API error: 404 Not Found - {\"error\":{\"code\":\"ErrorItemNotFound\",\"message\":\"The specified object was not found in the store.\",\"innerError\":{\"date\":\"2030-01-01T00:00:00\",\"request-id\":\"5f7a3c2e-8b1d-4e6a-9c0f-2d4b6a8e1c3f\",\"client-request-id\":\"5f7a3c2e-8b1d-4e6a-9c0f-2d4b6a8e1c3f\"}}} Check the ids in the target: copy them exactly as Graph returned them, including any trailing \"=\"."
+  },
+  "clock": {
+    "now": "2030-01-01T00:00:00.000Z",
+    "nowEpoch": 1893456000
+  },
+  "notes": "Probe 404 refuses to mint: isError, {error:\"No download URL was made: Microsoft Graph API error: 404 ...\"} with an id hint, _meta http_status/error_code."
+}

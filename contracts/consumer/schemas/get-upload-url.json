@@ -1,0 +1,77 @@
+{
+  "type": "object",
+  "properties": {
+    "target": {
+      "type": "string",
+      "description": "Attachments collection of a draft message or an event, e.g. /me/messages/{message-id}/attachments, /me/events/{event-id}/attachments, or /users/{user-id}/messages/{message-id}/attachments for another mailbox. Or a OneDrive/SharePoint folder: /me/drive/root, /me/drive/items/{folder-id}, /drives/{drive-id}/items/{folder-id}, /sites/{site-id}/drive/items/{folder-id}."
+    },
+    "name": {
+      "type": "string",
+      "description": "File name as it will be stored, e.g. report.pdf: the attachment name, or the file name in the drive folder."
+    },
+    "contentType": {
+      "description": "MIME type of the file, e.g. application/pdf. Defaults to application/octet-stream.",
+      "type": "string"
+    },
+    "contentId": {
+      "description": "Attach inline under this Content-ID instead of as a regular attachment, so the HTML body can show the file with <img src=\"cid:<contentId>\">, e.g. a picture in an email signature. Letters, digits, \".\", \"_\", \"@\", \"-\".",
+      "type": "string"
+    },
+    "conflictBehavior": {
+      "description": "Drive folder targets only: what happens when the folder already has a file with this name. fail (default), replace, or rename.",
+      "type": "string",
+      "enum": [
+        "fail",
+        "replace",
+        "rename"
+      ]
+    },
+    "files": {
+      "description": "Several files at once, instead of target and name: up to 20 entries, each with the fields of a single upload.",
+      "minItems": 1,
+      "maxItems": 20,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Attachments collection of a draft message or an event, e.g. /me/messages/{message-id}/attachments, /me/events/{event-id}/attachments, or /users/{user-id}/messages/{message-id}/attachments for another mailbox. Or a OneDrive/SharePoint folder: /me/drive/root, /me/drive/items/{folder-id}, /drives/{drive-id}/items/{folder-id}, /sites/{site-id}/drive/items/{folder-id}."
+          },
+          "name": {
+            "type": "string",
+            "description": "File name as it will be stored, e.g. report.pdf: the attachment name, or the file name in the drive folder."
+          },
+          "contentType": {
+            "description": "MIME type of the file, e.g. application/pdf. Defaults to application/octet-stream.",
+            "type": "string"
+          },
+          "contentId": {
+            "description": "Attach inline under this Content-ID instead of as a regular attachment, so the HTML body can show the file with <img src=\"cid:<contentId>\">, e.g. a picture in an email signature. Letters, digits, \".\", \"_\", \"@\", \"-\".",
+            "type": "string"
+          },
+          "conflictBehavior": {
+            "description": "Drive folder targets only: what happens when the folder already has a file with this name. fail (default), replace, or rename.",
+            "type": "string",
+            "enum": [
+              "fail",
+              "replace",
+              "rename"
+            ]
+          }
+        },
+        "required": [
+          "target",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "confirm": {
+      "type": "boolean",
+      "description": "For destructive operations when the confirm gate is enabled (MS365_MCP_REQUIRE_CONFIRM=true; off by default). Set to true only after the user has explicitly approved this action. When the gate is on, calls without confirm: true return { error: \"confirmation_required\" } without touching user data."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false
+}
