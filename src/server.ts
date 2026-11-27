@@ -164,6 +164,32 @@ export function resolvePublicBaseUrl(options: CommandOptions): string | undefine
 }
 
 /**
+ * How long a listener that serves the attachment route allows for a whole request.
+ *
+ * Node's http.Server cuts any request whose body has not fully arrived after
+ * `requestTimeout` (300000 ms by default since Node 18) with a 408. get-upload-url
+ * accepts PUTs of up to 150 MB through the attachment route, which at 300 s needs
+ * about 4 Mbit/s sustained, so a slower client's upload failed at the pod even when
+ * the proxy in front allowed longer (EnviroKinetics/ms365-mcp#89). The default
+ * matches the 900 s the EKI Pomerium broker allows for /attachment.
+ *
+ * Set MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS to change it; 0 disables the limit, as
+ * in Node. Validated strictly: a typo must not silently fall back to Node's default.
+ * `headersTimeout` is left alone, so slow-header connections are still cut early.
+ */
+export const DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS = 900_000;
+
+export function parseAttachmentRequestTimeout(value: string | undefined): number {
+  if (value === undefined || value === '') return DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS;
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(
+      `MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS must be a non-negative integer number of milliseconds, got ${JSON.stringify(value)}`
+    );
+  }
+  return Number(value);
+}
+
+/**
  * Resolve `--attachment-port` / `MS365_MCP_ATTACHMENT_PORT` into a port number,
  * or null when the split listener is off.
  *
@@ -1611,7 +1637,17 @@ class MicrosoftGraphServer {
       // handed back, not from the option that asked for it. On this pair of
       // listeners the log is how an operator checks whether the surfaces are
       // separated, so it must not be able to name a host it did not bind.
-      const mcpBound = await this.listen(app, port, host);
+      // The MCP listener carries the attachment route too unless --attachment-port
+      // split it off, and then it needs the upload allowance (#89).
+      const attachmentRequestTimeoutMs = attachmentConfig
+        ? parseAttachmentRequestTimeout(process.env.MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS)
+        : undefined;
+      const mcpBound = await this.listen(
+        app,
+        port,
+        host,
+        attachmentPort === null ? attachmentRequestTimeoutMs : undefined
+      );
       const mcp = describeBoundAddress(mcpBound);
       logger.info(`Server listening on ${mcp.label}`);
       logger.info(`  - MCP endpoint: http://${mcp.authority}/mcp`);
@@ -1663,7 +1699,8 @@ class MicrosoftGraphServer {
           attachmentBound = await this.listen(
             attachmentApp,
             attachmentPort,
-            attachmentHost ?? host
+            attachmentHost ?? host,
+            attachmentRequestTimeoutMs
           );
         } catch (error) {
           await this.stop();
@@ -1736,7 +1773,8 @@ class MicrosoftGraphServer {
   private async listen(
     app: express.Express,
     port: number,
-    host: string | undefined
+    host: string | undefined,
+    requestTimeoutMs?: number
   ): Promise<AddressInfo> {
     // Declared out here rather than read inside `done`, and that is load-bearing.
     // A callback passed to `app.listen` is not guaranteed to run on a later
@@ -1750,6 +1788,7 @@ class MicrosoftGraphServer {
     await new Promise<void>((resolve, reject) => {
       const done = (error?: Error) => (error ? reject(error) : resolve());
       server = host ? app.listen(port, host, done) : app.listen(port, done);
+      if (requestTimeoutMs !== undefined) server.requestTimeout = requestTimeoutMs;
       // Not redundant with the above: that wiring is Express's, not Node's, so
       // an `error` raised after the first settle -- or a future version that
       // stops doing it -- still has somewhere to land. Rejecting an already
