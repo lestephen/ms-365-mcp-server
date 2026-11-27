@@ -18,6 +18,25 @@
       ]
     }
   },
+  "call": {
+    "name": "create-draft-email",
+    "arguments": {
+      "body": {
+        "subject": "Q-1042 quotation follow-up",
+        "body": {
+          "contentType": "html",
+          "content": "<p>Hi Adele, please find the revised quotation attached.</p>"
+        },
+        "toRecipients": [
+          {
+            "emailAddress": {
+              "address": "adele.vance@contoso.com"
+            }
+          }
+        ]
+      }
+    }
+  },
   "result": {
     "_meta": {
       "http_status": 201,

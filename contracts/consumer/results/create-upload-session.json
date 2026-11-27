@@ -11,6 +11,18 @@
       }
     }
   },
+  "call": {
+    "name": "create-upload-session",
+    "arguments": {
+      "driveId": "b!-RIj2DuyvEyV1T4NlOaMHk8XkS_I8MdFlUCq1BlcjgmhRfAj3-Z8RY2VpuvV_tpd",
+      "driveItemId": "01BYE5RZ4CRXQ6WJOY7FDLFBYAHWQMGP6S:/General Arrangement Rev C.pdf:",
+      "body": {
+        "item": {
+          "@microsoft.graph.conflictBehavior": "rename"
+        }
+      }
+    }
+  },
   "result": {
     "_meta": {
       "http_status": 200,

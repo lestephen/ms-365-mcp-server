@@ -7,6 +7,17 @@
     "name": "Quotation Q-1042 Rev B.pdf",
     "contentType": "application/pdf"
   },
+  "call": {
+    "name": "execute-tool",
+    "arguments": {
+      "tool_name": "get-upload-url",
+      "parameters": {
+        "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA=/attachments",
+        "name": "Quotation Q-1042 Rev B.pdf",
+        "contentType": "application/pdf"
+      }
+    }
+  },
   "result": {
     "content": [
       {

@@ -29,6 +29,16 @@ import { __resetSharedBreakerForTests } from '../src/lib/graph-resilience.js';
 import MicrosoftGraphServer from '../src/server.js';
 import { getCombinedPresetPattern } from '../src/tool-categories.js';
 
+// Production sets no MS365_MCP_* variable that changes a tool result, and some are read
+// when a module loads. Clear any inherited from the caller's shell before the server
+// modules import, so a local setting (MS365_MCP_BLOB_OUTPUT, for example) cannot change
+// the fixtures. Vitest gives each test file its own worker environment.
+vi.hoisted(() => {
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('MS365_MCP_')) delete process.env[key];
+  }
+});
+
 // Ticket ids are 32 bytes from randomBytes. Replaced with a counter-seeded digest so the
 // minted URLs (and their signatures) are byte-stable; the counter resets for every case.
 const ticketRandom = vi.hoisted(() => ({ counter: 0 }));
@@ -136,6 +146,10 @@ const PRODUCTION_OPTIONS = {
   enableAttachmentUrls: true,
   enableMcpApps: true,
 };
+
+// Not eager in production, so absent from the production tools/list; their schemas come
+// from the same flags without --discovery. Every other schema tool must be eager.
+const NON_EAGER_SCHEMA_TOOLS = new Set(['get-upload-url', 'add-mail-attachment']);
 
 const SCHEMA_TOOLS = [
   'create-draft-email',
@@ -430,7 +444,8 @@ const CASES: ContractCase[] = [
         AttachmentItem: {
           attachmentType: 'file',
           name: 'Quotation Q-1042 Rev B.pdf',
-          size: 284117,
+          // Graph refuses upload sessions below 3 MB, so the success case declares 4 MB.
+          size: 4194304,
         },
       },
     },
@@ -745,6 +760,7 @@ describe('consumer contract', () => {
         tool: contractCase.tool,
         route: contractCase.route,
         input: contractCase.input,
+        call,
         result,
         ...(decoded !== undefined && { decoded }),
         clock: { now: NOW, nowEpoch: NOW_EPOCH },
@@ -757,9 +773,12 @@ describe('consumer contract', () => {
     const productionTools = (await production.listTools()).tools;
     const fullTools = (await fullRegistration.listTools()).tools;
     for (const name of SCHEMA_TOOLS) {
-      const tool =
-        productionTools.find((t) => t.name === name) ?? fullTools.find((t) => t.name === name);
-      expect(tool, `${name} is not registered`).toBeDefined();
+      const nonEager = NON_EAGER_SCHEMA_TOOLS.has(name);
+      const tool = (nonEager ? fullTools : productionTools).find((t) => t.name === name);
+      expect(
+        tool,
+        nonEager ? `${name} is not registered` : `${name} is not in the production tools/list`
+      ).toBeDefined();
       checkOrWrite(`schemas/${name}.json`, stableJson(tool!.inputSchema));
     }
   });

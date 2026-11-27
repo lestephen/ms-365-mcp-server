@@ -5,6 +5,12 @@
   "input": {
     "target": "/drives/b!-RIj2DuyvEyV1T4NlOaMHk8XkS_I8MdFlUCq1BlcjgmhRfAj3-Z8RY2VpuvV_tpd/items/01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K/content"
   },
+  "call": {
+    "name": "get-download-url",
+    "arguments": {
+      "target": "/drives/b!-RIj2DuyvEyV1T4NlOaMHk8XkS_I8MdFlUCq1BlcjgmhRfAj3-Z8RY2VpuvV_tpd/items/01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K/content"
+    }
+  },
   "result": {
     "content": [
       {

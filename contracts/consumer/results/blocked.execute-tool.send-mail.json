@@ -20,6 +20,30 @@
       }
     }
   },
+  "call": {
+    "name": "execute-tool",
+    "arguments": {
+      "tool_name": "send-mail",
+      "parameters": {
+        "body": {
+          "message": {
+            "subject": "Q-1042 quotation follow-up",
+            "body": {
+              "contentType": "Text",
+              "content": "Hi Adele, please find the revised quotation."
+            },
+            "toRecipients": [
+              {
+                "emailAddress": {
+                  "address": "adele.vance@contoso.com"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
   "result": {
     "content": [
       {

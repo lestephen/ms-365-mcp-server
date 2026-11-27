@@ -17,6 +17,27 @@
       }
     ]
   },
+  "call": {
+    "name": "execute-tool",
+    "arguments": {
+      "tool_name": "get-upload-url",
+      "parameters": {
+        "files": [
+          {
+            "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA=/attachments",
+            "name": "Quotation Q-1042 Rev B.pdf",
+            "contentType": "application/pdf"
+          },
+          {
+            "target": "/drives/b!-RIj2DuyvEyV1T4NlOaMHk8XkS_I8MdFlUCq1BlcjgmhRfAj3-Z8RY2VpuvV_tpd/items/01BYE5RZ4CRXQ6WJOY7FDLFBYAHWQMGP6S",
+            "name": "Performance Datasheet Rev A.xlsx",
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "conflictBehavior": "rename"
+          }
+        ]
+      }
+    }
+  },
   "result": {
     "_meta": {
       "result_count": 2

@@ -18,9 +18,12 @@ the complete `tools/call` result exactly as an MCP client receives it.
 
 - `manifest.json`: contract version, the generator, and the case and schema lists.
 - `results/<case-id>.json`: `case`, `tool`, `route` (`direct` or `execute-tool`, as the
-  tool is reached in production), `input` (the exact arguments), `result` (the full
-  `CallToolResult`), `decoded` (the first text item parsed as JSON, when it is JSON),
-  `clock` and `notes`.
+  tool is reached in production), `input` (the tool's own arguments), `call` (the exact
+  `tools/call` request sent, `{name, arguments}`), `result` (the full `CallToolResult`),
+  `decoded` (the first text item parsed as JSON, when it is JSON), `clock` and `notes`.
+  For a `direct` case `call` is `{name: tool, arguments: input}`; for an `execute-tool`
+  case it is `{name: "execute-tool", arguments: {tool_name: tool, parameters: input}}`,
+  the call a client must make to reach that tool in production.
 - `schemas/<tool>.json`: the `inputSchema` the server advertises in `tools/list`.
   `get-upload-url` and `add-mail-attachment` are not eager tools in production, so they
   are absent from the production `tools/list` (they are reached through `execute-tool`);

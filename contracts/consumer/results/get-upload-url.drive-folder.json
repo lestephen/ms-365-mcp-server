@@ -8,6 +8,18 @@
     "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "conflictBehavior": "rename"
   },
+  "call": {
+    "name": "execute-tool",
+    "arguments": {
+      "tool_name": "get-upload-url",
+      "parameters": {
+        "target": "/drives/b!-RIj2DuyvEyV1T4NlOaMHk8XkS_I8MdFlUCq1BlcjgmhRfAj3-Z8RY2VpuvV_tpd/items/01BYE5RZ4CRXQ6WJOY7FDLFBYAHWQMGP6S",
+        "name": "Performance Datasheet Rev A.xlsx",
+        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "conflictBehavior": "rename"
+      }
+    }
+  },
   "result": {
     "content": [
       {
