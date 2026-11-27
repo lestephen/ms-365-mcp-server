@@ -3330,6 +3330,42 @@ describe('graph-tools', () => {
       expect(graphClient.graphRequest).not.toHaveBeenCalled();
     });
 
+    it('forwards the Accept override on the bounded inline download', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+      const target = '/me/messages/m1/attachments/a1/$value';
+      const graphClient = {
+        graphRequest: vi.fn(),
+        downloadToBuffer: vi.fn().mockResolvedValue({
+          bytes: Buffer.from('text'),
+          contentType: 'text/plain',
+          contentLength: 4,
+        }),
+      };
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      await enableAttachmentUrls();
+      registerGraphTools(server as any, graphClient as any, {
+        readOnly: false,
+        orgMode: false,
+        multiAccount: false,
+        accountNames: [],
+        httpMode: true,
+      });
+
+      const result = await server.tools.get('download-bytes')!.handler({
+        target,
+        accept: 'text/plain',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(graphClient.downloadToBuffer).toHaveBeenCalledWith(target, 256 * 1024, {
+        accessToken: undefined,
+        headers: { Accept: 'text/plain' },
+      });
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
     it('preserves dotted drive filenames through every binary utility', async () => {
       mockEndpoints.length = 0;
       mockEndpointsJson = [];
