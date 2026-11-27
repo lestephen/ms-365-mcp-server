@@ -18,6 +18,10 @@ MCP Clients (Claude Desktop, Claude Code, Open WebUI, ...)
          Microsoft Graph API
 ```
 
+Requires Node.js 20 or newer.
+
+`/mcp` serves both protocol eras on the same URL: MCP 2026-07-28 clients (which open with `server/discover`) and 2025-era clients (which open with `initialize`). Nothing needs configuring for either.
+
 ## Headless stdio auth-cache storage
 
 Production HTTP deployments are stateless: normal Graph requests carry a per-user bearer token, including On-Behalf-Of (`--obo`) deployments, and the server does not store MSAL token state for those requests.
@@ -97,8 +101,10 @@ docker run -p 3000:3000 \
      --max-replicas 3 \
      --cpu 0.5 --memory 1Gi \
      --system-assigned \
+     --secrets "pkce-secret=$(openssl rand -base64 48)" \
      --env-vars \
        "MS365_MCP_KEYVAULT_URL=https://your-keyvault.vault.azure.net" \
+       "MS365_MCP_PKCE_SECRET=secretref:pkce-secret" \
        "MS365_MCP_ORG_MODE=true" \
        "MS365_MCP_PUBLIC_URL=https://mcp.example.com" \
      --command "node" "dist/index.js" "--http" "3000" "--org-mode"
@@ -184,7 +190,7 @@ The list should mirror the redirect URIs registered on your Azure AD app registr
 
 ## Reverse Proxy / Custom Domain
 
-When running behind a reverse proxy, set `MS365_MCP_PUBLIC_URL` so that the OAuth authorize URL handed back to the user's browser is resolvable from outside the server's network:
+When running behind a reverse proxy, set `MS365_MCP_PUBLIC_URL` so that the OAuth URLs the server advertises are resolvable from outside the server's network:
 
 ```bash
 # Via environment variable
@@ -194,7 +200,11 @@ MS365_MCP_PUBLIC_URL=https://mcp.example.com
 --public-url https://mcp.example.com
 ```
 
-Only browser-facing fields (`issuer`, `authorization_endpoint`, `authorization_servers`) are pinned to this URL. Server-to-server endpoints (`token_endpoint`, `registration_endpoint`, `resource`) stay on the request origin, so clients that reach the server over an internal network (e.g. another container on the same Docker network) don't have to round-trip back through the public URL.
+Every advertised URL (`issuer`, `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `resource`, `authorization_servers`) uses this URL, path included, so a server hosted under a sub-path works. A client that reaches the server over an internal network (e.g. another container on the same Docker network) must still be able to reach the public URL, since it calls `/token` there.
+
+The proxy must pass the `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` request headers through to `/mcp`. MCP 2026-07-28 clients send them on every request, and the server answers `400` when they are missing; 2025-era clients do not need them.
+
+Use an `https://` public URL. Newer MCP clients refuse an `http://` token endpoint, so the server logs a warning at startup when the public URL is `http://` on a host other than localhost.
 
 ### Attachment URLs (EKI fork)
 
@@ -230,25 +240,26 @@ The client automatically discovers OAuth endpoints and opens a browser for authe
 ## Security Considerations
 
 - **Stateless**: the server does not store tokens — each request carries the user's Bearer token
+- **More than one instance? Set `MS365_MCP_PKCE_SECRET`** (32+ random characters, the same on every instance). Otherwise the two-leg PKCE flow keeps a mapping in process memory between `/authorize` and `/token`, and a sign-in whose `/token` lands on another replica, or comes after a restart, fails with `AADSTS501481`. With the secret, the server side of the PKCE pair is derived from the client's challenge and nothing is stored. A single instance can leave it unset. Clients must use `code_challenge_method=S256`. Setting or rotating the secret fails sign-ins that are in progress at that moment.
 - **Account pinning**: `MS365_MCP_EXPECTED_USERNAME` and `MS365_MCP_EXPECTED_HOME_ACCOUNT_ID` protect local MSAL cache flows for headless stdio deployments. In `--http`, `--obo`, or `MS365_MCP_OAUTH_TOKEN` deployments they are warning-only because Graph calls use request-provided tokens.
 - **Admin consent**: grant tenant-wide consent to avoid per-user consent prompts
 - **Managed identity**: use managed identity for Key Vault access (no secrets in environment variables)
 - **Read-only mode**: use `--read-only` to disable all write operations (send, delete, update, create)
 - **Tool filtering**: use `--enabled-tools <regex>`, `--enabled-tools-file <path>` (one regex per line), or `--preset <names>` to restrict available tools
 - **CORS**: configure `MS365_MCP_CORS_ORIGIN` to restrict allowed origins (defaults to `http://localhost:3000`); set explicitly when clients run on a different origin
-- **Disable Dynamic Client Registration**: when only a known client talks to the server, set `MS365_MCP_DISABLE_DCR=true` (or pass `--no-dynamic-registration`) to close the anonymous `/register` endpoint
+- **Client registration**: clients identify themselves with Client ID Metadata Documents (CIMD): the `client_id` is an https URL, the server fetches the document there and only redirects to a `redirect_uri` it lists. This follows the MCP spec; it is not a security boundary, since a `client_id` that is not an https URL skips it and the server always sends its own client ID to Entra, whose reply URLs are what really limit where codes go. The fetch only goes to public addresses, follows no redirects and is capped at 5 KiB and 5 s; documents are cached per their `Cache-Control` (5 minutes by default), and an expired one is still used for up to 24 hours while a refetch fails for a passing reason (unreachable host, timeout, 5xx, 429) or every lookup slot is busy; a final answer (a 404, an invalid document) drops it at once. With no usable copy, `/authorize` answers a passing failure with 503 `temporarily_unavailable` and `Retry-After`, and a final one with 400 `invalid_client`. The fetch resolves the client's host over DNS itself, so `/etc/hosts` entries do not apply. It connects directly and does not use `HTTPS_PROXY`, so it needs direct outbound HTTPS to that host (`claude.ai` for Claude). Without that, turn CIMD off with `--no-client-metadata-documents` (or `MS365_MCP_DISABLE_CIMD=true`) and turn DCR on: Claude then falls back to DCR. Dynamic Client Registration is off by default, since the MCP spec deprecated it; `/register` then answers with how to turn it on. Turn it on with `--enable-dynamic-registration` or `MS365_MCP_ENABLE_DCR=true` for DCR-only clients such as Open WebUI; `MS365_MCP_DISABLE_DCR=true` (or `--no-dynamic-registration`) keeps it off regardless. Other `client_id` values (a static one, or one issued by DCR earlier) are accepted at `/authorize` as before
 - **Structured audit log**: enabled by default. Every tool invocation that reaches Microsoft Graph emits one JSON line on stderr (captured by the container platform's log collector) and to `~/.ms-365-mcp-server/logs/audit.log` (mode `0o600`, or under `MS365_MCP_LOG_DIR` when set) with `{ event, request_id, user_principal_name, tool, http_method, http_status?, status, duration_ms, recipient_count?, recipient_domains?, recipient_domains_truncated?, graph_batch_subrequest_count?, graph_batch_http_status_counts?, graph_batch_error_code_counts?, result_count?, result_has_more?, response_bytes?, target_resource?, error_type?, error_code? }`. A few refusals short-circuit before that and emit nothing: a confirm-gate rejection, an `account` param that contradicts the bearer identity, and a failure to resolve an account token. Policy-blocked tool attempts emit `event: "tool.denied"` with `status: "denied"`, `reason` (`allowed_scopes` or `tool_allowlist`), and `missing_scopes` when applicable. When an audited generated Microsoft Graph tool targets a derivable resource through an ID-like path parameter such as `{message-id}` or `{driveItem-id}`, `target_resource` is `{ type, id }`, where `id` is the Graph path up to that resource ID. Later path parameters such as `{path}`, query values, returned content, and Graph response bodies are NEVER recorded, and error messages are reduced to `error_type` / `error_code` so upstream library errors do not leak token fragments or query-string PII. Response _metadata_ is recorded — `result_count`, `result_has_more` and `response_bytes` describe how much came back so that a bulk read is distinguishable from an ordinary one; none of them reveals any of its content. Two things derived from tool parameters **are** recorded, both deliberately. First, `target_resource.id` substitutes ID-like path parameters into the resource path, so a tool on `/users/{user-id}/...` records whatever identifier the caller passed, which may be a full email address. Second, a request whose body carries `toRecipients` / `ccRecipients` / `bccRecipients` / `attendees` / `recipients`, at any casing and several levels down, including inside a `graph-batch` sub-request, records `recipient_count`, the number of entries in those arrays, and `recipient_domains`, the **domain part only** of their addresses and only where it parses as a plain hostname, never the local part and never a subject or message body. An entry that names someone without an address (a `driveRecipient` given as `alias` or `objectId`) counts but contributes no domain. It keys on body shape rather than on the endpoint, so it covers sends, forwards, invites and file shares but equally draft creation and edits, event updates and `findMeetingTimes`, and it reads high rather than low: an attached message's own recipients are counted too. `recipient_domains` holds at most 50 **distinct domains**, alphabetically, and sets `recipient_domains_truncated: true` when there were more; `recipient_count` is unaffected by the cap. All three are absent when the body carries no recipient array at all. A request that fails after reaching Graph still records recipients, since a timeout is not proof of non-delivery. Gaps remain, so absence proves nothing: a draft composed outside this server and sent by id, the original thread's recipients on a reply (Graph resolves those server-side), and a body nesting recipients deeper than the walker descends. This describes the structured audit log only; the operational logger is separate and does log tool parameters. Forms the "who accessed what, when" trail required for GDPR / HIPAA / PIPEDA / SOC 2 audit. Opt-out: `MS365_MCP_AUDIT_LOG=false`
 - **Graph resilience**: every call to Microsoft Graph is wrapped with a fetch timeout (default 100 s via `MS365_MCP_GRAPH_TIMEOUT_MS`), retry-with-backoff on 429 / 503 / 504 / network errors (default 3 retries, full-jitter exponential backoff, honours `Retry-After`; 503 / 504 / network errors only retried for idempotent methods, 429 retried on all methods), and a process-wide circuit breaker that opens after 5 consecutive failures and cools down for 30 s (`MS365_MCP_GRAPH_CIRCUIT_THRESHOLD` / `MS365_MCP_GRAPH_CIRCUIT_COOLDOWN_MS`). Disable the breaker for trusted automation: `MS365_MCP_GRAPH_CIRCUIT_DISABLED=true`
 - **Confirm gate on destructive tools**: opt-in, **off by default**. Enable with `MS365_MCP_REQUIRE_CONFIRM=true`. When on, destructive tools (POST except `readOnly`, PATCH, PUT, DELETE — `delete-mail-message`, `send-mail`, `update-event`, etc.) return `{ "error": "confirmation_required" }` until the caller re-invokes them with `"confirm": true`. Mitigates accidental writes when an LLM misroutes a request or follows an injected instruction. Shipped opt-in so it is a non-breaking, additive layer that can coexist with client-side elicitation prompts (MCP Elicitation API) where the client supports them.
 
 ## Exposed Endpoints
 
-| Path                                      | Method   | Description                     | Auth Required |
-| ----------------------------------------- | -------- | ------------------------------- | ------------- |
-| `/`                                       | GET      | Health check                    | No            |
-| `/mcp`                                    | GET/POST | MCP protocol endpoint           | Bearer token  |
-| `/authorize`                              | GET      | OAuth — redirect to Microsoft   | No            |
-| `/token`                                  | POST     | OAuth — code exchange / refresh | No            |
-| `/register`                               | POST     | OAuth — dynamic registration    | No            |
-| `/.well-known/oauth-authorization-server` | GET      | OAuth server metadata           | No            |
-| `/.well-known/oauth-protected-resource`   | GET      | Protected resource metadata     | No            |
+| Path                                      | Method   | Description                           | Auth Required |
+| ----------------------------------------- | -------- | ------------------------------------- | ------------- |
+| `/`                                       | GET      | Health check                          | No            |
+| `/mcp`                                    | GET/POST | MCP protocol endpoint                 | Bearer token  |
+| `/authorize`                              | GET      | OAuth — redirect to Microsoft         | No            |
+| `/token`                                  | POST     | OAuth — code exchange / refresh       | No            |
+| `/register`                               | POST     | OAuth — dynamic registration (opt-in) | No            |
+| `/.well-known/oauth-authorization-server` | GET      | OAuth server metadata                 | No            |
+| `/.well-known/oauth-protected-resource`   | GET      | Protected resource metadata           | No            |

@@ -19,7 +19,7 @@ vi.mock('zod', () => {
 });
 
 describe('Auth Tools', () => {
-  let server: { tool: ReturnType<typeof vi.fn> };
+  let server: { registerTool: ReturnType<typeof vi.fn> };
   let authManager: {
     logout: ReturnType<typeof vi.fn>;
     testLogin: ReturnType<typeof vi.fn>;
@@ -36,7 +36,7 @@ describe('Auth Tools', () => {
     verifyLoginTool = vi.fn();
 
     server = {
-      tool: vi.fn((name, description, schema, handler) => {
+      registerTool: vi.fn((name, _config, handler) => {
         if (name === 'login') {
           loginTool = handler;
         }

@@ -1,61 +1,103 @@
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { recordAdvertisedSurface, recordUnknownTool } from '../metrics.js';
 import logger from '../logger.js';
 
 /**
- * Observe MCP traffic at the transport to capture two things the tool handlers cannot
- * see for themselves.
+ * Observe MCP requests at the server's own request handlers to capture two things the
+ * tool handlers cannot see for themselves.
  *
  * `unknown_tool_total`: a `tools/call` for a name the server does not register never
- * reaches a handler, so the only place to see it is the wire. This is the signal behind
- * #29, where a caller read a schema via get-tool-schema and then called the name
- * directly.
- *
- * ONLY `send` is wrapped. An earlier version also intercepted `onmessage` via
- * Object.defineProperty to correlate the response back to the request id, which avoided
- * parsing the tool name out of an error string. It also broke
- * StreamableHTTPServerTransport outright: every HTTP request hung with no response,
- * while stdio was unaffected. Production runs HTTP. Wrapping `send` alone is the pattern
- * already proven there by withStrictToolSchemas, so the tool name is parsed from the
- * message and falls back to an "unparsed" sentinel rather than being lost.
+ * reaches a tool handler, so the SDK's `tools/call` dispatcher is the only place to see
+ * it. This is the signal behind #29, where a caller read a schema via get-tool-schema
+ * and then called the name directly.
  *
  * `tools_advertised` / `tool_schema_bytes`: the up-front context cost of the current
- * configuration, measured from what actually goes out rather than recomputed.
+ * configuration, measured from what `tools/list` actually returns rather than
+ * recomputed.
+ *
+ * SDK v1 builds observed the transport's `send`. SDK v2 serves 2026-07-28 clients
+ * through `createMcpHandler`, which owns its transport, so a transport wrapper would
+ * only have seen 2025-era HTTP and stdio traffic and undercounted silently as clients
+ * upgraded. Every serving path (legacy HTTP, modern HTTP, stdio) dispatches through
+ * the server's request handler map, so decorating the two handlers there covers all
+ * of them with one seam. The map is SDK-internal; if it disappears the observer logs
+ * and does nothing rather than breaking the server, and the metrics tests fail.
  */
 
-export function withMetricsObserver<T extends Transport>(transport: T): T {
-  const originalSend = transport.send.bind(transport);
-  transport.send = (message: JSONRPCMessage, options?: Parameters<Transport['send']>[1]) => {
-    observeOutgoing(message);
-    return originalSend(message, options);
-  };
-  return transport;
+type RequestHandler = (request: unknown, ctx: unknown) => Promise<unknown>;
+
+function requestHandlers(server: { server: unknown }): Map<string, RequestHandler> | undefined {
+  const handlers = (server.server as { _requestHandlers?: unknown })._requestHandlers;
+  return handlers instanceof Map ? (handlers as Map<string, RequestHandler>) : undefined;
+}
+
+const OBSERVED = Symbol('ms365-metrics-observed');
+
+/**
+ * Decorate `tools/call` and `tools/list` on a fully registered server. Must run after
+ * the last tool is registered, because the SDK installs those handlers lazily on the
+ * first registration. Idempotent per server.
+ */
+export function installMetricsObserver(server: McpServer | { server: unknown }): boolean {
+  const handlers = requestHandlers(server as { server: unknown });
+  if (!handlers) {
+    logger.debug('Skipping metrics observer: request handler map not found');
+    return false;
+  }
+
+  const call = handlers.get('tools/call');
+  if (call && !(call as unknown as Record<symbol, boolean>)[OBSERVED]) {
+    const observedCall: RequestHandler = async (request, ctx) => {
+      try {
+        const result = await call(request, ctx);
+        const unknown = unknownToolName({ result });
+        if (unknown) recordUnknownTool(unknown);
+        return result;
+      } catch (error) {
+        const unknown = unknownToolName({ error: error as { code?: number; message?: string } });
+        if (unknown) recordUnknownTool(unknown);
+        throw error;
+      }
+    };
+    (observedCall as unknown as Record<symbol, boolean>)[OBSERVED] = true;
+    handlers.set('tools/call', observedCall);
+  }
+
+  const list = handlers.get('tools/list');
+  if (list && !(list as unknown as Record<symbol, boolean>)[OBSERVED]) {
+    const observedList: RequestHandler = async (request, ctx) => {
+      const result = await list(request, ctx);
+      const tools = (result as { tools?: unknown } | undefined)?.tools;
+      if (Array.isArray(tools)) recordAdvertisedSurface(tools.length, JSON.stringify(tools).length);
+      return result;
+    };
+    (observedList as unknown as Record<symbol, boolean>)[OBSERVED] = true;
+    handlers.set('tools/list', observedList);
+  }
+  return true;
 }
 
 /**
- * Did this response mean "no such tool", and for which tool?
+ * Did this outcome mean "no such tool", and for which tool?
  *
- * The SDK does not return a JSON-RPC error object here: it returns a normal result
- * carrying `isError: true` with the text "MCP error -32602: Tool <name> not found".
- * Verified against a running server; an earlier version checked `error.code` only and
- * silently never fired. Both shapes are accepted so a future SDK change either way
- * still counts.
+ * SDK v2 throws a ProtocolError with code -32602 and the message
+ * "Tool <name> not found" (it also uses -32602 for a disabled tool, which is not an
+ * unknown name). SDK v1 returned a result with `isError: true` carrying the same text.
+ * Both shapes are accepted so a future SDK change either way still counts.
  *
  * The name is parsed from the message. That is fragile to a rewording, which is why an
- * unrecognised but clearly -32602 failure still counts under an "unparsed" sentinel
- * rather than vanishing. The alternative, correlating against the incoming request id,
- * required intercepting `onmessage` and broke the HTTP transport.
+ * unrecognised but clearly -32602 not-found failure still counts under an "unparsed"
+ * sentinel rather than vanishing.
  */
-function unknownToolName(message: {
+function unknownToolName(outcome: {
   error?: { code?: number; message?: string };
   result?: unknown;
 }): string | undefined {
   const texts: string[] = [];
-  if (message.error?.code === -32602 && typeof message.error.message === 'string') {
-    texts.push(message.error.message);
+  if (outcome.error?.code === -32602 && typeof outcome.error.message === 'string') {
+    texts.push(outcome.error.message);
   }
-  const result = message.result as
+  const result = outcome.result as
     | { isError?: boolean; content?: Array<{ text?: unknown }> }
     | undefined;
   if (result?.isError && Array.isArray(result.content)) {
@@ -65,28 +107,9 @@ function unknownToolName(message: {
     if (!/not found/i.test(text)) continue;
     const named = /Tool ([A-Za-z0-9._-]+) not found/i.exec(text);
     if (named) return named[1];
-    // Recognisable as an unknown-tool failure but not parseable: still counted, under a
-    // sentinel, so the signal is not lost silently.
-    if (text.includes('-32602')) return 'unparsed';
+    if (text.includes('-32602') || outcome.error?.code === -32602) return 'unparsed';
   }
   return undefined;
-}
-
-function observeOutgoing(message: unknown): void {
-  if (!message || typeof message !== 'object') return;
-  const m = message as {
-    id?: string | number;
-    error?: { code?: number; message?: string };
-    result?: { tools?: unknown };
-  };
-
-  const unknown = unknownToolName(m);
-  if (unknown) recordUnknownTool(unknown);
-
-  if (m.result && Array.isArray((m.result as { tools?: unknown[] }).tools)) {
-    const tools = (m.result as { tools: unknown[] }).tools;
-    recordAdvertisedSurface(tools.length, JSON.stringify(tools).length);
-  }
 }
 
 /**

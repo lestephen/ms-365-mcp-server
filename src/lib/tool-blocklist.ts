@@ -1,4 +1,4 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import logger from '../logger.js';
 
 /**
@@ -58,8 +58,10 @@ export function withToolBlocklist(server: McpServer, pattern?: string): McpServe
   // registrars happen to use. All call sites use tool() today, but this is the single
   // enforcement point for an operator policy, so it should not be one refactor away
   // from a bypass.
+  // SDK v2 removed the deprecated tool(); it stays in the list so that a reintroduced
+  // or polyfilled alias cannot become an unguarded registration path.
   for (const method of ['tool', 'registerTool'] as const) {
-    const original = server[method];
+    const original = (server as unknown as Record<string, unknown>)[method];
     if (typeof original !== 'function') continue;
     const register = (original as (...args: unknown[]) => unknown).bind(server);
     (guarded as unknown as Record<string, unknown>)[method] = (

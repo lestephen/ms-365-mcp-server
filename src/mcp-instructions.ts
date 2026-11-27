@@ -4,6 +4,7 @@ export type McpInstructionsContext = {
   appMode?: boolean;
   readOnly: boolean;
   multiAccount: boolean;
+  attachmentUrlsEnabled?: boolean;
 };
 
 function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
@@ -14,13 +15,21 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
     'When you need an organizational user or recipient address, resolve it with list-users (or another directory tool); do not invent SMTP addresses.',
     'Directory $search on collections such as /users or /groups requires ConsistencyLevel: eventual when the tool exposes that header.',
     'Teams chat and channel messages: prefer HTML contentType in the body; plain text is often mangled by Graph.',
-    'Files / binary content: prefer get-download-url for large content. It returns native pre-authenticated URLs for drive/SharePoint files and, on a server running with --enable-attachment-urls, short-lived single-use URLs for mail and calendar attachments and meeting recordings; fetch each one once, straight to disk. Use download-bytes for small authenticated byte reads such as attachments, profile photos, Teams hosted content, and meeting recordings. In stdio mode (or HTTP with --http-local-file-tools), download-bytes-to-file writes authenticated bytes straight to a local absolute path and remains the out-of-band option for meeting recordings. These tools take relative Microsoft Graph paths, not absolute URLs. For uploads, prefer create-upload-session and send the bytes to the returned uploadUrl yourself, streaming them from disk; this server does not perform that PUT. To attach a file to a draft message or an event, use get-upload-url when available and PUT the file from disk to the URL it returns (e.g. curl -T), or create-mail-attachment-upload-session for a draft. upload-file-content instead carries the entire file as a base64 tool argument, and a truncated argument decodes to a truncated file with no error, so do not build that string regardless of how small the file looks.',
+    'Files / binary content: for large drive/SharePoint file content, prefer get-download-url to resolve a pre-authenticated URL for out-of-band download.',
+    opts.attachmentUrlsEnabled
+      ? 'Attachment URLs are enabled: for document reading and downloads, prefer get-download-url for mail attachments, meeting recordings, drive files and other authenticated byte resources, then hand the URL to an external converter or downloader. Use download-bytes only when the caller explicitly needs bytes. Server-minted URLs are single-use: mint a fresh URL for every fetch, including probes, conversion, continuation and retries; retain the same target, account and document selection. This is a preference, not enforcement: enabling attachment URLs does not scrub arbitrary response bodies; use existing tool filtering when a text-only tool surface is required.'
+      : 'Use download-bytes for authenticated byte reads such as mail attachments, profile photos, Teams hosted content, and meeting recordings.',
+    'In stdio mode (or HTTP with --http-local-file-tools), download-bytes-to-file writes authenticated bytes straight to a local absolute path instead of returning base64. These tools take relative Microsoft Graph paths, not absolute URLs. For uploads, prefer create-upload-session and send the bytes to the returned uploadUrl yourself, streaming them from disk; this server does not perform that PUT. To attach a file to a draft message or an event, or to put a file in a OneDrive/SharePoint folder, use get-upload-url when available and PUT the file from disk to the URL it returns (e.g. curl -T), or create-mail-attachment-upload-session for a draft. upload-file-content instead carries the entire file as a base64 tool argument, and a truncated argument decodes to a truncated file with no error, so do not build that string regardless of how small the file looks.',
   ];
   if (opts.appMode)
     parts.push(
       'App mode: there is no signed-in user, so /me paths do not work. Name the user in /users/{user-id} paths with a UPN or object id.'
     );
-  if (opts.readOnly) parts.push('This server is read-only; write operations are disabled.');
+  if (opts.readOnly) parts.push('This server is read-only; writes to Microsoft 365 are disabled.');
+  else
+    parts.push(
+      'Mail reply, reply-all and forward tools (including their drafts and shared mailboxes): Graph puts comment into an HTML body, so plain-text line breaks are usually lost; use <br> for line breaks or <p> for paragraphs.'
+    );
   if (opts.multiAccount)
     parts.push('Multiple accounts: pass the account parameter when required (see list-accounts).');
   if (!opts.orgMode)

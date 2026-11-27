@@ -1,6 +1,5 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildAllowedScopeDiagnostics,
@@ -15,6 +14,17 @@ import {
   registerGraphTools,
   UTILITY_TOOLS,
 } from '../src/graph-tools.js';
+
+// SDK v2 answers a call to an unregistered tool with a JSON-RPC -32602 error rather
+// than an isError result. Either outcome is a refusal; what matters is that Graph is
+// never reached.
+async function refused(call: Promise<unknown>): Promise<boolean> {
+  try {
+    return ((await call) as { isError?: boolean }).isError === true;
+  } catch (error) {
+    return (error as { code?: number }).code === -32602;
+  }
+}
 
 const enabledTools = '^read-mail-text$';
 
@@ -84,7 +94,7 @@ describe('fixed utility scopes', () => {
           );
           const params = { messageIds: ['message'] };
           expect(
-            (await client.callTool({ name: 'read-mail-text', arguments: params })).isError
+            await refused(client.callTool({ name: 'read-mail-text', arguments: params }))
           ).toBe(true);
           if (mode !== 'direct')
             expect(

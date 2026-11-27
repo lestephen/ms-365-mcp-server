@@ -23,20 +23,79 @@ describe('buildMcpServerInstructions', () => {
     expect(s).toContain('read-only');
   });
 
+  it.each([false, true])(
+    'says the mail reply/forward comment is HTML, except when read-only (discovery=%s)',
+    (discovery) => {
+      const s = buildMcpServerInstructions({ ...baseCtx, discovery });
+      expect(s).toContain('(including their drafts and shared mailboxes)');
+      expect(s).toContain('Graph puts comment into an HTML body');
+      expect(s).toContain('use <br> for line breaks');
+
+      const readOnly = buildMcpServerInstructions({ ...baseCtx, discovery, readOnly: true });
+      expect(readOnly).not.toContain('Graph puts comment into an HTML body');
+    }
+  );
+
   it('does not suggest account switching when multiAccount is false', () => {
     const s = buildMcpServerInstructions({ ...baseCtx, discovery: false, multiAccount: false });
     expect(s).not.toContain('Multiple accounts');
     expect(s).not.toContain('account parameter');
   });
 
-  it('routes large files and server-minted attachment URLs to get-download-url', () => {
+  it.each([false, true])('prefers URL handoffs only when enabled (discovery=%s)', (discovery) => {
+    const enabled = buildMcpServerInstructions({
+      ...baseCtx,
+      discovery,
+      attachmentUrlsEnabled: true,
+    });
+    expect(enabled).toContain('for document reading and downloads, prefer get-download-url');
+    expect(enabled).toContain('only when the caller explicitly needs bytes');
+    expect(enabled).toContain('fresh URL for every fetch');
+    expect(enabled).toContain('probes, conversion, continuation and retries');
+    expect(enabled).toContain('same target, account and document selection');
+    expect(enabled).toContain('mail attachments, meeting recordings, drive files');
+    expect(enabled).toContain('does not scrub arbitrary response bodies');
+    expect(enabled).toContain('tool filtering');
+    expect(enabled).not.toContain('Use download-bytes for authenticated byte reads');
+
+    const disabled = buildMcpServerInstructions({
+      ...baseCtx,
+      discovery,
+      attachmentUrlsEnabled: false,
+    });
+    expect(disabled).not.toContain('Attachment URLs are enabled');
+    expect(disabled).toContain('Use download-bytes for authenticated byte reads');
+  });
+
+  it('routes drive file downloads to get-download-url and authenticated byte reads to download-bytes', () => {
     const s = buildMcpServerInstructions({ ...baseCtx, discovery: false });
-    expect(s).toContain('prefer get-download-url for large content');
-    expect(s).toContain('single-use URLs for mail and calendar attachments');
-    expect(s).toContain('download-bytes for small authenticated byte reads');
-    expect(s).toContain('out-of-band option for meeting recordings');
+    expect(s).toContain('large drive/SharePoint file content');
+    expect(s).toContain('prefer get-download-url');
+    expect(s).toContain('download-bytes for authenticated byte reads');
+    expect(s).toContain(
+      'mail attachments, profile photos, Teams hosted content, and meeting recordings'
+    );
     expect(s).toContain('relative Microsoft Graph paths, not absolute URLs');
   });
+});
+
+describe('EKI upload guidance', () => {
+  it.each([false, true])(
+    'routes uploads to streamed sessions and never to inline base64 (attachment URLs=%s)',
+    (attachmentUrlsEnabled) => {
+      const s = buildMcpServerInstructions({
+        discovery: false,
+        orgMode: true,
+        readOnly: false,
+        multiAccount: false,
+        attachmentUrlsEnabled,
+      });
+      expect(s).toContain('prefer create-upload-session');
+      expect(s).toContain('use get-upload-url when available');
+      expect(s).toContain('do not build that string regardless of how small the file looks');
+      expect(s).not.toContain('takes a base64 string body');
+    }
+  );
 });
 
 describe('hybrid instructions', () => {

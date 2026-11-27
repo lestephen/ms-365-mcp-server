@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
+import { z } from 'zod';
 import {
   enableMetrics,
   metricsText,
@@ -13,7 +14,7 @@ import {
   resetUnknownToolLabelCapForTests,
 } from '../src/metrics.js';
 import {
-  withMetricsObserver,
+  installMetricsObserver,
   seedAdvertisedSurface,
   resetAdvertisedSurfaceSeedForTests,
 } from '../src/lib/metrics-transport.js';
@@ -140,163 +141,100 @@ describe('unknown-tool observation (the #29 signal)', () => {
     enableMetrics();
   });
 
-  function wired() {
-    const sent: JSONRPCMessage[] = [];
-    const transport = {
-      send: vi.fn(async (m: JSONRPCMessage) => {
-        sent.push(m);
-      }),
-      start: vi.fn(),
-      close: vi.fn(),
-      onmessage: undefined,
-    } as unknown as Transport;
-    const wrapped = withMetricsObserver(transport);
-    // Server.connect assigns onmessage; emulate that so the observer chains in.
-    const delivered: JSONRPCMessage[] = [];
-    wrapped.onmessage = ((m: JSONRPCMessage) => {
-      delivered.push(m);
-    }) as Transport['onmessage'];
-    return { wrapped, sent, delivered };
+  // A real SDK server and client over an in-memory pair, so the test exercises the
+  // dispatch path every transport shares rather than an emulation of one.
+  async function connected(register: (server: McpServer) => void = () => {}) {
+    const server = new McpServer({ name: 'metrics-test', version: '0' });
+    server.registerTool(
+      'get-mail-message',
+      { description: 'stub', inputSchema: z.object({ fail: z.boolean().optional() }) },
+      async ({ fail }) =>
+        fail
+          ? { content: [{ type: 'text' as const, text: '{"error":"boom"}' }], isError: true }
+          : { content: [{ type: 'text' as const, text: '{}' }] }
+    );
+    register(server);
+    expect(installMetricsObserver(server)).toBe(true);
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const client = new Client({ name: 'test', version: '1' });
+    await client.connect(b);
+    return {
+      client,
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
   }
 
   it('counts a tools/call for a name the server does not register', async () => {
-    // This is the shape the SDK actually emits, confirmed against a running server: a
-    // normal result carrying isError, not a JSON-RPC error object. An earlier version of
-    // this test asserted the error-object shape, so it validated an assumption and the
-    // real path never fired.
-    const { wrapped } = wired();
-    wrapped.onmessage!({
-      jsonrpc: '2.0',
-      id: 7,
-      method: 'tools/call',
-      params: { name: 'delete-mail-attachment' },
-    } as never);
-    await wrapped.send({
-      jsonrpc: '2.0',
-      id: 7,
-      result: {
-        content: [
-          { type: 'text', text: 'MCP error -32602: Tool delete-mail-attachment not found' },
-        ],
-        isError: true,
-      },
-    } as never);
-
-    const lines = await sample('ms365_mcp_unknown_tool_total');
-    expect(lines.join('\n')).toContain('tool="delete-mail-attachment"');
-  });
-
-  it('also counts the JSON-RPC error shape, if the SDK ever returns one', async () => {
-    const { wrapped } = wired();
-    wrapped.onmessage!({
-      jsonrpc: '2.0',
-      id: 11,
-      method: 'tools/call',
-      params: { name: 'update-place' },
-    } as never);
-    await wrapped.send({
-      jsonrpc: '2.0',
-      id: 11,
-      error: { code: -32602, message: 'Tool update-place not found' },
-    } as never);
-
+    const { client, close } = await connected();
+    try {
+      await expect(
+        client.callTool({ name: 'delete-mail-attachment', arguments: {} })
+      ).rejects.toMatchObject({ code: -32602 });
+    } finally {
+      await close();
+    }
     expect((await sample('ms365_mcp_unknown_tool_total')).join('\n')).toContain(
-      'tool="update-place"'
+      'tool="delete-mail-attachment"'
     );
   });
 
   it('does not count an ordinary tool failure, which comes back as a result', async () => {
-    const { wrapped } = wired();
-    wrapped.onmessage!({
-      jsonrpc: '2.0',
-      id: 8,
-      method: 'tools/call',
-      params: { name: 'get-mail-message' },
-    } as never);
-    await wrapped.send({
-      jsonrpc: '2.0',
-      id: 8,
-      result: { content: [{ type: 'text', text: '{"error":"boom"}' }], isError: true },
-    } as never);
-
+    const { client, close } = await connected();
+    try {
+      const result = await client.callTool({ name: 'get-mail-message', arguments: { fail: true } });
+      expect(result.isError).toBe(true);
+    } finally {
+      await close();
+    }
     expect(await sample('ms365_mcp_unknown_tool_total')).toEqual([]);
   });
 
-  it('still forwards messages in both directions', async () => {
-    const { wrapped, sent, delivered } = wired();
-    wrapped.onmessage!({ jsonrpc: '2.0', id: 1, method: 'ping' } as never);
-    await wrapped.send({ jsonrpc: '2.0', id: 1, result: {} } as never);
-    expect(delivered).toHaveLength(1);
-    expect(sent).toHaveLength(1);
+  it('does not count an invalid-arguments error as an unknown tool', async () => {
+    const { client, close } = await connected();
+    try {
+      await client
+        .callTool({ name: 'get-mail-message', arguments: { fail: 'not-a-boolean' } })
+        .catch(() => undefined);
+    } finally {
+      await close();
+    }
+    expect(await sample('ms365_mcp_unknown_tool_total')).toEqual([]);
   });
 
   it('records the advertised surface from a tools/list response', async () => {
-    const { wrapped } = wired();
-    await wrapped.send({
-      jsonrpc: '2.0',
-      id: 2,
-      result: {
-        tools: [
-          { name: 'a', inputSchema: {} },
-          { name: 'b', inputSchema: {} },
-        ],
-      },
-    } as never);
-
+    const { client, close } = await connected((server) =>
+      server.registerTool('parse-teams-url', { description: 'stub' }, async () => ({
+        content: [],
+      }))
+    );
+    try {
+      expect((await client.listTools()).tools).toHaveLength(2);
+    } finally {
+      await close();
+    }
     const text = await metricsText();
     expect(text).toMatch(/ms365_mcp_tools_advertised 2/);
     expect(text).toMatch(/ms365_mcp_tool_schema_bytes \d+/);
   });
 
-  it('leaves transport.onmessage completely alone', () => {
-    // Regression guard for a real outage. An earlier version intercepted onmessage via
-    // Object.defineProperty to correlate responses back to request ids. That broke
-    // StreamableHTTPServerTransport outright: every HTTP request hung with no response,
-    // while stdio was unaffected, so it passed a stdio-only check and reached
-    // production. Only send() may be wrapped.
-    const onmessage = () => {};
-    const transport = {
-      send: vi.fn(),
-      start: vi.fn(),
-      close: vi.fn(),
-      onmessage,
-    } as unknown as Transport;
-
-    withMetricsObserver(transport);
-
-    expect(transport.onmessage).toBe(onmessage);
-    const descriptor = Object.getOwnPropertyDescriptor(transport, 'onmessage');
-    expect(descriptor?.get, 'onmessage must not become an accessor').toBeUndefined();
-    expect(descriptor?.set, 'onmessage must not become an accessor').toBeUndefined();
-    expect(descriptor?.value).toBe(onmessage);
+  it('still answers calls normally once installed, and installs once', async () => {
+    const { client, close } = await connected((server) => {
+      expect(installMetricsObserver(server)).toBe(true);
+    });
+    try {
+      const result = await client.callTool({ name: 'get-mail-message', arguments: {} });
+      expect(result.isError).toBeFalsy();
+    } finally {
+      await close();
+    }
   });
 
-  it('counts a not-found whose tool name cannot be parsed, under a sentinel', async () => {
-    // Detection requires "not found" rather than keying on -32602 alone, because
-    // -32602 is invalid-params generally and would over-count ordinary argument errors.
-    // Within that, a name we cannot parse still counts rather than vanishing.
-    const { wrapped } = wired();
-    await wrapped.send({
-      jsonrpc: '2.0',
-      id: 12,
-      result: {
-        content: [{ type: 'text', text: 'MCP error -32602: tool "odd name" not found' }],
-        isError: true,
-      },
-    } as never);
-
-    expect((await sample('ms365_mcp_unknown_tool_total')).join('\n')).toContain('tool="unparsed"');
-  });
-
-  it('does not count an ordinary invalid-params error as an unknown tool', async () => {
-    const { wrapped } = wired();
-    await wrapped.send({
-      jsonrpc: '2.0',
-      id: 13,
-      error: { code: -32602, message: 'Invalid arguments: messageId is required' },
-    } as never);
-
-    expect(await sample('ms365_mcp_unknown_tool_total')).toEqual([]);
+  it('is never fatal when the SDK internals move', () => {
+    expect(installMetricsObserver({ server: {} })).toBe(false);
   });
 });
 
@@ -336,6 +274,14 @@ describe('advertised-surface seed (#34)', () => {
   it('seeds once per process, since HTTP builds a server per request', async () => {
     expect(await seedAdvertisedSurface(fakeServer([{ name: 'a' }]))).toBe('seeded');
     expect(await seedAdvertisedSurface(fakeServer([{ name: 'a' }]))).toBe('skipped');
+  });
+
+  it('seeds from a real, unconnected SDK server', async () => {
+    enableMetrics();
+    const server = new McpServer({ name: 'seed-test', version: '0' });
+    server.registerTool('a', { description: 'stub' }, async () => ({ content: [] }));
+    expect(await seedAdvertisedSurface(server)).toBe('seeded');
+    expect(await metricsText()).toMatch(/^ms365_mcp_tools_advertised 1$/m);
   });
 
   it('is never fatal when the SDK internals move', async () => {

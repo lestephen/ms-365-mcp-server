@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { GraphClient } from '../src/graph-client.js';
@@ -30,8 +30,6 @@ function registeredParamSchemas(
   const graphClient = {} as GraphClient;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- registerTool() has many overloads
   const registerToolSpy = vi.spyOn(server, 'registerTool').mockImplementation((() => {}) as any);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  vi.spyOn(server, 'tool').mockImplementation((() => {}) as any);
 
   // orgMode: true matches `registry` above (buildToolsRegistry(false, true)) so both
   // sides see the same set of tools (work-scoped tools included).
@@ -258,9 +256,12 @@ describe('describeToolSchema parity with registerGraphTools (discovery-mode drif
   // https://learn.microsoft.com/en-us/graph/api/chatmessage-list-replies
   // Delta rejects $select/$expand/$filter/$orderby/$search and documents no $top/$skip/$count;
   // events delta takes no endDateTime. https://learn.microsoft.com/graph/api/event-delta?view=graph-rest-beta
+  // https://learn.microsoft.com/en-us/graph/api/place-list ($count is documented too, but our
+  // count param text is about mail, so list-rooms leaves it out)
   it('offers only the documented query options where Graph supports fewer', () => {
     const odata = ['top', 'skip', 'search', 'filter', 'count', 'orderby', 'select', 'expand'];
     const documented: Record<string, string[]> = {
+      'list-rooms': ['top', 'skip', 'filter', 'select', 'skiptoken'],
       'list-channel-messages': ['top', 'expand', 'skiptoken'],
       'list-channel-message-replies': ['top', 'skiptoken'],
       'list-calendar-events-delta': ['startDateTime', 'skiptoken'],

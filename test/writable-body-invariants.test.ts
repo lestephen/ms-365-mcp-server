@@ -76,7 +76,6 @@ const WRITABLE_MANIFEST: Array<[string, string[]]> = [
   ['update-team-channel', ['members']],
   ['send-chat-message', ['attachments', 'hostedContents']],
   ['send-channel-message', ['attachments', 'hostedContents']],
-  ['reply-to-chat-message', ['attachments', 'hostedContents']],
   ['reply-to-channel-message', ['attachments', 'hostedContents']],
   // To Do.
   ['create-todo-task', ['attachments', 'checklistItems', 'extensions', 'linkedResources']],
@@ -120,7 +119,6 @@ const MUST_KEEP: Array<[string, string[], string]> = [
   // how inline images are sent. Dropping it silently removed that capability.
   ['send-chat-message', ['hostedContents'], 'inline images are sent as hostedContents'],
   ['send-channel-message', ['hostedContents'], 'inline images are sent as hostedContents'],
-  ['reply-to-chat-message', ['hostedContents'], 'inline images are sent as hostedContents'],
   ['reply-to-channel-message', ['hostedContents'], 'inline images are sent as hostedContents'],
   // An open extension can be created inline with the item that carries it.
   ['create-todo-task', ['extensions'], 'an open extension can be created with the task'],
@@ -146,8 +144,10 @@ const MUST_DROP: Array<[string, string[]]> = [
   // Replies are posted to their own endpoint, never inline with the parent message.
   ['send-chat-message', ['replies']],
   ['send-channel-message', ['replies']],
-  // Apps and tabs are installed through their own endpoints, not the create body.
-  ['create-chat', ['installedApps', 'tabs', 'pinnedMessages', 'lastMessagePreview']],
+  // Tabs are installed through their own endpoints, not the create body. create-chat now
+  // uses upstream's hand-written body (#809), which advertises installedApps on purpose:
+  // Graph accepts apps to install when a chat is created.
+  ['create-chat', ['tabs', 'pinnedMessages', 'lastMessagePreview']],
   ['create-team-channel', ['tabs']],
   // The nested message entity is not the input Graph accepts, so advertising it only
   // misled callers into filling an object that Graph rejects.

@@ -17,7 +17,6 @@
   "keep": {
     "microsoft.graph.calendar": ["multiValueExtendedProperties", "singleValueExtendedProperties"],
     "microsoft.graph.channel": ["members"],
-    "microsoft.graph.chat": ["members"],
     "microsoft.graph.chatMessage": ["hostedContents"],
     "microsoft.graph.contact": ["multiValueExtendedProperties", "singleValueExtendedProperties"],
     "microsoft.graph.contactFolder": [
@@ -57,15 +56,6 @@
       "messages",
       "sharedWithTeams",
       "tabs"
-    ],
-    "microsoft.graph.chat": [
-      "installedApps",
-      "lastMessagePreview",
-      "messages",
-      "permissionGrants",
-      "pinnedMessages",
-      "tabs",
-      "targetedMessages"
     ],
     "microsoft.graph.chatMessage": ["replies"],
     "microsoft.graph.contactFolder": ["childFolders", "contacts"],
@@ -116,7 +106,6 @@
     "microsoft.graph.notebook": ["sectionGroups", "sections"],
     "microsoft.graph.onenotePage": ["parentNotebook", "parentSection"],
     "microsoft.graph.onenoteSection": ["pages", "parentNotebook", "parentSectionGroup"],
-    "microsoft.graph.pinnedChatMessageInfo": ["message"],
     "microsoft.graph.place": ["checkIns"],
     "microsoft.graph.plannerBucket": ["tasks"],
     "microsoft.graph.plannerTask": [
@@ -132,7 +121,6 @@
       "sections"
     ],
     "microsoft.graph.sharedWithChannelTeamInfo": ["allowedMembers", "team"],
-    "microsoft.graph.targetedChatMessage": ["hostedContents", "replies"],
     "microsoft.graph.team": [
       "allChannels",
       "channels",

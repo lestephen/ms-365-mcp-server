@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphClient } from '../src/graph-client.js';
-import { buildToolsRegistry, registerGraphTools } from '../src/graph-tools.js';
+import { buildToolsRegistry, registerGraphTools, UTILITY_TOOLS } from '../src/graph-tools.js';
 import { describeToolSchema } from '../src/lib/tool-schema.js';
 
 vi.mock('../src/logger.js', () => ({
@@ -21,7 +21,6 @@ const shorthandBody = {
 
 describe('per-tool behavior on the real tool surface', () => {
   let server: {
-    tool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
     server: object;
   };
@@ -29,7 +28,7 @@ describe('per-tool behavior on the real tool surface', () => {
 
   beforeEach(() => {
     vi.stubEnv('MS365_MCP_REQUIRE_CONFIRM', 'false');
-    server = { tool: vi.fn(), registerTool: vi.fn(), server: {} };
+    server = { registerTool: vi.fn(), server: {} };
     graphClient = {
       graphRequest: vi.fn().mockResolvedValue({
         content: [{ type: 'text', text: JSON.stringify({ id: 'm1' }) }],
@@ -56,7 +55,10 @@ describe('per-tool behavior on the real tool surface', () => {
   }
 
   it('offers the member name filter on exactly the team and chat member tools', () => {
+    // Utility tools register through registerTool too; get-upload-url has its own name param.
+    const utilityNames = new Set(UTILITY_TOOLS.map((t) => t.name));
     const withName = server.registerTool.mock.calls
+      .filter((c: unknown[]) => !utilityNames.has(c[0] as string))
       .filter(
         (c: unknown[]) => 'name' in (c[1] as { inputSchema: { shape: object } }).inputSchema.shape
       )
@@ -75,6 +77,51 @@ describe('per-tool behavior on the real tool surface', () => {
     expect(withName).toEqual(['list-chat-members', 'list-team-members']);
   });
 
+  const DELTA_TOKEN_TOOLS = [
+    'get-drive-delta',
+    'get-sharepoint-sites-delta',
+    'list-sharepoint-site-list-items-delta',
+    'list-todo-task-lists-delta',
+  ];
+
+  it('offers the delta token param on exactly the delta tools that page with token=', () => {
+    const withToken = server.registerTool.mock.calls
+      .filter(
+        (c: unknown[]) => 'token' in (c[1] as { inputSchema: { shape: object } }).inputSchema.shape
+      )
+      .map((c: unknown[]) => c[0])
+      .sort();
+    expect(withToken).toEqual(DELTA_TOKEN_TOOLS);
+  });
+
+  it('shows the delta token param in discovery mode too', () => {
+    const withToken = [...buildToolsRegistry(false, true)]
+      .filter(([, entry]) =>
+        describeToolSchema(entry.tool, entry.config).parameters.some((p) => p.name === 'token')
+      )
+      .map(([name]) => name)
+      .sort();
+    expect(withToken).toEqual(DELTA_TOKEN_TOOLS);
+  });
+
+  it('resumes list-sharepoint-site-list-items-delta from a deltaLink with token=', async () => {
+    await registered('list-sharepoint-site-list-items-delta').handler({
+      siteId: 's1',
+      listId: 'l1',
+      token: 'https://graph.microsoft.com/v1.0/sites/s1/lists/l1/items/delta?token=tok1',
+    });
+    const [path] = vi.mocked(graphClient.graphRequest).mock.calls[0];
+    expect(path).toContain('/sites/s1/lists/l1/items/delta()?token=tok1');
+  });
+
+  it('resumes list-todo-task-lists-delta from a Graph deltaLink with $deltatoken', async () => {
+    await registered('list-todo-task-lists-delta').handler({
+      token: 'https://graph.microsoft.com/v1.0/me/todo/lists/delta?$deltatoken=todo-state-1',
+    });
+    const [path] = vi.mocked(graphClient.graphRequest).mock.calls[0];
+    expect(path).toContain('/me/todo/lists/delta()?$deltatoken=todo-state-1');
+  });
+
   it.each([
     ['send-channel-message', { teamId: 't1', channelId: 'c1' }],
     ['reply-to-channel-message', { teamId: 't1', channelId: 'c1', chatMessageId: 'm0' }],
@@ -84,7 +131,6 @@ describe('per-tool behavior on the real tool surface', () => {
       { teamId: 't1', channelId: 'c1', chatMessageId: 'm0', chatMessageId1: 'r0' },
     ],
     ['send-chat-message', { chatId: 'c1' }],
-    ['reply-to-chat-message', { chatId: 'c1', chatMessageId: 'm0' }],
     ['update-chat-message', { chatId: 'c1', chatMessageId: 'm0' }],
   ])('rewrites the <at user-id> mention shorthand on %s', async (name, pathParams) => {
     const result = await registered(name).handler({
@@ -144,6 +190,28 @@ describe('per-tool behavior on the real tool surface', () => {
     expect(graphClient.graphRequest).toHaveBeenCalledOnce();
   });
 
+  it('rejects unsupported list-chats count without calling Graph and preserves pagination', async () => {
+    const chats = registered('list-chats');
+    expect(chats.shape).not.toHaveProperty('count');
+    const entry = buildToolsRegistry(false, true).get('list-chats')!;
+    expect(
+      describeToolSchema(entry.tool, entry.config).parameters.map((p) => p.name)
+    ).not.toContain('count');
+
+    const result = await chats.handler({ count: true });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      error: 'invalid_query_parameter',
+      parameter: '$count',
+    });
+    expect(graphClient.graphRequest).not.toHaveBeenCalled();
+
+    await chats.handler({ top: 50, skiptoken: 'next-page' });
+    const url = vi.mocked(graphClient.graphRequest).mock.calls[0][0];
+    expect(url).toContain('$top=50');
+    expect(url).toContain('$skiptoken=next-page');
+  });
+
   it('rejects $select on list-todo-tasks before calling Graph, and still sends $orderby', async () => {
     const tasks = registered('list-todo-tasks').handler;
     const result = await tasks({ todoTaskListId: 'l1', select: 'id,title' });
@@ -157,6 +225,59 @@ describe('per-tool behavior on the real tool surface', () => {
     await tasks({ todoTaskListId: 'l1', orderby: 'createdDateTime desc' });
     expect(vi.mocked(graphClient.graphRequest).mock.calls[0][0]).toContain(
       '$orderby=createdDateTime'
+    );
+  });
+
+  it('surfaces If-Match for the SharePoint list item update in registration and discovery', () => {
+    const shape = registered('update-sharepoint-list-item').shape;
+    expect(Object.keys(shape).find((name) => name.toLowerCase() === 'if-match')).toBeDefined();
+    expect(registered('list-mail-messages').shape['If-Match']).toBeUndefined();
+
+    const entry = buildToolsRegistry(false, true).get('update-sharepoint-list-item');
+    expect(entry).toBeDefined();
+    const discovered = describeToolSchema(entry!.tool, entry!.config).parameters.find(
+      (param) => param.name.toLowerCase() === 'if-match'
+    );
+    expect(discovered).toMatchObject({ in: 'Header', required: false, schema: { type: 'string' } });
+  });
+
+  it('forwards the SharePoint list item ETag as an If-Match request header', async () => {
+    await registered('update-sharepoint-list-item').handler({
+      siteId: 'site-1',
+      listId: 'list-1',
+      listItemId: 'item-1',
+      body: { fields: { Title: 'Updated' } },
+      'If-Match': '"item-etag,1"',
+      confirm: true,
+    });
+
+    const [, options] = vi.mocked(graphClient.graphRequest).mock.calls[0];
+    expect(options?.headers).toMatchObject({ 'If-Match': '"item-etag,1"' });
+  });
+
+  it.each([
+    [{ search: '*' }, 'search=*'],
+    [{ search: ' " * " ' }, 'search=*'],
+    [{ search: '  *  ' }, 'search=*'],
+    [{ $search: 'marketing' }, 'search=marketing'],
+    [{ search: '"marketing team"' }, 'search="marketing team"'],
+    [
+      {
+        search: '*',
+        skiptoken: 'https://graph.microsoft.com/v1.0/sites?search=*&$skiptoken=s!abc',
+      },
+      '$skiptoken=s!abc&search=*',
+    ],
+  ])('sends the SharePoint site search as plain search: %o', async (params, query) => {
+    await registered('search-sharepoint-sites').handler(params);
+    const url = vi.mocked(graphClient.graphRequest).mock.calls[0][0];
+    expect(decodeURIComponent(url)).toBe(`/sites?${query}`);
+  });
+
+  it('keeps $search on other search tools', async () => {
+    await registered('list-users').handler({ search: '"displayName:jane"' });
+    expect(decodeURIComponent(vi.mocked(graphClient.graphRequest).mock.calls[0][0])).toContain(
+      '$search='
     );
   });
 });
