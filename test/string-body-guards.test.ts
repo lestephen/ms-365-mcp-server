@@ -119,10 +119,10 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
       requests: [
         {
           id: '1',
-          method: 'PUT',
-          url: '/me/drive/root:/notes.txt:/content',
-          headers: { 'Content-Type': 'text/plain' },
-          body: 'aGVsbG8=',
+          method: 'POST',
+          url: '/me/onenote/sections/1-abc/pages',
+          headers: { 'Content-Type': 'text/html' },
+          body: 'PGh0bWw+PC9odG1sPg==',
         },
       ],
     };
@@ -131,7 +131,7 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     expect(result.isError).toBeFalsy();
     expect(graphRequest).toHaveBeenCalledTimes(1);
     const sent = JSON.parse(graphRequest.mock.calls[0][1].body as string);
-    expect(sent.requests[0].body).toBe('aGVsbG8=');
+    expect(sent.requests[0].body).toBe('PGh0bWw+PC9odG1sPg==');
   });
 
   it('sends a valid string body exactly as the equivalent object body', async () => {

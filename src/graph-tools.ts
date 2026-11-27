@@ -3328,12 +3328,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Whether an endpoint sends its body to Graph as JSON (not binary, not text/html). */
+/** Whether an endpoint sends its body to Graph as JSON: not binary, and no other media type. */
 function sendsJsonBody(
   tool: { requestFormat?: string },
   config: { contentType?: string } | undefined
 ): boolean {
-  return tool.requestFormat !== 'binary' && config?.contentType !== 'text/html';
+  if (tool.requestFormat === 'binary') return false;
+  const contentType = config?.contentType?.toLowerCase();
+  return contentType === undefined || contentType.startsWith('application/json');
 }
 
 /** The object or array a JSON string encodes, or undefined for anything else. */
