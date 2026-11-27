@@ -26,6 +26,7 @@ plus any upstream change that touches a control listed below; do not review the 
 upstream's own code.
 
 Must never regress (treat a weakening as a blocker):
+
 - The `--blocked-tools` policy on every path: registration, `execute-tool` discovery,
   `graph-batch` subrequests, and OAuth scope grants. The policy itself (which tools are
   blocked) lives in the harness's `deployment.yaml`: agents prepare mail drafts and a human
@@ -40,6 +41,7 @@ Must never regress (treat a weakening as a blocker):
 - The Prometheus metrics on their dedicated listener.
 
 Fine to defer or accept as-is:
+
 - Style and naming in code that upstream owns.
 - Speculative hardening that needs a compromised host or tenant admin.
 - Refactors of working carry without a concrete defect.
