@@ -31,8 +31,10 @@ Must never regress (treat a weakening as a blocker):
   blocked) lives in the harness's `deployment.yaml`: agents prepare mail drafts and a human
   sends them; mail send, reply, and forward, plus a few named share and forward tools, are
   blocked. Other outbound tools, such as Teams posting, are allowed by that policy.
-- The inline file-bytes guard (no base64 file bytes in tool arguments), with only its
-  narrow reviewed exception for create-custom-emoji.
+- The inline file-bytes guard (`src/lib/inline-bytes-guard.ts`), which refuses inline
+  `contentBytes` in request bodies, with only its narrow reviewed exception for
+  create-custom-emoji. Tools whose whole body is the bytes (upload-file-content,
+  upload-my-profile-photo) are outside that guard and stay name-blocked in the harness.
 - Binary target canonicalization and bounded inline downloads.
 - Path-parameter encoding (`src/lib/unencoded-path-params.ts`).
 - The Prometheus metrics on their dedicated listener.
