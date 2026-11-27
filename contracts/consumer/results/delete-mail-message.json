@@ -1,0 +1,78 @@
+{
+  "case": "delete-mail-message",
+  "tool": "delete-mail-message",
+  "route": "direct",
+  "input": {
+    "messageId": "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEMAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAA="
+  },
+  "result": {
+    "_meta": {
+      "http_status": 201,
+      "response_bytes": 1994
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"id\": \"AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEKAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZEAAA=\",\n  \"createdDateTime\": \"2029-12-31T23:58:10Z\",\n  \"lastModifiedDateTime\": \"2030-01-01T00:00:00Z\",\n  \"changeKey\": \"CQAAABYAAAAiIsqMbYjsT5e/T7KzowPTAAAYbt3T\",\n  \"categories\": [],\n  \"receivedDateTime\": \"2029-12-31T23:58:10Z\",\n  \"sentDateTime\": \"2029-12-31T23:58:08Z\",\n  \"hasAttachments\": false,\n  \"internetMessageId\": \"<SN6PR04MB4110E2C1F5D6B7A8C9D0E1F2A3B4C5D6@SN6PR04MB4110.namprd04.prod.outlook.com>\",\n  \"subject\": \"Q-1042 quotation follow-up\",\n  \"bodyPreview\": \"Hi Adele, please find the revised quotation attached.\",\n  \"importance\": \"normal\",\n  \"parentFolderId\": \"AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAuAAAAAAAiQ8W967B7TKBjgx9rVEURAQAiIsqMbYjsT5e-T7KzowPTAAAAAAEKAAA=\",\n  \"conversationId\": \"AAQkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAQAMvKcH0lsUNKl0n9sEh7Lhs=\",\n  \"conversationIndex\": \"AQHaXc7+y8pwfSWxQ0qXSf2wSHsuGw==\",\n  \"isDeliveryReceiptRequested\": false,\n  \"isReadReceiptRequested\": false,\n  \"isRead\": true,\n  \"isDraft\": false,\n  \"webLink\": \"https://outlook.office365.com/owa/?ItemID=AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEKAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZEAAA%3D&exvsurl=1&viewmodel=ReadMessageItem\",\n  \"inferenceClassification\": \"focused\",\n  \"body\": {\n    \"contentType\": \"html\",\n    \"content\": \"<html><body><p>Hi Adele, please find the revised quotation attached.</p></body></html>\"\n  },\n  \"sender\": {\n    \"emailAddress\": {\n      \"name\": \"Megan Bowen\",\n      \"address\": \"megan.bowen@contoso.com\"\n    }\n  },\n  \"from\": {\n    \"emailAddress\": {\n      \"name\": \"Megan Bowen\",\n      \"address\": \"megan.bowen@contoso.com\"\n    }\n  },\n  \"toRecipients\": [\n    {\n      \"emailAddress\": {\n        \"name\": \"Adele Vance\",\n        \"address\": \"adele.vance@contoso.com\"\n      }\n    }\n  ],\n  \"ccRecipients\": [],\n  \"bccRecipients\": [],\n  \"replyTo\": [],\n  \"flag\": {\n    \"flagStatus\": \"notFlagged\"\n  }\n}"
+      }
+    ]
+  },
+  "decoded": {
+    "id": "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEKAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZEAAA=",
+    "createdDateTime": "2029-12-31T23:58:10Z",
+    "lastModifiedDateTime": "2030-01-01T00:00:00Z",
+    "changeKey": "CQAAABYAAAAiIsqMbYjsT5e/T7KzowPTAAAYbt3T",
+    "categories": [],
+    "receivedDateTime": "2029-12-31T23:58:10Z",
+    "sentDateTime": "2029-12-31T23:58:08Z",
+    "hasAttachments": false,
+    "internetMessageId": "<SN6PR04MB4110E2C1F5D6B7A8C9D0E1F2A3B4C5D6@SN6PR04MB4110.namprd04.prod.outlook.com>",
+    "subject": "Q-1042 quotation follow-up",
+    "bodyPreview": "Hi Adele, please find the revised quotation attached.",
+    "importance": "normal",
+    "parentFolderId": "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAuAAAAAAAiQ8W967B7TKBjgx9rVEURAQAiIsqMbYjsT5e-T7KzowPTAAAAAAEKAAA=",
+    "conversationId": "AAQkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAQAMvKcH0lsUNKl0n9sEh7Lhs=",
+    "conversationIndex": "AQHaXc7+y8pwfSWxQ0qXSf2wSHsuGw==",
+    "isDeliveryReceiptRequested": false,
+    "isReadReceiptRequested": false,
+    "isRead": true,
+    "isDraft": false,
+    "webLink": "https://outlook.office365.com/owa/?ItemID=AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEKAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZEAAA%3D&exvsurl=1&viewmodel=ReadMessageItem",
+    "inferenceClassification": "focused",
+    "body": {
+      "contentType": "html",
+      "content": "<html><body><p>Hi Adele, please find the revised quotation attached.</p></body></html>"
+    },
+    "sender": {
+      "emailAddress": {
+        "name": "Megan Bowen",
+        "address": "megan.bowen@contoso.com"
+      }
+    },
+    "from": {
+      "emailAddress": {
+        "name": "Megan Bowen",
+        "address": "megan.bowen@contoso.com"
+      }
+    },
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "Adele Vance",
+          "address": "adele.vance@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [],
+    "bccRecipients": [],
+    "replyTo": [],
+    "flag": {
+      "flagStatus": "notFlagged"
+    }
+  },
+  "clock": {
+    "now": "2030-01-01T00:00:00.000Z",
+    "nowEpoch": 1893456000
+  },
+  "notes": "Move to deleteditems (POST /move with a fixed body): returns the moved message with its NEW id, not an empty success."
+}

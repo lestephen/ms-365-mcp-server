@@ -1,0 +1,34 @@
+{
+  "contractVersion": 1,
+  "generatedBy": "test/consumer-contract.test.ts",
+  "cases": [
+    "get-download-url.mail-attachment",
+    "get-download-url.drive-item",
+    "get-download-url.multi",
+    "get-download-url.error-unknown-attachment",
+    "get-upload-url.mail-draft",
+    "get-upload-url.drive-folder",
+    "get-upload-url.multi",
+    "create-mail-attachment-upload-session",
+    "create-upload-session",
+    "get-mail-message-mime",
+    "graph-error.404",
+    "delete-mail-message",
+    "execute-tool.get-download-url.mail-attachment",
+    "mcp-envelope.create-draft-email",
+    "blocked.execute-tool.send-mail"
+  ],
+  "schemas": [
+    "create-draft-email",
+    "create-reply-draft",
+    "create-reply-all-draft",
+    "create-forward-draft",
+    "create-shared-mailbox-draft",
+    "update-mail-message",
+    "add-mail-attachment",
+    "create-mail-attachment-upload-session",
+    "get-download-url",
+    "get-upload-url",
+    "execute-tool"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "case": "get-upload-url.mail-draft",
+  "tool": "get-upload-url",
+  "route": "execute-tool",
+  "input": {
+    "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA=/attachments",
+    "name": "Quotation Q-1042 Rev B.pdf",
+    "contentType": "application/pdf"
+  },
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"uploadUrl\":\"https://mcp.corp.envirokinetics.com/attachment?t=M8CHJJ8bav6PbAobIA8AZcLYyQNaAQGpxrKFaaU8eRU&dgk=1&dgx=1893456120&dgs=eccCbjO-sj0HSFTZe5LvE_dJZMt7S5Gyr_eQwsQ8Xug\",\"method\":\"PUT\",\"expiresAt\":\"2030-01-01T00:02:00.000Z\",\"singleUse\":true,\"maxBytes\":157286400,\"name\":\"Quotation Q-1042 Rev B.pdf\",\"note\":\"PUT the raw file bytes with a Content-Length (e.g. curl -T <file> \\\"<uploadUrl>\\\"). Served by this server; valid for one upload until it expires.\"}"
+      }
+    ]
+  },
+  "decoded": {
+    "uploadUrl": "https://mcp.corp.envirokinetics.com/attachment?t=M8CHJJ8bav6PbAobIA8AZcLYyQNaAQGpxrKFaaU8eRU&dgk=1&dgx=1893456120&dgs=eccCbjO-sj0HSFTZe5LvE_dJZMt7S5Gyr_eQwsQ8Xug",
+    "method": "PUT",
+    "expiresAt": "2030-01-01T00:02:00.000Z",
+    "singleUse": true,
+    "maxBytes": 157286400,
+    "name": "Quotation Q-1042 Rev B.pdf",
+    "note": "PUT the raw file bytes with a Content-Length (e.g. curl -T <file> \"<uploadUrl>\"). Served by this server; valid for one upload until it expires."
+  },
+  "clock": {
+    "now": "2030-01-01T00:00:00.000Z",
+    "nowEpoch": 1893456000
+  },
+  "notes": "get-upload-url is not an eager tool in production, so it is reached through execute-tool. Result: uploadUrl, method PUT, expiresAt, singleUse, maxBytes, name, note."
+}
