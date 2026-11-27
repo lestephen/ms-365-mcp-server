@@ -1,0 +1,100 @@
+{
+  "case": "mcp-envelope.create-draft-email",
+  "tool": "create-draft-email",
+  "route": "direct",
+  "input": {
+    "body": {
+      "subject": "Q-1042 quotation follow-up",
+      "body": {
+        "contentType": "html",
+        "content": "<p>Hi Adele, please find the revised quotation attached.</p>"
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "address": "adele.vance@contoso.com"
+          }
+        }
+      ]
+    }
+  },
+  "call": {
+    "name": "create-draft-email",
+    "arguments": {
+      "body": {
+        "subject": "Q-1042 quotation follow-up",
+        "body": {
+          "contentType": "html",
+          "content": "<p>Hi Adele, please find the revised quotation attached.</p>"
+        },
+        "toRecipients": [
+          {
+            "emailAddress": {
+              "address": "adele.vance@contoso.com"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "result": {
+    "_meta": {
+      "http_status": 201,
+      "response_bytes": 1947
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"id\": \"AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA=\",\n  \"createdDateTime\": \"2029-12-31T23:58:10Z\",\n  \"lastModifiedDateTime\": \"2030-01-01T00:00:00Z\",\n  \"changeKey\": \"CQAAABYAAAAiIsqMbYjsT5e/T7KzowPTAAAYbt3T\",\n  \"categories\": [],\n  \"receivedDateTime\": \"2030-01-01T00:00:00Z\",\n  \"sentDateTime\": \"2030-01-01T00:00:00Z\",\n  \"hasAttachments\": false,\n  \"internetMessageId\": \"<SN6PR04MB4110E2C1F5D6B7A8C9D0E1F2A3B4C5D6@SN6PR04MB4110.namprd04.prod.outlook.com>\",\n  \"subject\": \"Q-1042 quotation follow-up\",\n  \"bodyPreview\": \"Hi Adele, please find the revised quotation attached.\",\n  \"importance\": \"normal\",\n  \"parentFolderId\": \"AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAuAAAAAAAiQ8W967B7TKBjgx9rVEURAQAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAA=\",\n  \"conversationId\": \"AAQkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAQAMvKcH0lsUNKl0n9sEh7Lhs=\",\n  \"conversationIndex\": \"AQHaXc7+y8pwfSWxQ0qXSf2wSHsuGw==\",\n  \"isDeliveryReceiptRequested\": false,\n  \"isReadReceiptRequested\": false,\n  \"isRead\": true,\n  \"isDraft\": true,\n  \"webLink\": \"https://outlook.office365.com/owa/?ItemID=AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA%3D&exvsurl=1&viewmodel=ReadMessageItem\",\n  \"inferenceClassification\": \"focused\",\n  \"body\": {\n    \"contentType\": \"html\",\n    \"content\": \"<html><head><meta http-equiv=\\\"Content-Type\\\" content=\\\"text/html; charset=utf-8\\\"></head><body><p>Hi Adele, please find the revised quotation attached.</p></body></html>\"\n  },\n  \"sender\": null,\n  \"from\": null,\n  \"toRecipients\": [\n    {\n      \"emailAddress\": {\n        \"name\": \"adele.vance@contoso.com\",\n        \"address\": \"adele.vance@contoso.com\"\n      }\n    }\n  ],\n  \"ccRecipients\": [],\n  \"bccRecipients\": [],\n  \"replyTo\": [],\n  \"flag\": {\n    \"flagStatus\": \"notFlagged\"\n  }\n}"
+      }
+    ]
+  },
+  "decoded": {
+    "id": "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA=",
+    "createdDateTime": "2029-12-31T23:58:10Z",
+    "lastModifiedDateTime": "2030-01-01T00:00:00Z",
+    "changeKey": "CQAAABYAAAAiIsqMbYjsT5e/T7KzowPTAAAYbt3T",
+    "categories": [],
+    "receivedDateTime": "2030-01-01T00:00:00Z",
+    "sentDateTime": "2030-01-01T00:00:00Z",
+    "hasAttachments": false,
+    "internetMessageId": "<SN6PR04MB4110E2C1F5D6B7A8C9D0E1F2A3B4C5D6@SN6PR04MB4110.namprd04.prod.outlook.com>",
+    "subject": "Q-1042 quotation follow-up",
+    "bodyPreview": "Hi Adele, please find the revised quotation attached.",
+    "importance": "normal",
+    "parentFolderId": "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAuAAAAAAAiQ8W967B7TKBjgx9rVEURAQAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAA=",
+    "conversationId": "AAQkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OAAQAMvKcH0lsUNKl0n9sEh7Lhs=",
+    "conversationIndex": "AQHaXc7+y8pwfSWxQ0qXSf2wSHsuGw==",
+    "isDeliveryReceiptRequested": false,
+    "isReadReceiptRequested": false,
+    "isRead": true,
+    "isDraft": true,
+    "webLink": "https://outlook.office365.com/owa/?ItemID=AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEPAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZFAAA%3D&exvsurl=1&viewmodel=ReadMessageItem",
+    "inferenceClassification": "focused",
+    "body": {
+      "contentType": "html",
+      "content": "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"></head><body><p>Hi Adele, please find the revised quotation attached.</p></body></html>"
+    },
+    "sender": null,
+    "from": null,
+    "toRecipients": [
+      {
+        "emailAddress": {
+          "name": "adele.vance@contoso.com",
+          "address": "adele.vance@contoso.com"
+        }
+      }
+    ],
+    "ccRecipients": [],
+    "bccRecipients": [],
+    "replyTo": [],
+    "flag": {
+      "flagStatus": "notFlagged"
+    }
+  },
+  "clock": {
+    "now": "2030-01-01T00:00:00.000Z",
+    "nowEpoch": 1893456000
+  },
+  "notes": "Full tools/call wire envelope with --enable-mcp-apps on (create-draft-email has a mail-draft view): one pretty-printed JSON text item, no structuredContent, _meta http_status/response_bytes."
+}

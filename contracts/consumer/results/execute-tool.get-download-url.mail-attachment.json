@@ -1,0 +1,39 @@
+{
+  "case": "execute-tool.get-download-url.mail-attachment",
+  "tool": "get-download-url",
+  "route": "execute-tool",
+  "input": {
+    "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEMAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAA=/attachments/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAABEgAQAJ5Ewq0Bq1VGhZ2n6wQfxDE=/$value"
+  },
+  "call": {
+    "name": "execute-tool",
+    "arguments": {
+      "tool_name": "get-download-url",
+      "parameters": {
+        "target": "/me/messages/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAAAAEMAAAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAA=/attachments/AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAAiQ8W967B7TKBjgx9rVEURBwAiIsqMbYjsT5e-T7KzowPTAAAYbvZDAAABEgAQAJ5Ewq0Bq1VGhZ2n6wQfxDE=/$value"
+      }
+    }
+  },
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"downloadUrl\":\"https://mcp.corp.envirokinetics.com/attachment?t=M8CHJJ8bav6PbAobIA8AZcLYyQNaAQGpxrKFaaU8eRU&dgk=1&dgx=1893456120&dgs=eccCbjO-sj0HSFTZe5LvE_dJZMt7S5Gyr_eQwsQ8Xug\",\"name\":\"Quotation Q-1042 Rev B.pdf\",\"size\":284117,\"contentType\":\"application/pdf\",\"expiresAt\":\"2030-01-01T00:02:00.000Z\",\"singleUse\":true,\"note\":\"Served by this server, not by Microsoft Graph. Valid for one fetch until it expires.\"}"
+      }
+    ]
+  },
+  "decoded": {
+    "downloadUrl": "https://mcp.corp.envirokinetics.com/attachment?t=M8CHJJ8bav6PbAobIA8AZcLYyQNaAQGpxrKFaaU8eRU&dgk=1&dgx=1893456120&dgs=eccCbjO-sj0HSFTZe5LvE_dJZMt7S5Gyr_eQwsQ8Xug",
+    "name": "Quotation Q-1042 Rev B.pdf",
+    "size": 284117,
+    "contentType": "application/pdf",
+    "expiresAt": "2030-01-01T00:02:00.000Z",
+    "singleUse": true,
+    "note": "Served by this server, not by Microsoft Graph. Valid for one fetch until it expires."
+  },
+  "clock": {
+    "now": "2030-01-01T00:00:00.000Z",
+    "nowEpoch": 1893456000
+  },
+  "notes": "Same ticket shape as the direct call when dispatched through execute-tool."
+}
