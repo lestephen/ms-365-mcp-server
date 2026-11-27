@@ -74,7 +74,9 @@ const UPDATE = process.env.UPDATE_CONTRACTS === '1';
 const NOW = '2030-01-01T00:00:00.000Z';
 const NOW_EPOCH = Math.floor(Date.parse(NOW) / 1000);
 
-// Production deployment flags (EnviroKinetics/ms365-mcp infrastructure/k8s/deployment.yaml).
+// Production deployment flags, copied by hand from EnviroKinetics/ms365-mcp
+// infrastructure/k8s/deployment.yaml. Nothing checks the copy: update it, and regenerate,
+// whenever that file's server flags change.
 const ATTACHMENT_URL_BASE = 'https://mcp.corp.envirokinetics.com';
 const ATTACHMENT_URL_KEY = 'consumer-contract-fixed-hmac-key-not-a-secret';
 const BLOCKED_TOOLS =
@@ -774,6 +776,12 @@ describe('consumer contract', () => {
     const fullTools = (await fullRegistration.listTools()).tools;
     for (const name of SCHEMA_TOOLS) {
       const nonEager = NON_EAGER_SCHEMA_TOOLS.has(name);
+      if (nonEager) {
+        expect(
+          productionTools.find((t) => t.name === name),
+          `${name} is now eager in production; move it out of NON_EAGER_SCHEMA_TOOLS`
+        ).toBeUndefined();
+      }
       const tool = (nonEager ? fullTools : productionTools).find((t) => t.name === name);
       expect(
         tool,

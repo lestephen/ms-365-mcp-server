@@ -14,6 +14,10 @@ answers Graph requests from a mocked `fetch` with Microsoft Graph sample payload
 calls each tool from an in-memory MCP client. Each `results/<case>.json` therefore holds
 the complete `tools/call` result exactly as an MCP client receives it.
 
+The production flags are a hand copy of the harness's `infrastructure/k8s/deployment.yaml`
+in `EnviroKinetics/ms365-mcp`. Nothing checks the copy, so update the generator and
+regenerate whenever those flags change.
+
 ## Layout
 
 - `manifest.json`: contract version, the generator, and the case and schema lists.
