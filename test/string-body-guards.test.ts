@@ -114,15 +114,65 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     }
   });
 
-  it('forwards a non-JSON string subrequest body unchanged', async () => {
+  it.each([
+    [
+      'a base64 drive upload',
+      'PUT',
+      '/me/drive/root:/notes.txt:/content',
+      'text/plain',
+      'aGVsbG8=',
+    ],
+    [
+      'a base64 body with a non-JSON content type',
+      'POST',
+      '/me/onenote/sections/1-abc/pages',
+      'text/html',
+      'PGh0bWw+PC9odG1sPg==',
+    ],
+    [
+      'a base64 attachment under a JSON content type',
+      'POST',
+      '/me/messages/AAMkAGI2/attachments',
+      'application/json',
+      Buffer.from(JSON.stringify(fileAttachment)).toString('base64'),
+    ],
+  ])(
+    'refuses a graph-batch subrequest carrying %s (#93)',
+    async (_label, method, url, type, body) => {
+      const batch = {
+        requests: [
+          { id: '1', method: 'GET', url: '/me' },
+          { id: '2', method, url, headers: { 'Content-Type': type }, body },
+        ],
+      };
+      for (const outer of [batch, JSON.stringify(batch)]) {
+        const { client, graphRequest } = await connect();
+        const { result, payload } = await executeTool(client, 'graph-batch', { body: outer });
+        expect(result.isError).toBe(true);
+        expect(payload.error).toBe('opaque_subrequest_body_refused');
+        expect(payload.subrequests).toEqual(['2']);
+        expect(graphRequest).not.toHaveBeenCalled();
+      }
+    }
+  );
+
+  it('still forwards object and JSON-string subrequest bodies as written', async () => {
+    const event = { subject: 'Sync', start: { dateTime: '2026-12-01T10:00:00', timeZone: 'UTC' } };
     const batch = {
       requests: [
         {
           id: '1',
           method: 'POST',
-          url: '/me/onenote/sections/1-abc/pages',
-          headers: { 'Content-Type': 'text/html' },
-          body: 'PGh0bWw+PC9odG1sPg==',
+          url: '/me/events',
+          headers: { 'Content-Type': 'application/json' },
+          body: event,
+        },
+        {
+          id: '2',
+          method: 'POST',
+          url: '/me/events',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(event),
         },
       ],
     };
@@ -131,7 +181,16 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     expect(result.isError).toBeFalsy();
     expect(graphRequest).toHaveBeenCalledTimes(1);
     const sent = JSON.parse(graphRequest.mock.calls[0][1].body as string);
-    expect(sent.requests[0].body).toBe('PGh0bWw+PC9odG1sPg==');
+    expect(sent.requests[0].body).toEqual(event);
+    expect(sent.requests[1].body).toBe(JSON.stringify(event));
+  });
+
+  it('forwards a top-level non-JSON string body unchanged, as upstream does', async () => {
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'create-draft-email', { body: 'not json' });
+    expect(result.isError).toBeFalsy();
+    expect(graphRequest).toHaveBeenCalledTimes(1);
+    expect(graphRequest.mock.calls[0][1].body).toBe('not json');
   });
 
   it('sends a valid string body exactly as the equivalent object body', async () => {

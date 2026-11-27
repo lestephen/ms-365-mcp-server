@@ -3379,6 +3379,25 @@ function withDecodedSubrequestBodies(body: unknown): unknown {
 }
 
 /**
+ * Ids of $batch subrequests whose body is a string that does not encode a JSON object or
+ * array. Graph's batch reader decodes such a string (base64 is the documented form for
+ * non-JSON bodies) before dispatch, so the payload guards cannot see what Graph will act
+ * on: a base64 file upload or an attachment carrying contentBytes (#93). These are refused
+ * whatever their Content-Type. A top-level request body is not affected by this rule.
+ */
+function findOpaqueSubrequestBodies(body: unknown): string[] {
+  if (!isPlainObject(body) || !Array.isArray(body.requests)) return [];
+  const ids: string[] = [];
+  body.requests.forEach((entry: unknown, index: number) => {
+    if (!isPlainObject(entry) || typeof entry.body !== 'string') return;
+    if (decodeJsonObject(entry.body) !== undefined) return;
+    const id = entry.id;
+    ids.push(typeof id === 'string' || typeof id === 'number' ? String(id) : `index ${index}`);
+  });
+  return ids;
+}
+
+/**
  * graph-batch forwards whatever subrequest URLs it is handed, so the user-field allowlist
  * has to be applied to each one rather than to the batch as a whole. Returns the fields
  * kept per subrequest id, which is what the matching subresponses are then projected to.
@@ -4048,6 +4067,38 @@ async function executeGraphTool(
     // too.
     // graph-batch subrequest bodies can themselves be JSON strings; guard the decoded view.
     const guardBody = tool.path === '/$batch' ? withDecodedSubrequestBodies(body) : body;
+    // A subrequest body the guards cannot read is refused outright rather than forwarded
+    // for Graph to decode behind them (#93).
+    const opaqueSubrequests = tool.path === '/$batch' ? findOpaqueSubrequestBodies(guardBody) : [];
+    if (opaqueSubrequests.length > 0) {
+      recordBlockedOperation(tool.alias, route);
+      logger.warn(
+        `Refusing ${tool.alias}: subrequest(s) ${opaqueSubrequests.join(', ')} carry a string body that is not JSON`
+      );
+      return finish(
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'opaque_subrequest_body_refused',
+                tool: tool.alias,
+                subrequests: opaqueSubrequests,
+                message:
+                  'This server refuses graph-batch subrequests whose body is a string that is ' +
+                  'not JSON (for example base64), because Graph decodes it where the ' +
+                  'payload checks cannot see it. Send a JSON object as the subrequest body. ' +
+                  'For file bytes, create an upload session and PUT the bytes from disk: ' +
+                  'create-upload-session for drive files, ' +
+                  'create-mail-attachment-upload-session for Outlook attachments.',
+              }),
+            },
+          ],
+          isError: true,
+        },
+        'blocked'
+      );
+    }
     const inlineBytes = findInlineByteFields(guardBody).filter(
       (hit) => !isAllowedInlineBytes(tool.alias, hit.path)
     );
