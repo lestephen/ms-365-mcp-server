@@ -279,6 +279,32 @@ describe('batch subrequest keys are read the way Graph reads them (#96)', () => 
     const body = { requests: [{ id: '1', method: 'GET', url: '/me' }] };
     expect(canonicalizeBatchBody(body)).toEqual({ body });
   });
+
+  it.each(['X-HTTP-Method-Override', 'x-http-method', ' X-Method-Override '])(
+    'refuses a subrequest carrying a %s header',
+    (header) => {
+      const canonical = canonicalizeBatchBody({
+        requests: [{ id: '1', method: 'GET', url: '/me/sendMail', headers: { [header]: 'POST' } }],
+      });
+      expect(canonical).toEqual({ error: expect.stringContaining('header') });
+    }
+  );
+
+  it('does not let a __proto__ key supply an inherited requests array', () => {
+    const envelope = JSON.parse(
+      '{"__proto__":{"requests":[{"id":"1","method":"DELETE","url":"/me/events/e1"}]}}'
+    );
+    const canonical = canonicalizeBatchBody(envelope) as { body: Record<string, unknown> };
+    expect(Object.hasOwn(canonical.body, 'requests')).toBe(false);
+    expect(JSON.parse(JSON.stringify(canonical.body)).requests).toBeUndefined();
+  });
+
+  it('keeps a subrequest key named like an Object.prototype member as written', () => {
+    const canonical = canonicalizeBatchBody({
+      requests: [{ id: '1', method: 'GET', url: '/me', constructor: 'x' }],
+    }) as { body: { requests: Array<Record<string, unknown>> } };
+    expect(canonical.body.requests[0].constructor).toBe('x');
+  });
 });
 
 describe('blocked writes reached through another path are refused (#95)', () => {

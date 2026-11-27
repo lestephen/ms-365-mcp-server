@@ -198,7 +198,9 @@ export type CanonicalBatch = { body: unknown } | { error: string };
  */
 export function canonicalizeBatchBody(body: unknown): CanonicalBatch {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { body };
-  const top: Record<string, unknown> = {};
+  // Null-prototype accumulators: a caller key named `__proto__` must stay an ordinary
+  // property, not replace the prototype and supply an inherited `requests` array.
+  const top: Record<string, unknown> = Object.create(null);
   let requestsKey: string | undefined;
   for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
     if (key.toLowerCase() === 'requests') {
@@ -211,17 +213,20 @@ export function canonicalizeBatchBody(body: unknown): CanonicalBatch {
       top[key] = value;
     }
   }
-  if (!Array.isArray(top.requests)) return { body: top };
+  if (!Array.isArray(top.requests)) return { body: { ...top } };
 
   const requests: unknown[] = [];
   for (const [index, entry] of (top.requests as unknown[]).entries()) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       return { error: `subrequest at index ${index} is not an object` };
     }
-    const canonical: Record<string, unknown> = {};
+    const canonical: Record<string, unknown> = Object.create(null);
     for (const [key, value] of Object.entries(entry as Record<string, unknown>)) {
-      const name = CANONICAL_SUBREQUEST_KEYS[key.toLowerCase()] ?? key;
-      if (Object.prototype.hasOwnProperty.call(canonical, name)) {
+      const lower = key.toLowerCase();
+      const name = Object.hasOwn(CANONICAL_SUBREQUEST_KEYS, lower)
+        ? CANONICAL_SUBREQUEST_KEYS[lower]
+        : key;
+      if (Object.hasOwn(canonical, name)) {
         return {
           error: `subrequest at index ${index} spells "${name}" more than once in different cases`,
         };
@@ -231,9 +236,35 @@ export function canonicalizeBatchBody(body: unknown): CanonicalBatch {
     if (typeof canonical.method !== 'string' || typeof canonical.url !== 'string') {
       return { error: `subrequest at index ${index} has no string method and url` };
     }
-    requests.push(canonical);
+    const override = methodOverrideHeader(canonical.headers);
+    if (override !== undefined) {
+      return {
+        error:
+          `subrequest at index ${index} carries a ${override} header, and the guards ` +
+          'check only the method property',
+      };
+    }
+    requests.push({ ...canonical });
   }
   return { body: { ...top, requests } };
+}
+
+/**
+ * Headers some HTTP stacks read as the real method. Graph's support for them inside a
+ * batch was not verified (probing would need a non-GET request), so a subrequest carrying
+ * one is refused: the method the guards read must be the only method.
+ */
+const METHOD_OVERRIDE_HEADERS = new Set([
+  'x-http-method-override',
+  'x-http-method',
+  'x-method-override',
+]);
+
+function methodOverrideHeader(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined;
+  return Object.keys(headers).find((name) =>
+    METHOD_OVERRIDE_HEADERS.has(name.trim().toLowerCase())
+  );
 }
 
 /**
