@@ -3328,6 +3328,26 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Whether an endpoint sends its body to Graph as JSON (not binary, not text/html). */
+function sendsJsonBody(
+  tool: { requestFormat?: string },
+  config: { contentType?: string } | undefined
+): boolean {
+  return tool.requestFormat !== 'binary' && config?.contentType !== 'text/html';
+}
+
+/** The object or array a JSON string encodes, or undefined for anything else. */
+function decodeJsonObject(value: string): Record<string, unknown> | unknown[] | undefined {
+  try {
+    const decoded: unknown = JSON.parse(value);
+    return decoded !== null && typeof decoded === 'object'
+      ? (decoded as Record<string, unknown> | unknown[])
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * graph-batch forwards whatever subrequest URLs it is handed, so the user-field allowlist
  * has to be applied to each one rather than to the batch as a whole. Returns the fields
@@ -3763,11 +3783,18 @@ async function executeGraphTool(
             }
             break;
 
-          case 'Body':
+          case 'Body': {
+            // A body sent as a JSON-encoded string (execute-tool skips zod) is decoded
+            // first, so the schema repair below and the payload guards see the object the
+            // caller meant, not a string they cannot inspect (#92).
+            let bodyValue: unknown = paramValue;
+            if (typeof paramValue === 'string' && sendsJsonBody(tool, config)) {
+              bodyValue = decodeJsonObject(paramValue) ?? paramValue;
+            }
             if (paramDef.schema) {
-              const parseResult = paramDef.schema.safeParse(paramValue);
+              const parseResult = paramDef.schema.safeParse(bodyValue);
               if (!parseResult.success) {
-                const wrapped = { [paramName]: paramValue };
+                const wrapped = { [paramName]: bodyValue };
                 const wrappedResult = paramDef.schema.safeParse(wrapped);
                 if (wrappedResult.success) {
                   logger.info(
@@ -3776,15 +3803,16 @@ async function executeGraphTool(
                   body = wrapped;
                   bodyRepaired = true;
                 } else {
-                  body = paramValue;
+                  body = bodyValue;
                 }
               } else {
-                body = paramValue;
+                body = bodyValue;
               }
             } else {
-              body = paramValue;
+              body = bodyValue;
             }
             break;
+          }
 
           case 'Header':
             headers[fixedParamName] = `${paramValue}`;
@@ -3964,6 +3992,18 @@ async function executeGraphTool(
         };
       }
       body = rewritten.body;
+    }
+    // A JSON request body sent as a string is decoded here, before any guard runs.
+    // execute-tool skips the tool's zod schema, so `body: "{...}"` reaches this point
+    // intact, and it was then sent to Graph verbatim as application/json, where Graph
+    // decodes it. The payload guards below walk objects, so a string body slipped past
+    // both of them: a graph-batch carrying POST /me/sendMail, and an attachment carrying
+    // contentBytes (EnviroKinetics/ms365-mcp#92). Guard what Graph will read: parse the
+    // string into the object or array it encodes. A string that is not JSON for an object
+    // or array is forwarded unchanged, as upstream does; Graph cannot act on it.
+    // Binary uploads and text/html bodies are strings by design and are left alone.
+    if (typeof body === 'string' && sendsJsonBody(tool, config)) {
+      body = decodeJsonObject(body) ?? body;
     }
     // A blocked tool is unreachable by name, but graph-batch carries arbitrary
     // method/url subrequests, so the operation itself has to be checked (#24). Inspect
