@@ -648,7 +648,7 @@ class GraphClient {
   async downloadToBuffer(
     endpoint: string,
     maximumBytes: number,
-    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion'> = {}
+    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion' | 'headers'> = {}
   ): Promise<GraphBufferResult> {
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
       throw new Error('Maximum download size must be a positive integer');
