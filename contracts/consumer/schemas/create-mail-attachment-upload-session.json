@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "properties": {
+    "body": {
+      "type": "object",
+      "properties": {
+        "AttachmentItem": {
+          "type": "object",
+          "properties": {
+            "attachmentType": {
+              "type": "string",
+              "enum": [
+                "file",
+                "item",
+                "reference"
+              ]
+            },
+            "contentId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The CID or Content-Id of the attachment for referencing for the in-line attachments using the <img src='cid:contentId'> tag in HTML messages. Optional."
+            },
+            "contentType": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The nature of the data in the attachment. Optional."
+            },
+            "isInline": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "true if the attachment is an inline attachment; otherwise, false. Optional."
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The display name of the attachment. This can be a descriptive string and doesn't have to be the actual file name. Required."
+            },
+            "size": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "The length of the attachment in bytes. Required."
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "messageId": {
+      "type": "string",
+      "description": "Value for the 'messageId' path segment. Pass it under the name 'messageId', not as 'id'. Use the 'id' field of the message object as returned by Microsoft Graph."
+    },
+    "includeHeaders": {
+      "description": "Include response headers (including ETag) in the response metadata",
+      "type": "boolean"
+    },
+    "excludeResponse": {
+      "description": "Exclude the full response body and only return success or failure indication",
+      "type": "boolean"
+    },
+    "confirm": {
+      "description": "For destructive operations when the confirm gate is enabled (MS365_MCP_REQUIRE_CONFIRM=true; off by default). Set to true only after the user has explicitly approved this action. When the gate is on, calls without confirm: true return { error: \"confirmation_required\" } without touching user data.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "body",
+    "messageId"
+  ],
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": true
+}
