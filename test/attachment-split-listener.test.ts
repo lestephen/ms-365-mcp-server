@@ -34,6 +34,8 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import MicrosoftGraphServer, {
+  DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS,
+  parseAttachmentRequestTimeout,
   parseAttachmentHostOption,
   parseAttachmentPortOption,
 } from '../src/server.js';
@@ -113,6 +115,7 @@ describe('--attachment-port (split attachment listener)', () => {
     delete process.env.MS365_MCP_ATTACHMENT_PORT;
     delete process.env.MS365_MCP_ATTACHMENT_HOST;
     delete process.env.MS365_MCP_ATTACHMENT_URL_KEY_FILE;
+    delete process.env.MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS;
     process.env.MS365_MCP_ATTACHMENT_URL_KEY = 'shared-hmac-key';
     // Graph is never dialled; every case either redeems a ticket against these
     // stubs or never gets as far as the handler. makeRequest answers the check
@@ -692,6 +695,57 @@ describe('--attachment-port (split attachment listener)', () => {
     });
   });
 
+  describe('request timeout on the listener that serves /attachment (#89)', () => {
+    // Node cuts a request whose body has not fully arrived after requestTimeout
+    // (300 s by default), which a 150 MB get-upload-url PUT on a slow link exceeds.
+    function timeouts(server: MicrosoftGraphServer): number[] {
+      return (server as unknown as { httpServers: Server[] }).httpServers.map(
+        (listener) => listener.requestTimeout
+      );
+    }
+
+    it('raises it on the shared listener when attachment URLs are on', async () => {
+      const [mcpPort] = await reserveFreePorts(1);
+      process.env.MS365_MCP_ATTACHMENT_URL_BASE = `http://127.0.0.1:${mcpPort}`;
+      const server = await start({
+        http: `127.0.0.1:${mcpPort}`,
+        trustProxyAuth: true,
+        enableAttachmentUrls: true,
+      });
+      expect(timeouts(server)).toEqual([DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS]);
+    });
+
+    it('raises it only on the dedicated listener when the route is split off', async () => {
+      const [mcpPort, attachmentPort] = await reserveFreePorts(2);
+      process.env.MS365_MCP_ATTACHMENT_URL_BASE = `http://127.0.0.1:${attachmentPort}`;
+      process.env.MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS = '1200000';
+      const server = await start({
+        http: `127.0.0.1:${mcpPort}`,
+        trustProxyAuth: true,
+        enableAttachmentUrls: true,
+        attachmentPort: String(attachmentPort),
+      });
+      const nodeDefault = createServer().requestTimeout;
+      expect(timeouts(server)).toEqual([nodeDefault, 1_200_000]);
+    });
+
+    it("leaves Node's default when attachment URLs are off", async () => {
+      const [mcpPort] = await reserveFreePorts(1);
+      process.env.MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS = '1200000';
+      const server = await start({ http: `127.0.0.1:${mcpPort}`, trustProxyAuth: true });
+      expect(timeouts(server)).toEqual([createServer().requestTimeout]);
+    });
+
+    it('refuses to start on a malformed value instead of keeping the 300 s default', async () => {
+      const [mcpPort] = await reserveFreePorts(1);
+      process.env.MS365_MCP_ATTACHMENT_URL_BASE = `http://127.0.0.1:${mcpPort}`;
+      process.env.MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS = '15m';
+      await expect(
+        start({ http: `127.0.0.1:${mcpPort}`, trustProxyAuth: true, enableAttachmentUrls: true })
+      ).rejects.toThrow(/MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS/);
+    });
+  });
+
   describe('shutdown', () => {
     it('closes both listeners', async () => {
       const [mcpPort, attachmentPort] = await reserveFreePorts(2);
@@ -886,5 +940,36 @@ describe('parseAttachmentHostOption', () => {
   it('names both the flag and the env var, since either could have supplied it', () => {
     expect(() => parseAttachmentHostOption('nope!')).toThrow(/--attachment-host/);
     expect(() => parseAttachmentHostOption('nope!')).toThrow(/MS365_MCP_ATTACHMENT_HOST/);
+  });
+});
+
+describe('parseAttachmentRequestTimeout', () => {
+  it('defaults to 900 s, the broker allowance for /attachment', () => {
+    expect(parseAttachmentRequestTimeout(undefined)).toBe(900_000);
+    expect(parseAttachmentRequestTimeout('')).toBe(900_000);
+  });
+
+  it('accepts 0 (no limit) and integers within the bounds', () => {
+    expect(parseAttachmentRequestTimeout('0')).toBe(0);
+    expect(parseAttachmentRequestTimeout('60000')).toBe(60_000);
+    expect(parseAttachmentRequestTimeout('1800000')).toBe(1_800_000);
+    expect(parseAttachmentRequestTimeout('2147483647')).toBe(2_147_483_647);
+  });
+
+  it.each([
+    '-1',
+    '1.5',
+    '15m',
+    ' 900000',
+    '1e6',
+    '1',
+    '59999',
+    '2147483648',
+    '4294967296',
+    '99999999999999999999',
+  ])('refuses %j', (value) => {
+    expect(() => parseAttachmentRequestTimeout(value)).toThrow(
+      /MS365_MCP_ATTACHMENT_REQUEST_TIMEOUT_MS/
+    );
   });
 });
