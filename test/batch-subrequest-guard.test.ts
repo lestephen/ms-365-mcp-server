@@ -301,6 +301,19 @@ describe('blocked writes reached through another path are refused (#95)', () => 
     ['PUT', '/sites/s1/drive/items/abc/content'],
     ['PUT', '/users/u1/photo/$value'],
     ['post', '/ME/MESSAGES/AAMk/SEND'],
+    // Spellings Graph routes to the same action (verified live with GET probes, which
+    // return 405 "An action can only be invoked as a 'POST' request").
+    ['POST', '/me/sendMail()'],
+    ['POST', '/me/sendMail( )'],
+    ['POST', '/me/sendMail%28%29'],
+    ['POST', '/me/sendMail()/'],
+    ['POST', '/me/graph.sendMail'],
+    ['POST', '/me/graph.sendMail()'],
+    ['POST', '/me/microsoft.graph.sendMail(\t)'],
+    ['POST', '/me/messages/AAMk/send()'],
+    ['POST', '/me/messages/AAMk/graph.send'],
+    ['POST', '/me/events/e1/graph.forward'],
+    ['POST', '/users/u1/sendMail()'],
   ])('refuses %s %s', (method, url) => {
     expect(check(method, url)).toHaveLength(1);
   });
@@ -313,6 +326,7 @@ describe('blocked writes reached through another path are refused (#95)', () => 
     ['GET', '/me/messages/AAMk/send'],
     ['PATCH', '/me/messages/AAMk'],
     ['POST', '/me/messages'],
+    ['POST', '/me/messages/AAMk/graph.createReply()'],
   ])('allows %s %s', (method, url) => {
     expect(check(method, url)).toEqual([]);
   });

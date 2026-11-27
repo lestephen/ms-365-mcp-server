@@ -73,7 +73,12 @@ function pathSegmentToRegex(segment: string): string {
 
 /** `/me/messages/{message-id}/reply` -> anchored regex with one segment per parameter. */
 function pathPatternToRegex(pathPattern: string): RegExp {
-  const escaped = pathPattern.split('/').map(pathSegmentToRegex).join('/');
+  // Segments are canonicalized like request paths, so `microsoft.graph.x()` in the
+  // catalogue matches however the caller spells it.
+  const escaped = pathPattern
+    .split('/')
+    .map((segment) => pathSegmentToRegex(canonicalSegment(segment)))
+    .join('/');
   // Anchored at both ends so a deeper path under a blocked one is not mistaken for it.
   return new RegExp(`^${escaped}$`, 'i');
 }
@@ -103,9 +108,10 @@ export function buildBlockedOperationMatchers(
     .filter((endpoint) => blocked.test(endpoint.toolName))
     .map((endpoint) => {
       const last = endpoint.pathPattern.split('/').filter(Boolean).pop() ?? '';
-      const literal = /[{}:()=']/.test(last)
-        ? undefined
-        : withoutGraphNamespace(last).toLowerCase();
+      const literal =
+        /[{}:=']/.test(last) || /\((?!\s*\)$)/.test(last)
+          ? undefined
+          : canonicalSegment(last).toLowerCase();
       return {
         toolName: endpoint.toolName,
         method: endpoint.method.toUpperCase(),
@@ -156,7 +162,7 @@ function normalizeSubrequestUrl(url: string): NormalizedSubrequestUrl {
       canonicalSegments.pop();
       continue;
     }
-    canonicalSegments.push(withoutGraphNamespace(decoded));
+    canonicalSegments.push(canonicalSegment(decoded));
   }
 
   // Unconditionally, not just for absolute URLs. A relative `/v1.0/me/sendMail` is a
@@ -230,14 +236,18 @@ export function canonicalizeBatchBody(body: unknown): CanonicalBatch {
   return { body: { ...top, requests } };
 }
 
-/** `microsoft.graph.send` and `send` name the same Graph action; compare without the namespace. */
-function withoutGraphNamespace(segment: string): string {
-  return segment.replace(/^microsoft\.graph\./i, '');
+/**
+ * One spelling for a path segment Graph routes several ways. Verified against live Graph:
+ * `send`, `microsoft.graph.send`, `graph.send` (the CSDL namespace alias) and `send()`,
+ * `send( )` all reach the same action, so the guard compares them as one.
+ */
+function canonicalSegment(segment: string): string {
+  return segment.replace(/^(?:microsoft\.graph|graph)\./i, '').replace(/(?:\(\s*\))+$/, '');
 }
 
 function lastSegment(resource: string): string {
   const segments = resource.split('/').filter(Boolean);
-  return withoutGraphNamespace(segments[segments.length - 1] ?? '').toLowerCase();
+  return canonicalSegment(segments[segments.length - 1] ?? '').toLowerCase();
 }
 
 /**
