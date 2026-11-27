@@ -136,6 +136,13 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
       'application/json',
       Buffer.from(JSON.stringify(fileAttachment)).toString('base64'),
     ],
+    [
+      'a lenient-JSON attachment Graph would decode',
+      'POST',
+      '/me/messages/AAMkAGI2/attachments',
+      'application/json',
+      "{'@odata.type':'#microsoft.graph.fileAttachment',name:'a.pdf',contentBytes:'JVBERi0xLjQK'}",
+    ],
   ])(
     'refuses a graph-batch subrequest carrying %s (#93)',
     async (_label, method, url, type, body) => {
