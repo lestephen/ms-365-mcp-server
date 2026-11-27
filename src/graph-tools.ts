@@ -3349,6 +3349,26 @@ function decodeJsonObject(value: string): Record<string, unknown> | unknown[] | 
 }
 
 /**
+ * The $batch body as the payload guards should see it: each subrequest body sent as a
+ * string that encodes a JSON object or array is decoded. Graph and the outbound signoff
+ * gate both read such a string as JSON, so a guard that walked only the string would miss
+ * a contentBytes inside it (#92). Only the guards' view changes; the body sent is left
+ * as the caller wrote it, so base64 and text subrequest bodies pass through unchanged.
+ */
+function withDecodedSubrequestBodies(body: unknown): unknown {
+  if (!isPlainObject(body) || !Array.isArray(body.requests)) return body;
+  let changed = false;
+  const requests = body.requests.map((entry) => {
+    if (!isPlainObject(entry) || typeof entry.body !== 'string') return entry;
+    const decoded = decodeJsonObject(entry.body);
+    if (decoded === undefined) return entry;
+    changed = true;
+    return { ...entry, body: decoded };
+  });
+  return changed ? { ...body, requests } : body;
+}
+
+/**
  * graph-batch forwards whatever subrequest URLs it is handed, so the user-field allowlist
  * has to be applied to each one rather than to the batch as a whole. Returns the fields
  * kept per subrequest id, which is what the matching subresponses are then projected to.
@@ -4016,7 +4036,9 @@ async function executeGraphTool(
     // a referenceAttachment has none and stays allowed, which name-blocking could not
     // express. Recursive, so a contentBytes inside a graph-batch subrequest is caught here
     // too.
-    const inlineBytes = findInlineByteFields(body).filter(
+    // graph-batch subrequest bodies can themselves be JSON strings; guard the decoded view.
+    const guardBody = tool.path === '/$batch' ? withDecodedSubrequestBodies(body) : body;
+    const inlineBytes = findInlineByteFields(guardBody).filter(
       (hit) => !isAllowedInlineBytes(tool.alias, hit.path)
     );
     if (inlineBytes.length > 0) {
@@ -4055,7 +4077,7 @@ async function executeGraphTool(
       recordBatchSubrequestsFor(body, blockedOperations);
     }
     if (blockedOperations.length > 0 && tool.path === '/$batch') {
-      const hits = findBlockedSubrequests(body, blockedOperations);
+      const hits = findBlockedSubrequests(guardBody, blockedOperations);
       if (hits.length > 0) {
         for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
         logger.warn(

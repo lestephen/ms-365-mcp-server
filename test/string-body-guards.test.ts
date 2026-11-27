@@ -93,6 +93,47 @@ describe('a JSON-string request body is guarded like an object body (#92)', () =
     expect(graphRequest).not.toHaveBeenCalled();
   });
 
+  it('refuses inline contentBytes in a graph-batch subrequest whose own body is a string', async () => {
+    const batch = {
+      requests: [
+        {
+          id: '1',
+          method: 'POST',
+          url: '/me/messages/AAMkAGI2/attachments',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fileAttachment),
+        },
+      ],
+    };
+    for (const body of [batch, JSON.stringify(batch)]) {
+      const { client, graphRequest } = await connect();
+      const { result, payload } = await executeTool(client, 'graph-batch', { body });
+      expect(result.isError).toBe(true);
+      expect(payload.error).toBe('inline_bytes_refused');
+      expect(graphRequest).not.toHaveBeenCalled();
+    }
+  });
+
+  it('forwards a non-JSON string subrequest body unchanged', async () => {
+    const batch = {
+      requests: [
+        {
+          id: '1',
+          method: 'PUT',
+          url: '/me/drive/root:/notes.txt:/content',
+          headers: { 'Content-Type': 'text/plain' },
+          body: 'aGVsbG8=',
+        },
+      ],
+    };
+    const { client, graphRequest } = await connect();
+    const { result } = await executeTool(client, 'graph-batch', { body: batch });
+    expect(result.isError).toBeFalsy();
+    expect(graphRequest).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(graphRequest.mock.calls[0][1].body as string);
+    expect(sent.requests[0].body).toBe('aGVsbG8=');
+  });
+
   it('sends a valid string body exactly as the equivalent object body', async () => {
     const draft = { subject: 'Hello', body: { contentType: 'Text', content: 'Hi' } };
     const asObject = await connect();
