@@ -896,7 +896,7 @@ When running as an MCP server, the following options can be used:
 
 The account tools (`login`, `logout`, `verify-login`, `list-accounts`, `select-account`, `remove-account`) follow the same filters: `--enabled-tools` applies to them, every `--preset` includes them, and `--read-only` or `MS365_MCP_OAUTH_TOKEN` keeps only `verify-login` and `list-accounts`.
 
-`--read-only` keeps `download-bytes-to-file` (stdio, or HTTP with `--http-local-file-tools`), since it only reads from Microsoft 365. It tells clients that it writes files (`readOnlyHint: false`), so they can ask before running it.
+`--read-only` leaves out `download-bytes-to-file` (stdio, or HTTP with `--http-local-file-tools`): it only reads from Microsoft 365, but it writes to the server's disk, so this fork keeps it out of the read-only surface. It tells clients that it writes files (`readOnlyHint: false`), so they can ask before running it.
 
 Environment variables:
 
