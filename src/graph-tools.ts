@@ -3336,6 +3336,67 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Whether an endpoint sends its body to Graph as JSON: not binary, and no other media type. */
+function sendsJsonBody(
+  tool: { requestFormat?: string },
+  config: { contentType?: string } | undefined
+): boolean {
+  if (tool.requestFormat === 'binary') return false;
+  const contentType = config?.contentType?.toLowerCase();
+  return contentType === undefined || contentType.startsWith('application/json');
+}
+
+/** The object or array a JSON string encodes, or undefined for anything else. */
+function decodeJsonObject(value: string): Record<string, unknown> | unknown[] | undefined {
+  try {
+    const decoded: unknown = JSON.parse(value);
+    return decoded !== null && typeof decoded === 'object'
+      ? (decoded as Record<string, unknown> | unknown[])
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The $batch body as the payload guards should see it: each subrequest body sent as a
+ * string that encodes a JSON object or array is decoded. Graph and the outbound signoff
+ * gate both read such a string as JSON, so a guard that walked only the string would miss
+ * a contentBytes inside it (#92). Only the guards' view changes; the body sent is left
+ * as the caller wrote it, so base64 and text subrequest bodies pass through unchanged.
+ */
+function withDecodedSubrequestBodies(body: unknown): unknown {
+  if (!isPlainObject(body) || !Array.isArray(body.requests)) return body;
+  let changed = false;
+  const requests = body.requests.map((entry) => {
+    if (!isPlainObject(entry) || typeof entry.body !== 'string') return entry;
+    const decoded = decodeJsonObject(entry.body);
+    if (decoded === undefined) return entry;
+    changed = true;
+    return { ...entry, body: decoded };
+  });
+  return changed ? { ...body, requests } : body;
+}
+
+/**
+ * Ids of $batch subrequests whose body is a string that does not encode a JSON object or
+ * array. Graph's batch reader decodes such a string (base64 is the documented form for
+ * non-JSON bodies) before dispatch, so the payload guards cannot see what Graph will act
+ * on: a base64 file upload or an attachment carrying contentBytes (#93). These are refused
+ * whatever their Content-Type. A top-level request body is not affected by this rule.
+ */
+function findOpaqueSubrequestBodies(body: unknown): string[] {
+  if (!isPlainObject(body) || !Array.isArray(body.requests)) return [];
+  const ids: string[] = [];
+  body.requests.forEach((entry: unknown, index: number) => {
+    if (!isPlainObject(entry) || typeof entry.body !== 'string') return;
+    if (decodeJsonObject(entry.body) !== undefined) return;
+    const id = entry.id;
+    ids.push(typeof id === 'string' || typeof id === 'number' ? String(id) : `index ${index}`);
+  });
+  return ids;
+}
+
 /**
  * graph-batch forwards whatever subrequest URLs it is handed, so the user-field allowlist
  * has to be applied to each one rather than to the batch as a whole. Returns the fields
@@ -3771,11 +3832,18 @@ async function executeGraphTool(
             }
             break;
 
-          case 'Body':
+          case 'Body': {
+            // A body sent as a JSON-encoded string (execute-tool skips zod) is decoded
+            // first, so the schema repair below and the payload guards see the object the
+            // caller meant, not a string they cannot inspect (#92).
+            let bodyValue: unknown = paramValue;
+            if (typeof paramValue === 'string' && sendsJsonBody(tool, config)) {
+              bodyValue = decodeJsonObject(paramValue) ?? paramValue;
+            }
             if (paramDef.schema) {
-              const parseResult = paramDef.schema.safeParse(paramValue);
+              const parseResult = paramDef.schema.safeParse(bodyValue);
               if (!parseResult.success) {
-                const wrapped = { [paramName]: paramValue };
+                const wrapped = { [paramName]: bodyValue };
                 const wrappedResult = paramDef.schema.safeParse(wrapped);
                 if (wrappedResult.success) {
                   logger.info(
@@ -3784,15 +3852,16 @@ async function executeGraphTool(
                   body = wrapped;
                   bodyRepaired = true;
                 } else {
-                  body = paramValue;
+                  body = bodyValue;
                 }
               } else {
-                body = paramValue;
+                body = bodyValue;
               }
             } else {
-              body = paramValue;
+              body = bodyValue;
             }
             break;
+          }
 
           case 'Header':
             headers[fixedParamName] = `${paramValue}`;
@@ -3973,6 +4042,18 @@ async function executeGraphTool(
       }
       body = rewritten.body;
     }
+    // A JSON request body sent as a string is decoded here, before any guard runs.
+    // execute-tool skips the tool's zod schema, so `body: "{...}"` reaches this point
+    // intact, and it was then sent to Graph verbatim as application/json, where Graph
+    // decodes it. The payload guards below walk objects, so a string body slipped past
+    // both of them: a graph-batch carrying POST /me/sendMail, and an attachment carrying
+    // contentBytes (EnviroKinetics/ms365-mcp#92). Guard what Graph will read: parse the
+    // string into the object or array it encodes. A string that is not JSON for an object
+    // or array is forwarded unchanged, as upstream does; Graph cannot act on it.
+    // Binary uploads and text/html bodies are strings by design and are left alone.
+    if (typeof body === 'string' && sendsJsonBody(tool, config)) {
+      body = decodeJsonObject(body) ?? body;
+    }
     // A blocked tool is unreachable by name, but graph-batch carries arbitrary
     // method/url subrequests, so the operation itself has to be checked (#24). Inspect
     // the normalized body, not params.body: passthrough clients may flatten requests to
@@ -3984,7 +4065,41 @@ async function executeGraphTool(
     // a referenceAttachment has none and stays allowed, which name-blocking could not
     // express. Recursive, so a contentBytes inside a graph-batch subrequest is caught here
     // too.
-    const inlineBytes = findInlineByteFields(body).filter(
+    // graph-batch subrequest bodies can themselves be JSON strings; guard the decoded view.
+    const guardBody = tool.path === '/$batch' ? withDecodedSubrequestBodies(body) : body;
+    // A subrequest body the guards cannot read is refused outright rather than forwarded
+    // for Graph to decode behind them (#93).
+    const opaqueSubrequests = tool.path === '/$batch' ? findOpaqueSubrequestBodies(guardBody) : [];
+    if (opaqueSubrequests.length > 0) {
+      recordBlockedOperation(tool.alias, route);
+      logger.warn(
+        `Refusing ${tool.alias}: subrequest(s) ${JSON.stringify(opaqueSubrequests)} carry a string body that is not JSON`
+      );
+      return finish(
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'opaque_subrequest_body_refused',
+                tool: tool.alias,
+                subrequests: opaqueSubrequests,
+                message:
+                  'This server refuses graph-batch subrequests whose body is a string that is ' +
+                  'not JSON (for example base64), because Graph decodes it where the ' +
+                  'payload checks cannot see it. Send a JSON object as the subrequest body. ' +
+                  'For file bytes, create an upload session and PUT the bytes from disk: ' +
+                  'create-upload-session for drive files, ' +
+                  'create-mail-attachment-upload-session for Outlook attachments.',
+              }),
+            },
+          ],
+          isError: true,
+        },
+        'blocked'
+      );
+    }
+    const inlineBytes = findInlineByteFields(guardBody).filter(
       (hit) => !isAllowedInlineBytes(tool.alias, hit.path)
     );
     if (inlineBytes.length > 0) {
@@ -4023,12 +4138,13 @@ async function executeGraphTool(
       recordBatchSubrequestsFor(body, blockedOperations);
     }
     if (blockedOperations.length > 0 && tool.path === '/$batch') {
-      const hits = findBlockedSubrequests(body, blockedOperations);
+      const hits = findBlockedSubrequests(guardBody, blockedOperations);
       if (hits.length > 0) {
         for (const hit of hits) recordBlockedOperation(hit.toolName, 'batch');
         logger.warn(
           `Refusing graph-batch: ${hits.length} subrequest(s) match blocked operations: ` +
-            hits.map((h) => `${h.method} ${h.url} (${h.toolName})`).join(', ')
+            // JSON-escaped: method and url are caller text and may carry line breaks.
+            hits.map((h) => JSON.stringify(`${h.method} ${h.url} (${h.toolName})`)).join(', ')
         );
         return finish(
           {
