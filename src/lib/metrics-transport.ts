@@ -120,9 +120,10 @@ function unknownToolName(outcome: {
  * advertising nothing (#34). They answer "what does this configuration cost a client
  * before any work happens", which is knowable at startup, so measure it then.
  *
- * Calls the SDK's tools/list handler directly, after the $ref normalizer is installed,
- * so the byte count is what a client actually receives rather than the pre-normalized
- * form. The transport observer still refines both on every real listing.
+ * Calls the SDK's tools/list handler directly. Input schemas are already in their served
+ * form (withServedInputSchema normalizes them at registration), so the byte count is what
+ * a client actually receives. The request-handler observer still refines both on every
+ * real listing.
  *
  * Once per process. In HTTP mode a server is constructed per request, so seeding on
  * every construction would re-serialize the whole surface on each one; the tool
