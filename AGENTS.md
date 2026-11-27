@@ -2,9 +2,8 @@
 
 This is EnviroKinetics' tracking fork of `Softeria/ms-365-mcp-server`. `main` is the EKI
 deployment branch: upstream merged in, plus a carried set of EKI changes. Releases are
-immutable tags `v<upstream base>-eki.<n>`, placed by hand on the reviewed commit on `main`
-(the merge commit of the PR), and pinned by the `EnviroKinetics/ms365-mcp` harness as its
-submodule gitlink. EKI tags are placed by hand; do not rely on upstream's semantic-release
+immutable tags `v<upstream base>-eki.<n>` that identify the exact reviewed server commit on
+`main`, the one the `EnviroKinetics/ms365-mcp` harness pins as its submodule gitlink. EKI tags are placed by hand; do not rely on upstream's semantic-release
 workflow for them.
 Upstream is merged with merge commits, not rebased or squashed, so upstream history stays an
 ancestor.
