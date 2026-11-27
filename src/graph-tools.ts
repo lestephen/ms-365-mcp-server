@@ -2017,7 +2017,14 @@ function withTransferList(
     }
     // Clients send '' or null for an optional field they leave empty.
     const mixed = Object.keys(params).filter(
-      (key) => key !== listKey && key !== 'account' && params[key] != null && params[key] !== ''
+      (key) =>
+        key !== listKey &&
+        // Call-level fields: account picks the mailbox, and confirm answers the
+        // MS365_MCP_REQUIRE_CONFIRM gate, which runs once before this list is split.
+        key !== 'account' &&
+        key !== 'confirm' &&
+        params[key] != null &&
+        params[key] !== ''
     );
     if (mixed.length > 0) {
       return listError(
@@ -2631,6 +2638,7 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
           try {
             const download = await graphClient.downloadToBuffer(canonicalTarget, maxInline, {
               accessToken: accountAccessToken,
+              ...(accept ? { headers: { Accept: accept } } : {}),
             });
             return {
               content: [

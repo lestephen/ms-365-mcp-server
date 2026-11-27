@@ -343,6 +343,15 @@ describe('several files in one call', () => {
     expect(store.size()).toBe(0);
   });
 
+  it('accepts a call-level confirm next to the list, as MS365_MCP_REQUIRE_CONFIRM needs', async () => {
+    const result = await upload.execute(
+      { files: [{ target: FOLDER, name: 'a.txt' }], confirm: true },
+      ctx()
+    );
+    expect(result.isError).toBeFalsy();
+    expect(parse(result).results[0].uploadUrl).toBeDefined();
+  });
+
   it('treats an empty list field as absent', async () => {
     const result = await download.execute(
       { target: '/drives/D1/items/A', targets: null },
